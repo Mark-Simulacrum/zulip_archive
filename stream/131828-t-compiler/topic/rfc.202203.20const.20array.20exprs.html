@@ -1,0 +1,1060 @@
+<html>
+<head><meta charset="utf-8"><title>rfc 2203 const array exprs · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html">rfc 2203 const array exprs</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="167115348"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167115348" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167115348">(Jun 02 2019 at 10:02)</a>:</h4>
+<p>hey <span class="user-mention" data-user-id="119009">@eddyb</span>, I've implemented the <a href="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914" target="_blank" title="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914">steps you wrote up here</a> and I've been trying to debug a few of the ICEs that have sprung up. Unfortunately, I've not been able to carve out much time for long debugging sessions as I'd have liked recently to tackle these failures. I was hoping you might have some thoughts on what the correct fix is (for the issues where I have an idea what's going wrong) and where I might go looking to fix the other problems.</p>
+<p>There are four distinct failures that I'm seeing:</p>
+<p><strong><code>ui/huge-array.rs</code></strong></p>
+<div class="codehilite"><pre><span></span>error: internal compiler error: src/librustc_mir/interpret/eval_context.rs:139: The type checker should prevent reading from a never-written local
+</pre></div>
+
+
+<p>Here's the function it fails in:</p>
+<div class="codehilite"><pre><span></span><span class="k">fn</span> <span class="nf">generic</span><span class="o">&lt;</span><span class="n">T</span>: <span class="nb">Copy</span><span class="o">&gt;</span><span class="p">(</span><span class="n">t</span>: <span class="nc">T</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">s</span>: <span class="p">[</span><span class="n">T</span><span class="p">;</span><span class="w"> </span><span class="mi">1518600000</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="n">t</span><span class="p">;</span><span class="w"> </span><span class="mi">1518600000</span><span class="p">];</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+<p>Thus far, I've spent most of my time digging into this error. It appears that the <code>qualify_consts</code> pass determines that <code>t</code> should be a candidate for promotion. Then when constructing the <code>promoted[0]</code> MIR, it eventually hits <a href="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/promote_consts.rs#L366-L368" target="_blank" title="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/promote_consts.rs#L366-L368">this line</a> where the <code>LocalKind</code> is an argument, so it stops. Then we end up with promoted MIR that looks like this:</p>
+<div class="codehilite"><pre><span></span>    bb0: {
+         _1 = _1;                         // bb0[0]: scope 0 at src/test/ui/huge-array.rs:8:31: 8:32
+         _0 = move _1;                    // bb0[1]: scope 0 at src/test/ui/huge-array.rs:8:30: 8:45
+         return;                          // bb0[2]: scope 0 at src/test/ui/huge-array.rs:8:30: 8:45
+     }
+</pre></div>
+
+
+<p>And that causes the ICE because <code>_1</code> is never written to. I've been working on the assumption that we're going wrong by considering the <code>t</code> a candidate, and after digging into the <code>IsNotImplicitlyPromotable::in_operand</code> check that we perform, I thought that the fix might be to consider the argument locals in the original MIR not implicitly promotable (and thus the <code>t</code> wouldn't be implicitly promotable either). I wasn't sure if this would have unintended consequences as I'm not that familiar with the const qualification/promotion code, so wanted to ask first.</p>
+<hr>
+<p><strong><code>ui/consts/rfc-2203-const-array-repeat-exprs/nll_borrowck.rs</code></strong></p>
+<div class="codehilite"><pre><span></span>error: internal compiler error: broken MIR in DefId(0:78 ~ nll_borrowck[317d]::non_constants[0]::no_impl_copy_empty_value_no_elements[0]) (NoSolution): could not prove Binder(TraitPredicate(&lt;std::option::Option&lt;Bar&gt; as
+ std::marker::Copy&gt;))
+  --&gt; /home/david/projects/rust/rust0/src/test/ui/consts/rfc-2203-const-array-repeat-exprs/nll_borrowck.rs:77:37
+   |
+LL |         let arr: [Option&lt;Bar&gt;; 0] = [x; 0];
+   |                                     ^^^^^^
+</pre></div>
+
+
+<p>(this test is one that I've added enumerating a bunch of the cases with repeat expressions)</p>
+<p>My understanding of this failure is that by disabling the check from <a href="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914" target="_blank" title="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914">step 1 of your instructions</a> (in your instructions you say <code>tcx.borrowck_mode() == BorrowckMode::Mir</code> but I think you meant <code>tcx.borrowck_mode() != BorrowckMode::Mir</code>). Where the <code>rustc_typeck</code> logic would previously have did the check for a type to be <code>Copy</code>, now it's getting to the Mir type check to do that, which I assume had a pre-existing bug for this case that just wasn't surfacing. I've not had time to really dig into this one.</p>
+<hr>
+<p><strong><code>ui/issues/issue-17913.rs</code></strong></p>
+<div class="codehilite"><pre><span></span><span class="gd">-       error: the type `[&amp;usize; N]` is too big for the current architecture</span>
+<span class="gi">+       error[E0080]: it is undefined behavior to use this value</span>
+<span class="gi">+         --&gt; $DIR/issue-17913.rs:11:1</span>
+<span class="gi">+          |</span>
+<span class="gi">+       LL | / fn main() {</span>
+<span class="gi">+       LL | |     let n = 0_usize;</span>
+<span class="gi">+       LL | |     let a: Box&lt;_&gt; = box [&amp;n; 0xF000000000000000_usize];</span>
+<span class="gi">+       LL | |     println!(&quot;{}&quot;, a[0xFFFFFF_usize]);</span>
+<span class="gi">+       LL | | }</span>
+<span class="gi">+          | |_^ type validation failed: encountered a pointer at .&lt;deref&gt;, but expected initialized plain (non-pointer) bytes</span>
+<span class="gi">+          |</span>
+<span class="gi">+          = note: The rules on what exactly is undefined behavior aren&#39;t clear, so this check might be overzealous. Please open an issue on the rust compiler repository if you believe it should not be considered undef</span>
+ined behavior
+2
+3       error: aborting due to previous error
+4
+
+<span class="gi">+       For more information about this error, try `rustc --explain E0080`.</span>
+5
+</pre></div>
+
+
+<p>I've not had time to dig into this error at all.</p>
+<hr>
+<p><strong><code>ui/nll/type-check-pointer-coercions.rs</code></strong></p>
+<div class="codehilite"><pre><span></span>50      LL |     x
+51         |     ^ returning this value requires that `&#39;a` must outlive `&#39;b`
+52
+<span class="gd">-       error: lifetime may not live long enough</span>
+<span class="gd">-         --&gt; $DIR/type-check-pointer-coercions.rs:24:5</span>
+<span class="gd">-          |</span>
+<span class="gd">-       LL | fn array_elem&lt;&#39;a, &#39;b&gt;(x: &amp;&#39;a i32) -&gt; *const &amp;&#39;b i32 {</span>
+<span class="gd">-          |               --  -- lifetime `&#39;b` defined here</span>
+<span class="gd">-          |               |</span>
+<span class="gd">-          |               lifetime `&#39;a` defined here</span>
+<span class="gd">-       ...</span>
+<span class="gd">-       LL |     y</span>
+<span class="gd">-          |     ^ returning this value requires that `&#39;a` must outlive `&#39;b`</span>
+<span class="gd">-</span>
+<span class="gd">-       error: lifetime may not live long enough</span>
+<span class="gd">-         --&gt; $DIR/type-check-pointer-coercions.rs:30:5</span>
+<span class="gd">-          |</span>
+<span class="gd">-       LL | fn array_coerce&lt;&#39;a, &#39;b&gt;(x: &amp;&#39;a i32) -&gt; *const [&amp;&#39;b i32; 3] {</span>
+<span class="gd">-          |                 --  -- lifetime `&#39;b` defined here</span>
+<span class="gd">-          |                 |</span>
+<span class="gd">-          |                 lifetime `&#39;a` defined here</span>
+<span class="gd">-       ...</span>
+<span class="gd">-       LL |     y</span>
+<span class="gd">-          |     ^ returning this value requires that `&#39;a` must outlive `&#39;b`</span>
+<span class="gd">-</span>
+<span class="gd">-       error: lifetime may not live long enough</span>
+<span class="gd">-         --&gt; $DIR/type-check-pointer-coercions.rs:36:5</span>
+<span class="gd">-          |</span>
+<span class="gd">-       LL | fn nested_array&lt;&#39;a, &#39;b&gt;(x: &amp;&#39;a i32) -&gt; *const [&amp;&#39;b i32; 2] {</span>
+<span class="gd">-          |                 --  -- lifetime `&#39;b` defined here</span>
+<span class="gd">-          |                 |</span>
+<span class="gd">-          |                 lifetime `&#39;a` defined here</span>
+<span class="gd">-       ...</span>
+<span class="gd">-       LL |     y</span>
+<span class="gd">-          |     ^ returning this value requires that `&#39;a` must outlive `&#39;b`</span>
+<span class="gd">-</span>
+<span class="gd">-       error: aborting due to 8 previous errors</span>
+<span class="gi">+       error: aborting due to 5 previous errors</span>
+87
+88
+</pre></div>
+
+
+<p>I've also not had time to dig into this.</p>
+
+
+
+<a name="167115352"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167115352" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167115352">(Jun 02 2019 at 10:02)</a>:</h4>
+<p>Sorry for the gigantic braindump.</p>
+
+
+
+<a name="167116027"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167116027" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167116027">(Jun 02 2019 at 10:23)</a>:</h4>
+<p>So, I can confirm that my theorized fix for the first issue fixes the problems with <code>ui/nll/type-check-pointer-coercions.rs</code> and <code>ui/huge-array.rs</code>.</p>
+
+
+
+<a name="167174375"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167174375" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167174375">(Jun 03 2019 at 10:17)</a>:</h4>
+<p>yeah <code>_1 = _1</code> is just broken</p>
+
+
+
+<a name="167174474"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167174474" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167174474">(Jun 03 2019 at 10:18)</a>:</h4>
+<p>the argument locals <em>should</em> already be marked as not implicitly promotable, I thought we even had bugs fixed that were like this (cc <span class="user-mention" data-user-id="124288">@oli</span>)</p>
+
+
+
+<a name="167174555"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167174555" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167174555">(Jun 03 2019 at 10:19)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> hang on, we do have this: <a href="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L650-L652" target="_blank" title="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L650-L652">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L650-L652</a></p>
+
+
+
+<a name="167174583"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167174583" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167174583">(Jun 03 2019 at 10:20)</a>:</h4>
+<p>Should I add <code>IsNotImplicitlyPromotable</code> in  that conditional?</p>
+
+
+
+<a name="167174811"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167174811" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167174811">(Jun 03 2019 at 10:22)</a>:</h4>
+<p>no</p>
+
+
+
+<a name="167174814"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167174814" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167174814">(Jun 03 2019 at 10:22)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> I misspoke in the suggestions</p>
+
+
+
+<a name="167174829"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167174829" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167174829">(Jun 03 2019 at 10:22)</a>:</h4>
+<p>It should be checking for <code>IsNotPromotable</code>? Rather than <code>IsNotImplicitlyPromotable</code>?</p>
+
+
+
+<a name="167174836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167174836" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167174836">(Jun 03 2019 at 10:22)</a>:</h4>
+<p>this is what it looks like for implicit promotion <a href="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L758-L760" target="_blank" title="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L758-L760">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L758-L760</a></p>
+
+
+
+<a name="167174839"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167174839" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167174839">(Jun 03 2019 at 10:22)</a>:</h4>
+<p>you should be checking <em>both</em></p>
+
+
+
+<a name="167175163"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175163" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175163">(Jun 03 2019 at 10:26)</a>:</h4>
+<p>Alright, that's building now.</p>
+
+
+
+<a name="167175720"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175720" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175720">(Jun 03 2019 at 10:32)</a>:</h4>
+<p>and you were right about the <code>==</code></p>
+
+
+
+<a name="167175723"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175723" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175723">(Jun 03 2019 at 10:32)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> I've edited <a href="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914" target="_blank" title="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914">https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914</a></p>
+
+
+
+<a name="167175732"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175732" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175732">(Jun 03 2019 at 10:32)</a>:</h4>
+<p>That fixed one of the other ICEs too.</p>
+
+
+
+<a name="167175764"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175764" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175764">(Jun 03 2019 at 10:33)</a>:</h4>
+<p>note that where I suggested to put <code>Rvalue::Repeat</code> handling in <code>qualify_consts</code> was wrong</p>
+
+
+
+<a name="167175787"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175787" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175787">(Jun 03 2019 at 10:33)</a>:</h4>
+<p>since <code>Rvalue::Ref</code> is handled in <code>assign</code>, so should this</p>
+
+
+
+<a name="167175862"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175862" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175862">(Jun 03 2019 at 10:34)</a>:</h4>
+<p>Cool, I'll make that change.</p>
+
+
+
+<a name="167175871"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175871" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175871">(Jun 03 2019 at 10:34)</a>:</h4>
+<p>so glad you're working on this :D</p>
+
+
+
+<a name="167175935"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175935" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175935">(Jun 03 2019 at 10:35)</a>:</h4>
+<p>This is the only failure that remains: <a href="https://gist.github.com/davidtwco/7c891eaf0030bd2cde80af37511d09ac" target="_blank" title="https://gist.github.com/davidtwco/7c891eaf0030bd2cde80af37511d09ac">https://gist.github.com/davidtwco/7c891eaf0030bd2cde80af37511d09ac</a></p>
+
+
+
+<a name="167175967"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175967" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175967">(Jun 03 2019 at 10:35)</a>:</h4>
+<p>so that is weird</p>
+
+
+
+<a name="167175970"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167175970" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167175970">(Jun 03 2019 at 10:35)</a>:</h4>
+<p>That being a test I added with every enumeration of copy/non-copy/const/non-const/etc.</p>
+
+
+
+<a name="167176108"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167176108" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167176108">(Jun 03 2019 at 10:37)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L519-L523" target="_blank" title="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L519-L523">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L519-L523</a></p>
+
+
+
+<a name="167176127"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167176127" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167176127">(Jun 03 2019 at 10:37)</a>:</h4>
+<p>this should already kick in if a <code>Copy</code> impl has lifetime bounds that can't be satisfied</p>
+
+
+
+<a name="167176135"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167176135" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167176135">(Jun 03 2019 at 10:37)</a>:</h4>
+<p>in fact I can prove it rly quickly</p>
+
+
+
+<a name="167176615"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167176615" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167176615">(Jun 03 2019 at 10:44)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a4d57cddcb7e118e1c241f6f7d328119" target="_blank" title="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a4d57cddcb7e118e1c241f6f7d328119">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a4d57cddcb7e118e1c241f6f7d328119</a></p>
+
+
+
+<a name="167176652"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167176652" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167176652">(Jun 03 2019 at 10:45)</a>:</h4>
+<p>note that if you switch the edition to 2015 you'll get no error</p>
+
+
+
+<a name="167176718"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167176718" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167176718">(Jun 03 2019 at 10:46)</a>:</h4>
+<p>and this is where it is emitted from <a href="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L501" target="_blank" title="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L501">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L501</a></p>
+
+
+
+<a name="167176739"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167176739" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167176739">(Jun 03 2019 at 10:47)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> hang on, 2015 and 2018 on nightly are the same, so my instructions are wrong!</p>
+
+
+
+<a name="167176996"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167176996" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167176996">(Jun 03 2019 at 10:52)</a>:</h4>
+<p>or not wrong, since you would still need <code>#![feature(nll)]</code> which would make those hard errors...</p>
+
+
+
+<a name="167177000"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167177000" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167177000">(Jun 03 2019 at 10:52)</a>:</h4>
+<p>anyway I added a paragraph to step 1. in <a href="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914" target="_blank" title="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914">https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914</a></p>
+
+
+
+<a name="167177093"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167177093" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167177093">(Jun 03 2019 at 10:55)</a>:</h4>
+<p>To clarify, you expect this not to ICE with full NLL?</p>
+
+
+
+<a name="167177557"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167177557" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167177557">(Jun 03 2019 at 11:03)</a>:</h4>
+<p>yeah, it should error properly</p>
+
+
+
+<a name="167177711"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167177711" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167177711">(Jun 03 2019 at 11:05)</a>:</h4>
+<p>That test has <code>#![feature(nll)]</code>.</p>
+
+
+
+<a name="167177765"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167177765" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167177765">(Jun 03 2019 at 11:06)</a>:</h4>
+<p>It fails with NLL.</p>
+
+
+
+<a name="167177790"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167177790" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167177790">(Jun 03 2019 at 11:06)</a>:</h4>
+<p>Works fine with my AST check (as in, it works the way I’d expect, and doesn’t ICE).</p>
+
+
+
+<a name="167177923"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167177923" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167177923">(Jun 03 2019 at 11:09)</a>:</h4>
+<p>hmmm</p>
+
+
+
+<a name="167177990"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167177990" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167177990">(Jun 03 2019 at 11:10)</a>:</h4>
+<p>oooh <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=3b14136c6338d0fbad6ddf6817cdf00e" target="_blank" title="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=3b14136c6338d0fbad6ddf6817cdf00e">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=3b14136c6338d0fbad6ddf6817cdf00e</a></p>
+
+
+
+<a name="167177993"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167177993" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167177993">(Jun 03 2019 at 11:10)</a>:</h4>
+<p>hang on...</p>
+
+
+
+<a name="167178020"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167178020" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167178020">(Jun 03 2019 at 11:11)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> right, I'm an idiot, what the MIR borrowck does is not what one might think it does</p>
+
+
+
+<a name="167178374"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167178374" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167178374">(Jun 03 2019 at 11:17)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> added paragraph to 2. <a href="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914" target="_blank" title="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914">https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914</a></p>
+
+
+
+<a name="167178455"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167178455" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167178455">(Jun 03 2019 at 11:18)</a>:</h4>
+<p>so the solution is to do the typeck check, wait... I misread it. ugh, time to edit again</p>
+
+
+
+<a name="167179010"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167179010" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167179010">(Jun 03 2019 at 11:25)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> yeah so you need something like this <a href="https://github.com/rust-lang/rust/blob/c57ed9d9478dcd12c854a0ef4e83c7f384ade060/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L1876-L1890" target="_blank" title="https://github.com/rust-lang/rust/blob/c57ed9d9478dcd12c854a0ef4e83c7f384ade060/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L1876-L1890">https://github.com/rust-lang/rust/blob/c57ed9d9478dcd12c854a0ef4e83c7f384ade060/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L1876-L1890</a></p>
+
+
+
+<a name="167179099"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167179099" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167179099">(Jun 03 2019 at 11:26)</a>:</h4>
+<p>I posted the correct check.. wait, I screwed up again aaaaa</p>
+
+
+
+<a name="167179913"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167179913" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167179913">(Jun 03 2019 at 11:35)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> sorry for the back&amp;forth, you can now re-review steps 1. and 2. <a href="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914" target="_blank" title="https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914">https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914</a></p>
+
+
+
+<a name="167179969"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167179969" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167179969">(Jun 03 2019 at 11:36)</a>:</h4>
+<p>I don't know how to emit a proper trait error from NLL typeck, maybe <span class="user-mention" data-user-id="116118">@Matthew Jasper</span> does?</p>
+
+
+
+<a name="167179986"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167179986" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167179986">(Jun 03 2019 at 11:36)</a>:</h4>
+<p>but we can discuss that on the PR, a simple hard error would suffice to submit the first version</p>
+
+
+
+<a name="167715437"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167715437" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167715437">(Jun 09 2019 at 20:19)</a>:</h4>
+<p><span class="user-mention" data-user-id="119009">@eddyb</span> Didn't have much time to work on this in the last week, got back to it today. I've found that changing the code to a hard error like you suggested didn't quite work. It appeared to cause an error in cases that were previously accepted, I worked around it by also checking <code>type_is_copy_modulo_regions</code> before emitting an error, but I suspect that isn't correct. </p>
+<p>After that, the only remaining failure I've been running into is another <code>could not prove Binder(TraitPredicate(&lt;State as std::marker::Copy&gt;))</code> error from broken MIR, this time in <code>run-pass/issues/issue-23898.rs</code>.</p>
+
+
+
+<a name="167715489"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167715489" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167715489">(Jun 09 2019 at 20:20)</a>:</h4>
+<div class="codehilite"><pre><span></span>error: internal compiler error: broken MIR in DefId(0:17 ~ issue_23898[317d]::main[0]) (NoSolution): could not prove Binder(TraitPredicate(&lt;State as std::marker::Copy&gt;))
+  --&gt; /home/david/projects/rust/rust0/src/test/run-pass/issues/issue-23898.rs:9:5
+   |
+LL |     [State::ST_NULL; (State::ST_WHITESPACE as usize)];
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+</pre></div>
+
+
+
+<a name="167715500"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167715500" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167715500">(Jun 09 2019 at 20:21)</a>:</h4>
+<p>I believe it is <a href="https://github.com/rust-lang/rust/blob/07c3967de9027735bfbf9c739f6a8ca14312c22d/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L499-L525" target="_blank" title="https://github.com/rust-lang/rust/blob/07c3967de9027735bfbf9c739f6a8ca14312c22d/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L499-L525">from these lines</a>.</p>
+
+
+
+<a name="167735437"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167735437" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167735437">(Jun 10 2019 at 05:55)</a>:</h4>
+<p>interesting, I would've expected <code>Operand::Copy</code> to be generated when the MIR is built but I guess that's not a given</p>
+
+
+
+<a name="167735563"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167735563" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167735563">(Jun 10 2019 at 05:58)</a>:</h4>
+<p>those lines apply when you have <code>Operand::Copy</code>, which should've already passed <code>type_is_copy_modulo_regions</code></p>
+
+
+
+<a name="167737643"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167737643" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167737643">(Jun 10 2019 at 06:53)</a>:</h4>
+<blockquote>
+<p>those lines apply when you have <code>Operand::Copy</code>, which should've already passed <code>type_is_copy_modulo_regions</code></p>
+</blockquote>
+<p>Do you mean the lines I replaced w/ a hard error or the lines I think the current error is coming from?</p>
+
+
+
+<a name="167826775"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167826775" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167826775">(Jun 11 2019 at 07:38)</a>:</h4>
+<p><span class="user-mention" data-user-id="119009">@eddyb</span> (in case you missed the above question)</p>
+
+
+
+<a name="167826783"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167826783" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167826783">(Jun 11 2019 at 07:38)</a>:</h4>
+<p>the latter</p>
+
+
+
+<a name="167826809"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167826809" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167826809">(Jun 11 2019 at 07:39)</a>:</h4>
+<p>you shouldn't be seeing <code>Operand::Copy</code> if the type doesn't at least <em>appear to</em> implement <code>Copy</code></p>
+
+
+
+<a name="167826816"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167826816" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167826816">(Jun 11 2019 at 07:39)</a>:</h4>
+<p>if you do, it would be interesting to see where it might be coming from</p>
+
+
+
+<a name="167827149"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167827149" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167827149">(Jun 11 2019 at 07:45)</a>:</h4>
+<div class="codehilite"><pre><span></span>error: repeated expression does not implement `std::marker::Copy`
+  --&gt; /home/david/projects/rust/rust0/src/test/ui/static/static-vec-repeat-not-constant.rs:3:24
+   |
+LL | static a: [isize; 2] = [foo(); 2];
+   |                        ^^^^^^^^^^ the trait `std::marker::Copy` is not implemented for `isize`
+   |
+   = note: the `std::marker::Copy` trait is required because the repeated element will be copied
+</pre></div>
+
+
+<div class="codehilite"><pre><span></span><span class="gi">+       error: repeated expression does not implement `std::marker::Copy`</span>
+<span class="gi">+         --&gt; $DIR/type-check-pointer-coercions.rs:34:14</span>
+<span class="gi">+          |</span>
+<span class="gi">+       LL |     let z = &amp;[[x; 2]; 3];</span>
+<span class="gi">+          |              ^^^^^^^^^^^ the trait `std::marker::Copy` is not implemented for `[&amp;i32; 2]`</span>
+<span class="gi">+          |</span>
+<span class="gi">+          = note: the `std::marker::Copy` trait is required because the repeated element will be copied</span>
+</pre></div>
+
+
+<div class="codehilite"><pre><span></span><span class="gi">+       error: repeated expression does not implement `std::marker::Copy`</span>
+<span class="gi">+         --&gt; $DIR/issue-17913.rs:13:25</span>
+<span class="gi">+          |</span>
+<span class="gi">+       LL |     let a: Box&lt;_&gt; = box [&amp;n; 0xF000000000000000_usize];</span>
+<span class="gi">+          |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::marker::Copy` is not implemented for `&amp;usize`</span>
+<span class="gi">+          |</span>
+<span class="gi">+          = note: the `std::marker::Copy` trait is required because the repeated element will be copied</span>
+</pre></div>
+
+
+<p><span class="user-mention" data-user-id="119009">@eddyb</span> some examples of the errors I get when I stop checking for <code>type_is_copy_modulo_regions</code> where I'm emitting the hard error.</p>
+
+
+
+<a name="167827223"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167827223" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167827223">(Jun 11 2019 at 07:46)</a>:</h4>
+<p>that makes sense, <code>Operand::Move</code> on <code>Copy</code> types is totally plausible</p>
+
+
+
+<a name="167827227"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167827227" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167827227">(Jun 11 2019 at 07:46)</a>:</h4>
+<p>There are some instances where it's a generic type <code>T</code> and not a <code>usize</code>, <code>i32</code>, etc.</p>
+
+
+
+<a name="167827239"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167827239" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167827239">(Jun 11 2019 at 07:46)</a>:</h4>
+<p>like, it's presumably some temporary into which a value was constructed</p>
+
+
+
+<a name="167827245"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167827245" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167827245">(Jun 11 2019 at 07:47)</a>:</h4>
+<p>it would make sense for that to be moved</p>
+
+
+
+<a name="167827262"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167827262" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167827262">(Jun 11 2019 at 07:47)</a>:</h4>
+<p>so my initial suggestion of checking for <code>Operand::Move</code> is silly, your check is correct</p>
+
+
+
+<a name="167827267"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167827267" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167827267">(Jun 11 2019 at 07:47)</a>:</h4>
+<p>I just don't know why you'd get any ICEs</p>
+
+
+
+<a name="167827340"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167827340" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167827340">(Jun 11 2019 at 07:48)</a>:</h4>
+<p>Well, we replaced the <code>prove_trait_ref</code> with the hard error in this case (conditional on <code>type_is_copy_modulo_regions</code> and <code>Operand::Move</code>, but it's the only other remaining <code>prove_trait_ref</code>for <code>ConstraintCategory::CopyBound</code> that is being hit now.</p>
+
+
+
+<a name="167827927"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167827927" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167827927">(Jun 11 2019 at 07:59)</a>:</h4>
+<p>If I wrap the other check in a <code>type_is_copy_modulo_regions</code> (so we only run <code>prove_trait_ref</code> for types that are <code>Copy</code> (modulo regions)) then the test that was failing now passes. If you reckon that's the correct thing to do, I can tidy up my commits and throw a PR up shortly.</p>
+
+
+
+<a name="167828025"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167828025" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167828025">(Jun 11 2019 at 08:01)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> it just means something is generating an <code>Operand::Copy</code> and shouldn't</p>
+
+
+
+<a name="167828035"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167828035" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167828035">(Jun 11 2019 at 08:01)</a>:</h4>
+<p>So I should be working out how to stop that happening instead of adding a condition?</p>
+
+
+
+<a name="167828094"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167828094" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167828094">(Jun 11 2019 at 08:02)</a>:</h4>
+<p>yes</p>
+
+
+
+<a name="167828149"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167828149" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167828149">(Jun 11 2019 at 08:03)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> if you search for <code>Operand::Copy</code> in <code>librustc_mir/build</code> you'll find that at least one of the places checks literally <code>is_copy_modulo_regions</code> before picking that</p>
+
+
+
+<a name="167864677"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167864677" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167864677">(Jun 11 2019 at 16:10)</a>:</h4>
+<p><span class="user-mention" data-user-id="119009">@eddyb</span>  <code>Operand::Copy</code> is being created by another change I've made, <span aria-label="face palm" class="emoji emoji-1f926" role="img" title="face palm">:face_palm:</span>. In particular, when doing the actual promotion in the <code>promote_consts</code> pass, I am creating a <code>Operand::Copy(promoted_place(ty, span))</code>. </p>
+<p>If I change it to <code>Operand::Move</code> then I get an error when compiling <code>libstd</code>:</p>
+<div class="codehilite"><pre><span></span>error[E0507]: cannot move out of static item `promoted`
+  --&gt; src/libstd/sys/unix/os.rs:99:19
+   |
+99 |     let mut buf = [0 as c_char; TMPBUF_SZ];
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^ move occurs because `promoted` has type `i8`, which does not implement the `Copy` trait
+</pre></div>
+
+
+<p>I'm unsure if the correct fix is to modify where we're calling <code>prove_trait_ref</code> so that it doesn't consider promoted places, or if I should be using <code>Operand::Move</code> when promoting and that I need to make a change elsewhere to avoid the error we're seeing in <code>libstd</code>.</p>
+
+
+
+<a name="167871763"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167871763" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167871763">(Jun 11 2019 at 17:33)</a>:</h4>
+<p>ohnoes</p>
+
+
+
+<a name="167871820"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167871820" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167871820">(Jun 11 2019 at 17:34)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@oli</span> ^^ this is an instance where promoteds being places doesn't help :(</p>
+
+
+
+<a name="167871850"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167871850" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167871850">(Jun 11 2019 at 17:34)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> so, what I would've expected is to not do any promotion to start off with</p>
+
+
+
+<a name="167871855"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167871855" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167871855">(Jun 11 2019 at 17:35)</a>:</h4>
+<p>and make sure stuff isn't broken</p>
+
+
+
+<a name="167871875"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167871875" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167871875">(Jun 11 2019 at 17:35)</a>:</h4>
+<p>the fact that you couldn't use <code>Operand::Const</code>, like I thought you could, is a big warning sign</p>
+
+
+
+<a name="167871957"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167871957" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167871957">(Jun 11 2019 at 17:36)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@oli</span> maybe we need to go back to non-place-based promotion and, uhh, promote <code>&amp;base_local</code> and then do <code>&amp;(*promoted)[runtime_index]</code> if we have something like that to deal with :/</p>
+
+
+
+<a name="167872105"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167872105" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167872105">(Jun 11 2019 at 17:38)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> for now, one thing you could do is ignore promoted places in that "must implement Copy" part of NLL borrowck type_check</p>
+
+
+
+<a name="167872123"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167872123" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167872123">(Jun 11 2019 at 17:38)</a>:</h4>
+<p>I can do that.</p>
+
+
+
+<a name="167872160"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167872160" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167872160">(Jun 11 2019 at 17:39)</a>:</h4>
+<p>and open an issue about resolving the discordance between promotion for <code>&amp;expr</code> and <code>[expr; n]</code></p>
+
+
+
+<a name="167890176"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167890176" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167890176">(Jun 11 2019 at 21:01)</a>:</h4>
+<p><span class="user-mention" data-user-id="119009">@eddyb</span> I've submitted <a href="https://github.com/rust-lang/rust/issues/61749" target="_blank" title="https://github.com/rust-lang/rust/issues/61749">#61749</a> with what I have, resolving the merge conflicts shortly. Haven't filed that issue yet.</p>
+
+
+
+<a name="167920117"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920117" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920117">(Jun 12 2019 at 06:45)</a>:</h4>
+<p>@eddyb I'm not sure how that would help? you'd just end up with a move out of borrowed context error</p>
+
+
+
+<a name="167920160"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920160" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920160">(Jun 12 2019 at 06:46)</a>:</h4>
+<p>instead what we can do is to allow moving out of promoteds similarly to how we allow "moving out of constants"</p>
+
+
+
+<a name="167920178"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920178" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920178">(Jun 12 2019 at 06:47)</a>:</h4>
+<p>well, not quite, since constants are their own <code>Operand</code></p>
+
+
+
+<a name="167920249"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920249" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920249">(Jun 12 2019 at 06:48)</a>:</h4>
+<p>yes, "moving out of" only makes sense for places, and I'm saying promoteds not being places would make that go away</p>
+
+
+
+<a name="167920257"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920257" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920257">(Jun 12 2019 at 06:48)</a>:</h4>
+<p>oh</p>
+
+
+
+<a name="167920264"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920264" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920264">(Jun 12 2019 at 06:48)</a>:</h4>
+<p>I mean adding a new <code>Operand</code> variant is trivial</p>
+
+
+
+<a name="167920265"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920265" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920265">(Jun 12 2019 at 06:48)</a>:</h4>
+<p>like, you'd have a promoted of type <code>&amp;T</code> for <code>&amp;expr</code> and a promoted of type <code>T</code> for <code>[expr; n]</code></p>
+
+
+
+<a name="167920270"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920270" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920270">(Jun 12 2019 at 06:48)</a>:</h4>
+<p>oh</p>
+
+
+
+<a name="167920274"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920274" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920274">(Jun 12 2019 at 06:49)</a>:</h4>
+<p>I'm pretty much talking of going back to how things were before you changed them</p>
+
+
+
+<a name="167920292"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920292" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920292">(Jun 12 2019 at 06:49)</a>:</h4>
+<p>a new <code>Operand</code> variant seems interesting, in that it wouldn't add onto <code>Constant</code></p>
+
+
+
+<a name="167920296"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920296" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920296">(Jun 12 2019 at 06:49)</a>:</h4>
+<p>I'd really prefer that</p>
+
+
+
+<a name="167920298"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920298" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920298">(Jun 12 2019 at 06:49)</a>:</h4>
+<p>I mean my changes are easy to revert</p>
+
+
+
+<a name="167920302"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920302" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920302">(Jun 12 2019 at 06:49)</a>:</h4>
+<p>but iirc they cleaned up a few things nicely</p>
+
+
+
+<a name="167920383"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920383" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920383">(Jun 12 2019 at 06:50)</a>:</h4>
+<p>yeah I'm a bit torn</p>
+
+
+
+<a name="167920699"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920699" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920699">(Jun 12 2019 at 06:55)</a>:</h4>
+<p>how about we go with the <code>Operand</code> version and I solemly promise that if at some point you're still unhappy enough with promoteds being places, and want them changed, then I'll do the revert myself.</p>
+
+
+
+<a name="167920704"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920704" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920704">(Jun 12 2019 at 06:56)</a>:</h4>
+<p>uhm</p>
+
+
+
+<a name="167920753"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920753" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920753">(Jun 12 2019 at 06:56)</a>:</h4>
+<p>the <code>Operand</code> version would mean promoteds <em>stop</em> being places</p>
+
+
+
+<a name="167920755"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920755" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920755">(Jun 12 2019 at 06:56)</a>:</h4>
+<p>well</p>
+
+
+
+<a name="167920756"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920756" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920756">(Jun 12 2019 at 06:56)</a>:</h4>
+<p>if they're places we use <code>Operand::Copy</code></p>
+
+
+
+<a name="167920758"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920758" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920758">(Jun 12 2019 at 06:56)</a>:</h4>
+<p>they'd be places and not</p>
+
+
+
+<a name="167920769"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920769" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920769">(Jun 12 2019 at 06:56)</a>:</h4>
+<p>you need them to be places for taking a reference</p>
+
+
+
+<a name="167920773"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920773" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920773">(Jun 12 2019 at 06:56)</a>:</h4>
+<p>by "being a place" I mean specifically <code>Place</code> being able to represent them</p>
+
+
+
+<a name="167920781"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920781" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920781">(Jun 12 2019 at 06:56)</a>:</h4>
+<p><code>PlaceBase::Promoted</code> can't go away</p>
+
+
+
+<a name="167920797"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920797" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920797">(Jun 12 2019 at 06:57)</a>:</h4>
+<p>like I said, you can take the reference <em>in</em> the promoted MIR, I think it's how it used to work</p>
+
+
+
+<a name="167920802"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920802" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920802">(Jun 12 2019 at 06:57)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@oli</span> then in that case changing <code>Operand</code> is a net negative</p>
+
+
+
+<a name="167920803"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920803" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920803">(Jun 12 2019 at 06:57)</a>:</h4>
+<p>right, that's not what I want :D</p>
+
+
+
+<a name="167920808"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920808" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920808">(Jun 12 2019 at 06:57)</a>:</h4>
+<p>how so?</p>
+
+
+
+<a name="167920823"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920823" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920823">(Jun 12 2019 at 06:57)</a>:</h4>
+<p>because <code>Operand::{Copy,Move}</code> can still take promoteds</p>
+
+
+
+<a name="167920825"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920825" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920825">(Jun 12 2019 at 06:57)</a>:</h4>
+<p>oh</p>
+
+
+
+<a name="167920827"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920827" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920827">(Jun 12 2019 at 06:57)</a>:</h4>
+<p>true</p>
+
+
+
+<a name="167920873"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920873" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920873">(Jun 12 2019 at 06:58)</a>:</h4>
+<p>like, that's my entire point :P</p>
+
+
+
+<a name="167920882"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920882" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920882">(Jun 12 2019 at 06:58)</a>:</h4>
+<p>you either move them from being places to a new Constant/Operand, or work around the problem in other ways</p>
+
+
+
+<a name="167920887"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920887" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920887">(Jun 12 2019 at 06:58)</a>:</h4>
+<p>I mean, <code>Operand::Move</code> can move out of boxes, why not out of promoteds?</p>
+
+
+
+<a name="167920901"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920901" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920901">(Jun 12 2019 at 06:58)</a>:</h4>
+<p>one concept I wanted to play around with is splitting places into "operands can refer to them" and "Rvalue::Ref can borrow them" and the latter would be more flexible, including indexing and whatnot</p>
+
+
+
+<a name="167920920"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920920" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920920">(Jun 12 2019 at 06:59)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@oli</span> I don't want some weird accidents, I'd rather abuse <code>Operand::Copy</code> instead</p>
+
+
+
+<a name="167920924"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167920924" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167920924">(Jun 12 2019 at 06:59)</a>:</h4>
+<p>yes, this goes in hand with cleaning up projections</p>
+
+
+
+<a name="167921008"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167921008" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167921008">(Jun 12 2019 at 07:00)</a>:</h4>
+<p>ok, so I think it would be ok to move back to having some promoteds being <code>&amp;T</code> and some being <code>T</code> and all of them being a custom <code>Operand::Promoted</code>.</p>
+
+
+
+<a name="167928944"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167928944" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167928944">(Jun 12 2019 at 09:22)</a>:</h4>
+<p>For the feature gate test, <span class="user-mention" data-user-id="119009">@eddyb</span>, what would be the best way in a ui test to observe if a rvalue has been promoted?</p>
+
+
+
+<a name="167929384"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167929384" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167929384">(Jun 12 2019 at 09:29)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> other than the fact that it doesn't error when non-Copy?</p>
+
+
+
+<a name="167929395"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167929395" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167929395">(Jun 12 2019 at 09:29)</a>:</h4>
+<p>you could add a MIR test <em>shrug</em></p>
+
+
+
+<a name="167929975"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167929975" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167929975">(Jun 12 2019 at 09:37)</a>:</h4>
+<p>I'm struggling to find an example that doesn't compile w/out the feature gate and does with the feature gate.</p>
+
+
+
+<a name="167930054"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167930054" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167930054">(Jun 12 2019 at 09:38)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> <code>[None::&lt;String&gt;; 2]</code></p>
+
+
+
+<a name="167930419"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167930419" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167930419">(Jun 12 2019 at 09:43)</a>:</h4>
+<p>Huh, I don't know why I didn't come up with that, thanks.</p>
+
+
+
+<a name="167930523"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167930523" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167930523">(Jun 12 2019 at 09:44)</a>:</h4>
+<p>I mean... it's pretty much the thing we want to enable, isn't it :P? I thought your tests already included examples like this, but maybe I didn't look close enough</p>
+
+
+
+<a name="167932925"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167932925" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167932925">(Jun 12 2019 at 10:21)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> not sure what you mean in <a href="https://github.com/rust-lang/rust/pull/61749#issuecomment-501190070" target="_blank" title="https://github.com/rust-lang/rust/pull/61749#issuecomment-501190070">https://github.com/rust-lang/rust/pull/61749#issuecomment-501190070</a></p>
+
+
+
+<a name="167932948"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167932948" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167932948">(Jun 12 2019 at 10:21)</a>:</h4>
+<p>I ran the same example that I added a test for, but with a build of master w/out my changes and that's the output.</p>
+
+
+
+<a name="167933000"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933000" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933000">(Jun 12 2019 at 10:22)</a>:</h4>
+<p>(It might not have been exactly master, but it would have been a commit from a maximum of  24 hours ago)</p>
+
+
+
+<a name="167933132"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933132" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933132">(Jun 12 2019 at 10:24)</a>:</h4>
+<p>I also pasted that output</p>
+
+
+
+<a name="167933150"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933150" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933150">(Jun 12 2019 at 10:24)</a>:</h4>
+<p>my point was that the change in diagnostic output is not in the PR diff</p>
+
+
+
+<a name="167933153"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933153" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933153">(Jun 12 2019 at 10:24)</a>:</h4>
+<p>because the test is not in-tree before the PR</p>
+
+
+
+<a name="167933248"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933248" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933248">(Jun 12 2019 at 10:26)</a>:</h4>
+<p>I understood what you meant. I wasn't sure there was much I could do about that (outside of landing another PR before this one), but for some reason I thought that your output might have been from stable and that's why you had said that so I wanted to check what it was on master, my bad.</p>
+
+
+
+<a name="167933256"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933256" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933256">(Jun 12 2019 at 10:26)</a>:</h4>
+<p>ah I see, that makes sense</p>
+
+
+
+<a name="167933262"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933262" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933262">(Jun 12 2019 at 10:26)</a>:</h4>
+<p>yeah I was thinking maybe we should land such a test. seems odd we don't have anything like this</p>
+
+
+
+<a name="167933460"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933460" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933460">(Jun 12 2019 at 10:30)</a>:</h4>
+<p>If you want to then we can do that, I think that we could just compare against nightly's output and that'd probably be sufficient though.</p>
+
+
+
+<a name="167933508"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933508" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933508">(Jun 12 2019 at 10:31)</a>:</h4>
+<p>we can manually compare, but it's not in the PR diff</p>
+
+
+
+<a name="167933520"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933520" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933520">(Jun 12 2019 at 10:31)</a>:</h4>
+<p>which may give the wrong impression that the output didn't change</p>
+
+
+
+<a name="167933713"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933713" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933713">(Jun 12 2019 at 10:34)</a>:</h4>
+<p>So far it hasn't?</p>
+
+
+
+<a name="167933729"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933729" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933729">(Jun 12 2019 at 10:34)</a>:</h4>
+<p>Now that I've switched to using <code>report_selection_error</code>.</p>
+
+
+
+<a name="167933740"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933740" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933740">(Jun 12 2019 at 10:34)</a>:</h4>
+<p>Unless I missed a change somewhere.</p>
+
+
+
+<a name="167933762"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933762" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933762">(Jun 12 2019 at 10:35)</a>:</h4>
+<p>Oh, you're right, it did.</p>
+
+
+
+<a name="167933785"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933785" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933785">(Jun 12 2019 at 10:35)</a>:</h4>
+<div class="codehilite"><pre><span></span><span class="gi">+   = help: the following implementations were found:</span>
+<span class="gi">+            &lt;Foo&lt;T&gt; as std::marker::Copy&gt;</span>
+<span class="gd">-   = note: required because of the requirements on the impl of `std::marker::Copy` for `Foo&lt;std::string::String&gt;`</span>
+</pre></div>
+
+
+
+<a name="167933852"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933852" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933852">(Jun 12 2019 at 10:37)</a>:</h4>
+<p><span aria-label="face palm" class="emoji emoji-1f926" role="img" title="face palm">:face_palm:</span></p>
+
+
+
+<a name="167933858"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167933858" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167933858">(Jun 12 2019 at 10:37)</a>:</h4>
+<p>yeah, getting the right error with the "trace" is what I don't know how to do</p>
+
+
+
+<a name="167938133"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167938133" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167938133">(Jun 12 2019 at 11:47)</a>:</h4>
+<p><span class="user-mention" data-user-id="116107">@davidtwco</span> in your tests I believe you meant <code>ignore-compare-mode-nll</code> instead of <code>ignore-compile-mode-nll</code> :)</p>
+
+
+
+<a name="167938158"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167938158" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> davidtwco <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167938158">(Jun 12 2019 at 11:47)</a>:</h4>
+<p><span class="user-mention" data-user-id="116113">@lqd</span> oops, I suspect I did. Will fix in a bit. Thanks.</p>
+
+
+
+<a name="167938163"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/rfc%202203%20const%20array%20exprs/near/167938163" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/131828-t-compiler/topic/rfc.202203.20const.20array.20exprs.html#167938163">(Jun 12 2019 at 11:47)</a>:</h4>
+<p>np</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

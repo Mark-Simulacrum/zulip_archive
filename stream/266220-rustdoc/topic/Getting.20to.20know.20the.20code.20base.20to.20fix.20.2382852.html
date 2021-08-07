@@ -1,0 +1,66 @@
+<html>
+<head><meta charset="utf-8"><title>Getting to know the code base to fix #82852 · rustdoc · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/index.html">rustdoc</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/topic/Getting.20to.20know.20the.20code.20base.20to.20fix.20.2382852.html">Getting to know the code base to fix #82852</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="229476331"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/Getting%20to%20know%20the%20code%20base%20to%20fix%20%2382852/near/229476331" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fmease <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/topic/Getting.20to.20know.20the.20code.20base.20to.20fix.20.2382852.html#229476331">(Mar 09 2021 at 13:32)</a>:</h4>
+<p>As a newbie, I spent a good amount of time familiarizing myself with rustdoc to attempt to fix <a href="https://github.com/rust-lang/rust/issues/82852">#82852</a>. I found some parts of the code base which I do not really understand.<br>
+To summarize, the GitHub issue concerns the fact that parameters (most notably const parameters) in types containing constants are not substituted with concrete (const) arguments when we <code>clean_qpath</code> parametric paths (type aliases, structs, …). To illustrate, given <code>type A&lt;T, const N: usize&gt; = [(T,); N + 1]</code>, the type alias <code>A&lt;i32, 6&gt;</code> "is cleaned to" <code>[(i32,); N + 1]</code>, similarly <code>type B&lt;T, const N: usize&gt; = P&lt;(T,), {N + 1}&gt;</code> "is cleaned to" <code>P&lt;(i32,), {N + 1}&gt;</code> for arguments <code>i32</code> and <code>6</code> and some type constructor (e.g. struct) <code>P</code>. The parameter <code>N</code> remains untouched in the <code>clean::Constant</code>.<br>
+In fact, although we <a href="https://github.com/rust-lang/rust/blob/3a5d45f68cadc8fff4fbb557780f92b403b19c19/src/librustdoc/core.rs#L58-L65">store</a> and <a href="https://github.com/rust-lang/rust/blob/3a5d45f68cadc8fff4fbb557780f92b403b19c19/src/librustdoc/clean/mod.rs#L1381">extend</a> the list of const substitutions (<code>ct_substs</code>) just like we do with type and lifetimes, we <strong>never actually use it</strong>! Type parameters are <a href="https://github.com/rust-lang/rust/blob/3a5d45f68cadc8fff4fbb557780f92b403b19c19/src/librustdoc/clean/mod.rs#L1293-L1300">subst. in <code>clean_path</code></a> and lifetime params are <a href="https://github.com/rust-lang/rust/blob/3a5d45f68cadc8fff4fbb557780f92b403b19c19/src/librustdoc/clean/mod.rs#L360-L362">subst. in <code>&lt;hir::Lifetime as Clean&lt;Lifetime&gt;&gt;::clean</code></a>. For types (and prob. also lts), we recurse the structure (in the <code>Clean</code> impl for types) until we find a single-segment qualified-path aka a single identifier which we can easily subst.</p>
+<p>My issue is that I need to recurse over/visit a constant expression to get to the base case of a single identifier which I can then finally substitute using <code>ct_substs.get</code>. However, I don't know which API to use or if that's actually the way to go forward. The cleaning code seems to map from <code>rustc_middle::ty::Const</code> and <code>rust_hir::hir::ConstArg</code>. As far as I can tell, we never recursively clean constant expressions but simply treat them as abstract entities and call out to <a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/consts/struct.Const.html#method.eval"><code>rustc_middle::ty::Const::eval</code></a>, <code>rustc_middle::ty::context::TyCtxt::const_eval_poly</code> (in <code>clean::utils::print_evaluated_const</code>) (NB: Should not be used for constants containing parameters). Of course, there is <code>TyCtxt::const_eval_resolve</code> which takes a <a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/subst/type.SubstsRef.html">list of substitutions</a> but obviously that is incompatible with <code>ct_substs: FxHashMap&lt;DefId, clean::Constant&gt;</code>.</p>
+<p>So, how should/can I subst (const) params inside constant expressions (prob preferably using <code>ct_substs</code>)? </p>
+<p>Pinging <span class="user-mention" data-user-id="216206">@lcnr</span> as <a href="https://github.com/rust-lang/rust/issues/75913#issuecomment-684946841">they declared they would help with const generics</a> and worked on that part of the code (see <a href="https://github.com/rust-lang/rust/pull/76297">PR 76297</a>). Apologies if that's too forward.</p>
+
+
+
+<a name="229476921"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/Getting%20to%20know%20the%20code%20base%20to%20fix%20%2382852/near/229476921" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/topic/Getting.20to.20know.20the.20code.20base.20to.20fix.20.2382852.html#229476921">(Mar 09 2021 at 13:35)</a>:</h4>
+<p>pinging me is fine <span aria-label="thumbs up" class="emoji emoji-1f44d" role="img" title="thumbs up">:thumbs_up:</span></p>
+
+
+
+<a name="229476984"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/Getting%20to%20know%20the%20code%20base%20to%20fix%20%2382852/near/229476984" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/topic/Getting.20to.20know.20the.20code.20base.20to.20fix.20.2382852.html#229476984">(Mar 09 2021 at 13:35)</a>:</h4>
+<p>will look into this a bit more later today</p>
+
+
+
+<a name="229477177"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/Getting%20to%20know%20the%20code%20base%20to%20fix%20%2382852/near/229477177" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/topic/Getting.20to.20know.20the.20code.20base.20to.20fix.20.2382852.html#229477177">(Mar 09 2021 at 13:36)</a>:</h4>
+<p>ideally we should be to convert the type of the alias to a <code>ty::Ty</code> and then print that which shouldn't have those problems... we might still use the <code>hir::Ty</code> here? <span aria-label="thinking" class="emoji emoji-1f914" role="img" title="thinking">:thinking:</span></p>
+
+
+
+<a name="229480121"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/Getting%20to%20know%20the%20code%20base%20to%20fix%20%2382852/near/229480121" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fmease <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/topic/Getting.20to.20know.20the.20code.20base.20to.20fix.20.2382852.html#229480121">(Mar 09 2021 at 13:56)</a>:</h4>
+<p>Great! Thank you :)</p>
+
+
+
+<a name="229480996"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/Getting%20to%20know%20the%20code%20base%20to%20fix%20%2382852/near/229480996" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fmease <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/topic/Getting.20to.20know.20the.20code.20base.20to.20fix.20.2382852.html#229480996">(Mar 09 2021 at 14:02)</a>:</h4>
+<p>Conversion to <code>ty::Ty</code> looks like a solution, although that may call for a larger refactoring. Yeah, I don't know why the <code>ty::Ty</code> (…) rustdoc receives to transform into a <code>clean::Type</code> is still unevaluated/non-normalized. A normalized type could get rid of all the substitution code in <code>rustdoc::clean</code> that is necessary. <strong>Edit</strong>: Well probably to have more control: E.g. rustdoc does not want to evaluate/resolve <em>public</em> type aliases inside larger type terms (only private ones).</p>
+
+
+
+<a name="229536798"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/Getting%20to%20know%20the%20code%20base%20to%20fix%20%2382852/near/229536798" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GuillaumeGomez <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/topic/Getting.20to.20know.20the.20code.20base.20to.20fix.20.2382852.html#229536798">(Mar 09 2021 at 19:22)</a>:</h4>
+<p>Nice! There is <a href="https://github.com/rust-lang/rust/pull/82873">https://github.com/rust-lang/rust/pull/82873</a> that updates the constant code too (hum... Actually there is a lot of noise in this PR so maybe better not to start going around with this one XD)</p>
+
+
+
+<a name="229542554"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/Getting%20to%20know%20the%20code%20base%20to%20fix%20%2382852/near/229542554" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> fmease <a href="https://rust-lang.github.io/zulip_archive/stream/266220-rustdoc/topic/Getting.20to.20know.20the.20code.20base.20to.20fix.20.2382852.html#229542554">(Mar 09 2021 at 19:57)</a>:</h4>
+<p>Cool! I've just noticed it! Haven't looked at the changes yet though</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

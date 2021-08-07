@@ -1,0 +1,212 @@
+[
+    {
+        "content": "<p>Talking of async locks, I found that <code>futures::Sink</code> implementation is quite challenging if the implementation needs to access resources behind locks. In my implementation, so far I had to keep the <a href=\"https://gitlab.freedesktop.org/dbus/zbus/-/blob/984428d42098e7ffefdfe67bef36c11a1fbdde8d/zbus/src/azync/connection.rs#L827\">mutex guard throughout the Sink lifetime</a>, which isn't ideal of course. The main issue here is the separation of <code>poll_ready</code> and <code>start_send</code> methods combined with the fact that <code>start_send</code> doesn't take a context argument and doesn't return a <code>Poll</code>, so it can't just yield and hence I'll have to keep the mutex guard between these calls at least.</p>",
+        "id": 234381495,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618340227
+    },
+    {
+        "content": "<p>Yea, it can be difficult when <code>poll_ready</code> needs to reserve a slot, since there's no real way to disarm it if it turns out you didn't need it. As an example, tokio's <code>mpsc::Sender</code> ditched <code>poll_ready</code> for a <code>reserve</code> method instead: <a href=\"https://docs.rs/tokio/1.5.0/tokio/sync/mpsc/struct.Sender.html#method.reserve\">https://docs.rs/tokio/1.5.0/tokio/sync/mpsc/struct.Sender.html#method.reserve</a></p>",
+        "id": 234381959,
+        "sender_full_name": "Sean McArthur",
+        "timestamp": 1618340412
+    },
+    {
+        "content": "<p>Are you sure you need an async lock over a blocking lock here?</p>",
+        "id": 234382156,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618340492
+    },
+    {
+        "content": "<p>Good question. I definitely needed it when I started off but it might be that I don't anymore.</p>",
+        "id": 234382625,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618340662
+    },
+    {
+        "content": "<p>Unless you use it outside that file you sent us in a way that prevents it, then you can use a blocking lock here.</p>",
+        "id": 234382706,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618340698
+    },
+    {
+        "content": "<p>well I do need to use it <a href=\"https://gitlab.freedesktop.org/dbus/zbus/-/blob/984428d42098e7ffefdfe67bef36c11a1fbdde8d/zbus/src/azync/connection.rs#L498\">here</a> from an async method, just that currently it's indirectly through the Sink impl.</p>",
+        "id": 234383562,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618340967
+    },
+    {
+        "content": "<p>Sure, that's no problem.</p>",
+        "id": 234383727,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618341026
+    },
+    {
+        "content": "<p>I was mostly asking about uses that are <em>not</em> through the <code>Sink</code> impl.</p>",
+        "id": 234383792,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618341059
+    },
+    {
+        "content": "<p>to be able to access the resource from my async method, I'll need to do it through async lock, whether I use it through the Sink or not, or am I missing something?</p>",
+        "id": 234384154,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618341195
+    },
+    {
+        "content": "<p>Just because you're in an async context doesn't mean you can't use a blocking lock.</p>",
+        "id": 234384347,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618341279
+    },
+    {
+        "content": "<p>The only requirement is that you must release it again before you yield to the executor.</p>",
+        "id": 234384398,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618341310
+    },
+    {
+        "content": "<p>i.e. you can lock it in <code>poll_ready</code> or <code>start_send</code> and release the lock before you return from the method</p>",
+        "id": 234384443,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618341331
+    },
+    {
+        "content": "<p>and then it's all good</p>",
+        "id": 234384450,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618341334
+    },
+    {
+        "content": "<p>The only thing that an async lock lets you do that you can't with a blocking lock is keep it locked while doing an <code>.await</code></p>",
+        "id": 234384583,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618341385
+    },
+    {
+        "content": "<p>(which you may want if you expect the lock to be held for anything more than a very short time)</p>",
+        "id": 234384702,
+        "sender_full_name": "rylev",
+        "timestamp": 1618341429
+    },
+    {
+        "content": "<p>yeah but you can't block in async context and hence why async lock usage is justified here IMO</p>",
+        "id": 234399102,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618347378
+    },
+    {
+        "content": "<p>can't -&gt; shouldn't</p>",
+        "id": 234399170,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618347410
+    },
+    {
+        "content": "<p>Using a blocking lock is not necessarily the same as blocking the thread.</p>",
+        "id": 234399216,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618347434
+    },
+    {
+        "content": "<p>See e.g. <a href=\"https://docs.rs/tokio/1/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use\">https://docs.rs/tokio/1/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use</a></p>",
+        "id": 234399297,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618347479
+    },
+    {
+        "content": "<p>Or as I said it at the end of <a href=\"https://ryhl.io/blog/async-what-is-blocking/\">Async: What is blocking?</a>,  if you block for a short time, is it really blocking?</p>",
+        "id": 234399495,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618347561
+    },
+    {
+        "content": "<p>yeah I read that but only till:</p>\n<blockquote>\n<p>The primary use case for the async mutex is to provide shared mutable access to IO resources such as a database connection. If the value behind the mutex is just data, it’s usually appropriate to use a blocking mutex</p>\n</blockquote>\n<p>Since my resource here is a socket, async lock seemed the right thing here. The message sending operation can block here.</p>",
+        "id": 234400456,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618347753
+    },
+    {
+        "content": "<p>Right. When it comes to IO operations, you must drop down to poll methods to use blocking locks, but you <em>are</em> doing that by virtue of your <code>Sink</code> impl.</p>",
+        "id": 234400723,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618347806
+    },
+    {
+        "content": "<p>The async lock is necessary to keep the IO resource locked across the full duration of the IO operation. The blocking lock would only keep it locked during each call to a poll method.</p>",
+        "id": 234400869,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618347846
+    },
+    {
+        "content": "<p>So the difference between the two approaches shows up if multiple tasks acquire a <code>Sink</code> to the same IO resource and try to use it at the same time.</p>",
+        "id": 234401402,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618347977
+    },
+    {
+        "content": "<p>If that does happen, you might need the async lock for correctness in that you may end up with incorrect code if multiple tasks access the resource inside the <code>Sink</code> concurrently, but if that doesn't happen, then you're just using a much more expensive lock than you need to.</p>",
+        "id": 234401728,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618348065
+    },
+    {
+        "content": "<p>Ah, missed this one:</p>\n<blockquote>\n<p>i.e. you can lock it in poll_ready or start_send and release the lock before you return from the method</p>\n</blockquote>\n<p>Right, that makes sense. Many thanks. I'll try that.</p>",
+        "id": 234401758,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618348073
+    },
+    {
+        "content": "<blockquote>\n<p>So the difference between the two approaches shows up if multiple tasks acquire a Sink to the same IO resource and try to use it at the same time.</p>\n</blockquote>\n<p>Well, yeah. That can easily happen, can't it? Multiple tasks calling the <a href=\"https://gitlab.freedesktop.org/dbus/zbus/-/blob/984428d42098e7ffefdfe67bef36c11a1fbdde8d/zbus/src/azync/connection.rs#L412\">sink</a> method.</p>",
+        "id": 234402569,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618348262
+    },
+    {
+        "content": "<p>sorry, i think for some reason I'm getting message after I send out my reply here. <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 234402703,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618348304
+    },
+    {
+        "content": "<p>Hmm, since your <code>poll_ready</code> is a no-op, I think the code is correct even with the blocking lock.</p>",
+        "id": 234403120,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618348414
+    },
+    {
+        "content": "<p>Hmm, but there's the question of <code>flush</code>.</p>",
+        "id": 234403353,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618348447
+    },
+    {
+        "content": "<p>Okay, you probably need the async lock to ensure correctness of <code>poll_flush</code>.</p>",
+        "id": 234403562,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618348517
+    },
+    {
+        "content": "<p>Because two tasks trying to flush at the same time can get their wakers mixed up.</p>",
+        "id": 234403606,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618348534
+    },
+    {
+        "content": "<p>If we go back to your original issue.. If you are to use an async lock (and not lock it before-hand), then you are supposed to lock it in <code>poll_ready</code> and keep it locked until the <code>start_send</code> call. Anything async that needs to happen to prepare for a send should happen in <code>poll_ready</code>.</p>",
+        "id": 234403917,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618348684
+    },
+    {
+        "content": "<p>right but I was told that would also be wrong/bad so maybe it's more a documentation issue than anything else. <span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span></p>",
+        "id": 234471783,
+        "sender_full_name": "Zeeshan Ali",
+        "timestamp": 1618394408
+    },
+    {
+        "content": "<p>Yes, it's a documentation issue. Blocking mutexes in poll methods are perfectly fine as long as you don't get the wakers mixed up. For example <code>tokio::io::split</code> uses a mutex.</p>",
+        "id": 234513084,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1618412328
+    }
+]

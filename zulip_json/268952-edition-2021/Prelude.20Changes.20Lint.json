@@ -1,0 +1,1052 @@
+[
+    {
+        "content": "<p>Ok so I've started <a href=\"https://github.com/rust-lang/rust/pull/85707\">an initial implementation</a> of the prelude migration lint. However one issue I ran into from the suggested implementation strategy. While <code>FnCtxt::lookup_method</code> works great for dot-call syntax, it doesn't seem like it works for associated functions, but I'm having a bit of trouble finding a suitable equivalent. <span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> whenever you have a moment, I'd appreciate a bit of guidance on where a good place to put this might be</p>",
+        "id": 240278703,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622003499
+    },
+    {
+        "content": "<p>So to my understanding, doing a similar implementation in rustc_typeck would be complicated because looking for <code>MyType::try_from(x)</code> would require looking for a call of the structure <code>$path ( $( $expr ),*  )</code>, but since <code>$path</code> will get resolved/type checked at a separate point from the actual call it won't have access to the span of the call itself (which is needed for emitting a <code>MachineApplicable</code> lint)... but since $path is actually also an expression this further complicates it... and something like this:</p>\n<div class=\"codehilite\"><pre><span></span><code>let my_try_from = MyTryFrom::try_from;\nlet x = my_try_from(3);\n</code></pre></div>\n<p>would then break ...wait is the call itself even needed for the lint in this case? I think I have been barking up the wrong tree and I could just be emitting a lint on the path for the associated-function case <span aria-label=\"face palm\" class=\"emoji emoji-1f926\" role=\"img\" title=\"face palm\">:face_palm:</span></p>\n<p>Just need to find where the paths for trait-associated functions get resolved now</p>",
+        "id": 240282773,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622009167
+    },
+    {
+        "content": "<p>I'd think we don't need to do anything with associated function calls?</p>",
+        "id": 240368592,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1622053535
+    },
+    {
+        "content": "<p>Since they already reference a specific trait by nature of being associated, right?</p>",
+        "id": 240368616,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1622053549
+    },
+    {
+        "content": "<p>Well, if it's called as <code>u64::try_from(...)</code> I think it can still be a problem.</p>",
+        "id": 240370283,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1622054176
+    },
+    {
+        "content": "<p>Oh, true</p>",
+        "id": 240372619,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1622055181
+    },
+    {
+        "content": "<p>Yeah my initial impression was also thinking dot-call was the only issue, or at least the main one, but it turns out it's more so the opposite. Both <code>TryFrom</code> and <code>FromIterator</code> only have breaking changes  from associated function calls, while <code>TryInto</code> actually has breaking changes for both dot-call and associated functions, so arguably dot-call is actually the special case :P</p>",
+        "id": 240380839,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622058568
+    },
+    {
+        "content": "<p>Maybe it's <code>.resolve_ufcs(…)</code></p>",
+        "id": 240394982,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1622064958
+    },
+    {
+        "content": "<p>Ah that'd make sense, I always forget those are sometimes called \"universal function calls\" so I didn't recognize the acronym. Thanks!</p>",
+        "id": 240409403,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622076999
+    },
+    {
+        "content": "<p>yep that was it :)</p>",
+        "id": 240409901,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622077519
+    },
+    {
+        "content": "<p>Outside of any issues arising during review, the lint itself should be done <a href=\"https://github.com/rust-lang/rust/pull/85707\">https://github.com/rust-lang/rust/pull/85707</a></p>",
+        "id": 240421670,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622092737
+    },
+    {
+        "content": "<p>Nice work, <span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span></p>",
+        "id": 240472175,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622124253
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> let me know if i can help with investigating those issues i mentioned, or making minimal test cases for them.</p>",
+        "id": 240485445,
+        "sender_full_name": "Mara",
+        "timestamp": 1622129289
+    },
+    {
+        "content": "<p>(and thanks for making this lint!)</p>",
+        "id": 240485493,
+        "sender_full_name": "Mara",
+        "timestamp": 1622129308
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> you meanted <code>raw_addr!</code> in your review in relation to <code>autoref_or_ptr_adjustment</code>, but the docs describe the pointer adjustment as \"Receiver has type <code>*mut T</code>, convert to <code>*const T</code>\", so maybe I'm missing something, but how would <code>raw_addr!</code> play into that?</p>",
+        "id": 240497171,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622134010
+    },
+    {
+        "content": "<p>(correct me if I'm wrong but I don't think <code>AutoRefOrPtrAdjustment::ToConstPtr</code> actually needs to be handled, given arguments are a coercion site)</p>",
+        "id": 240498469,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622134571
+    },
+    {
+        "content": "<p>One problem I'm having--which maybe one of you could shed some light on how to approach it--is that within a given scope I want get a reference-able path for a <code>DefId</code>. I currently use <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.def_path_str\">TyCtxt::def_path_str</a> but this causes some issues <a href=\"https://github.com/rust-lang/rust/pull/85707#issuecomment-849885664\">I explain in this comment</a>. Preferably there'd be an API on, say, a FnCtxt which allows to get what the path to the <code>DefId</code> would be within the function's scope, but as far as I can tell nothing like that exists.</p>",
+        "id": 240531573,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622149500
+    },
+    {
+        "content": "<p>Although I could very well be looking at this from the wrong angle and there's a different way to approach this--I can't say this feels like a problem that hasn't come up before</p>",
+        "id": 240531926,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622149665
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"322737\">jam1garner</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/240497171\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> you meanted <code>raw_addr!</code> in your review in relation to <code>autoref_or_ptr_adjustment</code>, but the docs describe the pointer adjustment as \"Receiver has type <code>*mut T</code>, convert to <code>*const T</code>\", so maybe I'm missing something, but how would <code>raw_addr!</code> play into that?</p>\n</blockquote>\n<p>you're probably right that no action is needed there because it would get coerced anyway; if we wanted to be explicit, though, the way to convert a <code>*mut T</code> to a <code>*const T</code> manually would be either via an <code>as</code> or <code>str::ptr::addr_of!(*x)</code></p>",
+        "id": 240605346,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622209348
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"322737\">jam1garner</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/240531573\">said</a>:</p>\n<blockquote>\n<p>One problem I'm having--which maybe one of you could shed some light on how to approach it--is that within a given scope I want get a reference-able path for a <code>DefId</code>. I currently use <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.def_path_str\">TyCtxt::def_path_str</a> but this causes some issues <a href=\"https://github.com/rust-lang/rust/pull/85707#issuecomment-849885664\">I explain in this comment</a>. Preferably there'd be an API on, say, a FnCtxt which allows to get what the path to the <code>DefId</code> would be within the function's scope, but as far as I can tell nothing like that exists.</p>\n</blockquote>\n<p>yeah, I'm not totally sure the best approach there, it does feel like something that has probably come up before</p>",
+        "id": 240605384,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622209363
+    },
+    {
+        "content": "<p>there seem to be two cases:</p>",
+        "id": 240605407,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622209376
+    },
+    {
+        "content": "<ul>\n<li>things that are scoped within a function</li>\n</ul>",
+        "id": 240605419,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622209381
+    },
+    {
+        "content": "<ul>\n<li>things that can be named via some crate-relative path</li>\n</ul>",
+        "id": 240605435,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622209391
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/240605419\">said</a>:</p>\n<blockquote>\n<ul>\n<li>things that are scoped within a function</li>\n</ul>\n</blockquote>\n<p>in this case I imagine you have to just use the name of the trait with no qualification</p>",
+        "id": 240605482,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622209414
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/240605435\">said</a>:</p>\n<blockquote>\n<ul>\n<li>things that can be named via some crate-relative path</li>\n</ul>\n</blockquote>\n<p>this case you can use an absolute path, probably the same path <code>def_path_str</code> gives you; it's not ideal because it'd be nice to consider the use statements in scope, but that's harder. Maybe there's a simple way to capture the case where the trait is directly imported.</p>",
+        "id": 240605587,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622209450
+    },
+    {
+        "content": "<p>I'm reading how <code>def_path_str</code> works now</p>",
+        "id": 240606275,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622209747
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/240605346\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"322737\">jam1garner</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/240497171\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> you meanted <code>raw_addr!</code> in your review in relation to <code>autoref_or_ptr_adjustment</code>, but the docs describe the pointer adjustment as \"Receiver has type <code>*mut T</code>, convert to <code>*const T</code>\", so maybe I'm missing something, but how would <code>raw_addr!</code> play into that?</p>\n</blockquote>\n<p>you're probably right that no action is needed there because it would get coerced anyway; if we wanted to be explicit, though, the way to convert a <code>*mut T</code> to a <code>*const T</code> manually would be either via an <code>as</code> or <code>str::ptr::addr_of!(*x)</code></p>\n</blockquote>\n<p>I was actually wrong because since the form to expand to for methods is <code>Trait::method(&lt;self&gt;, args...)</code>, self's type needs to be correct, otherwise it won't be able to infer what T is for the desugaring of <code>&lt;T as Trait&gt;::method</code>. ptr::addr_of, however, doesn't work as <code>ptr::addr_of!(*ptr)</code> is actually unsafe (as currently addr_of presents the same safety requirements as its inner expression, according to the docs)</p>",
+        "id": 240627354,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622218788
+    },
+    {
+        "content": "<p>Also as for <code>def_path_str</code> for absolute paths: that doesn't actually work, <code>def_path_str</code> returns user-disambiguated paths. That is to say, the minimum path that makes it clear to a human which type you're talking about. i.e. if you define a type within a function that has the same name as some type somewhere else, it will use <code>my_function::MyType</code>, which is not a valid path. (This isn't a hypothetical, this actually happens on one of the crates that Mara pointed out from the crater run)</p>",
+        "id": 240627765,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1622218986
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> I'm looking at your PR now</p>",
+        "id": 241152485,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622642320
+    },
+    {
+        "content": "<p>I'm going to create a hackmd to help track the current status, as I'm feeling a bit lost</p>",
+        "id": 241152505,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622642327
+    },
+    {
+        "content": "<p>I guess I can't, beacuse of server maintenance</p>",
+        "id": 241152539,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622642342
+    },
+    {
+        "content": "<p><a href=\"https://gist.github.com/nikomatsakis/025b6ca6a3b9df75a11ce4ae6c8a663e\">https://gist.github.com/nikomatsakis/025b6ca6a3b9df75a11ce4ae6c8a663e</a></p>",
+        "id": 241153506,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622642749
+    },
+    {
+        "content": "<p>let me circle back to this</p>",
+        "id": 241571438,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622829230
+    },
+    {
+        "content": "<p>Hey <span class=\"user-mention\" data-user-id=\"310399\">@Mara</span> -- I have a question --</p>",
+        "id": 242628201,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623689915
+    },
+    {
+        "content": "<p>you were running tests with the new prelude, how did you do that?</p>",
+        "id": 242628212,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623689921
+    },
+    {
+        "content": "<p>just with <code>--edition 2021</code>?</p>",
+        "id": 242628219,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623689924
+    },
+    {
+        "content": "<p>mabe this PR needs to be rebased?</p>",
+        "id": 242628265,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623689949
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> yeah that works. but i just changed the contents of the <code>std::prelude::rust_2018</code> module :)</p>",
+        "id": 242628303,
+        "sender_full_name": "Mara",
+        "timestamp": 1623689969
+    },
+    {
+        "content": "<p>I can't get this to compile</p>",
+        "id": 242628331,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623689983
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">&lt;</span><span class=\"nb\">Vec</span><span class=\"o\">&lt;</span><span class=\"kt\">i32</span><span class=\"o\">&gt;&gt;</span>::<span class=\"n\">from_iter</span><span class=\"p\">(</span><span class=\"nb\">None</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 242628338,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623689985
+    },
+    {
+        "content": "<p>(with edition 2021)</p>",
+        "id": 242628345,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623689989
+    },
+    {
+        "content": "<p>i think i even posted that diff somewhere on the pr</p>",
+        "id": 242628348,
+        "sender_full_name": "Mara",
+        "timestamp": 1623689989
+    },
+    {
+        "content": "<p>but shouldn't it?</p>",
+        "id": 242628358,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623689996
+    },
+    {
+        "content": "<p>it does no nightly</p>",
+        "id": 242628415,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623690008
+    },
+    {
+        "content": "<p>so I guess the PR just needs to be rebased</p>",
+        "id": 242628424,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623690013
+    },
+    {
+        "content": "<p>oh yeah, that PR doesn't include the new prelude changes yet. its 2021 prelude is identical to 2018</p>",
+        "id": 242628500,
+        "sender_full_name": "Mara",
+        "timestamp": 1623690050
+    },
+    {
+        "content": "<p>i just added the imports to <code>rust_2018</code> directly to test it</p>",
+        "id": 242628546,
+        "sender_full_name": "Mara",
+        "timestamp": 1623690068
+    },
+    {
+        "content": "<p>here: <a href=\"https://github.com/rust-lang/rust/pull/85707#issuecomment-850369498\">https://github.com/rust-lang/rust/pull/85707#issuecomment-850369498</a></p>",
+        "id": 242628617,
+        "sender_full_name": "Mara",
+        "timestamp": 1623690108
+    },
+    {
+        "content": "<p>ok</p>",
+        "id": 242628774,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623690157
+    },
+    {
+        "content": "<p>rebased (heads up, <span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span>)</p>",
+        "id": 242633531,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623692178
+    },
+    {
+        "content": "<p>Ok I think we're getting pretty close! I pushed another two commits, which I talk a bit about here <a href=\"https://github.com/rust-lang/rust/pull/85707#issuecomment-861206263\">https://github.com/rust-lang/rust/pull/85707#issuecomment-861206263</a> (added to 2021 compatibility lint group, changed from warn to allow, fixed additional arguments not being passed in fix suggestion)</p>\n<p>all that should be left is fixing the trait-path issue, either by absolute paths as Mara said, or by some other means. It is a bit past 2 am for me, so it will likely have to wait until sometime after I'm off work tomorrow</p>",
+        "id": 242692363,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1623738358
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> great!</p>",
+        "id": 242743300,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623768258
+    },
+    {
+        "content": "<p>I was debating about the trait path question</p>",
+        "id": 242743318,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623768269
+    },
+    {
+        "content": "<p>One weird quirk of Rust is that \"absolute paths\" aren't <em>entirely</em> a thing</p>",
+        "id": 242743354,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623768287
+    },
+    {
+        "content": "<p>that is, the correct path to use to name something might not be absolute</p>",
+        "id": 242743378,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623768300
+    },
+    {
+        "content": "<p>I am wondering if there is a helper function for finding \"all viable paths\"</p>",
+        "id": 242743415,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623768316
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123856\">@Vadim Petrochenkov</span>, do you remember if there is a convenient function for finding \"all relevant paths to an item from within the crate\"? I feel like you might know if anyone does.</p>",
+        "id": 242743467,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623768343
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/242743354\">said</a>:</p>\n<blockquote>\n<p>One weird quirk of Rust is that \"absolute paths\" aren't <em>entirely</em> a thing</p>\n</blockquote>\n<p>that's true. I suppose between re-exports, function-scoped traits, etc. that doesn't really make sense. I guess the only real solution is getting the accessible paths for it within the given scope (as I'm not sure within the current crate is quite enough)</p>",
+        "id": 242744529,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1623768731
+    },
+    {
+        "content": "<p>My best guess would be looking at the suggested imports fix suggestions, but that'd likely point as to how to implement it and not as to whether there's already a means of doing that (as imports have a slightly different goal as to what they're searching for)</p>",
+        "id": 242744889,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1623768850
+    },
+    {
+        "content": "<p>in all cases where this lint is relevant, the trait must've been imported explicitly by a <code>use $path;</code> or <code>use $path as $name;</code> or <code>use $path as _;</code>, right? in the first case, the trait name can be used directly. in the second, $name can be used directly, and in the third, $path should work. right? can we somehow get the <code>use</code> statement that imported a trait?</p>",
+        "id": 242749545,
+        "sender_full_name": "Mara",
+        "timestamp": 1623770297
+    },
+    {
+        "content": "<p>I was wondering about that</p>",
+        "id": 242749761,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623770387
+    },
+    {
+        "content": "<p>That's a good idea, <span class=\"user-mention\" data-user-id=\"310399\">@Mara</span></p>",
+        "id": 242749775,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623770396
+    },
+    {
+        "content": "<p>Name resolution currently prepares the list of \"in-scope traits\"</p>",
+        "id": 242749851,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623770407
+    },
+    {
+        "content": "<p>Let me see what shape that takes</p>",
+        "id": 242749856,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623770410
+    },
+    {
+        "content": "<p>It may have a link to a use, or maybe it could be made to do so</p>",
+        "id": 242749873,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623770415
+    },
+    {
+        "content": "<p>(oh there's also the case where the trait was defined in the same module. so then there's no <code>use</code>)</p>",
+        "id": 242749907,
+        "sender_full_name": "Mara",
+        "timestamp": 1623770432
+    },
+    {
+        "content": "<p>Yes, that's an easy one</p>",
+        "id": 242749922,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623770438
+    },
+    {
+        "content": "<p>yeah ^^</p>",
+        "id": 242749932,
+        "sender_full_name": "Mara",
+        "timestamp": 1623770442
+    },
+    {
+        "content": "<p>the tl;dr is maybe we can have name resolution tell us this info</p>",
+        "id": 242749948,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623770448
+    },
+    {
+        "content": "<p>which seems like a good idea</p>",
+        "id": 242749980,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623770463
+    },
+    {
+        "content": "<blockquote>\n<p>convenient function for finding \"all relevant paths to an item from within the crate\"</p>\n</blockquote>\n<p>Sounds similar to the stuff from <a href=\"https://github.com/rust-lang/rust/pull/73996\">https://github.com/rust-lang/rust/pull/73996</a>.<br>\nIt's expensive to calculate though, so it's only done when there are errors.</p>",
+        "id": 242776276,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1623781090
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123856\">@Vadim Petrochenkov</span> well that aplies in this case</p>",
+        "id": 242928577,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623870868
+    },
+    {
+        "content": "<p>I liked <span class=\"user-mention\" data-user-id=\"310399\">@Mara</span>'s idea though</p>",
+        "id": 242928727,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623870953
+    },
+    {
+        "content": "<p>OK, I poked at this a bit. I pushed a WIP commit that <em>does</em> identify the import id, but doesn't do anything useful with it yet. It also includes two test files that show all the various edge cases  we need to consider, I believe.</p>",
+        "id": 242996743,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623924689
+    },
+    {
+        "content": "<p>There is a <code>debug!</code> at the point where we identify the import, I think the next step is to run with <code>RUSTC_LOG</code> and figure out what we need to do to determine the path and if this is a <code>_</code> import</p>",
+        "id": 242996776,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623924719
+    },
+    {
+        "content": "<p><code>RUSTC_LOG=rustc_typeck::check::method::prelude2021</code> that is</p>",
+        "id": 242996839,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623924734
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> <span aria-label=\"point up\" class=\"emoji emoji-1f446\" role=\"img\" title=\"point up\">:point_up:</span></p>",
+        "id": 242996860,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623924750
+    },
+    {
+        "content": "<p>nice!</p>",
+        "id": 243004753,
+        "sender_full_name": "Mara",
+        "timestamp": 1623929900
+    },
+    {
+        "content": "<p>one case I didn't add tests for: the same trait may be imported from multiple places (some named, some not), I believe</p>",
+        "id": 243030997,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623942047
+    },
+    {
+        "content": "<p>partly I didn't add a test because it didn't seem to matter which one we choose; we could look for a \"best\" though</p>",
+        "id": 243031101,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1623942079
+    },
+    {
+        "content": "<p>fun:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">use</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">io</span>::<span class=\"n\">Read</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">use</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">io</span>::<span class=\"n\">Read</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">use</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">io</span>::<span class=\"n\">Read</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">trait</span><span class=\"w\"> </span><span class=\"n\">X</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n\n<span class=\"k\">use</span><span class=\"w\"> </span><span class=\"bp\">self</span>::<span class=\"n\">X</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">use</span><span class=\"w\"> </span><span class=\"bp\">self</span>::<span class=\"n\">X</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"n\">C</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">use</span><span class=\"w\"> </span><span class=\"bp\">self</span>::<span class=\"n\">X</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"n\">D</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 243031261,
+        "sender_full_name": "Mara",
+        "timestamp": 1623942129
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> have you had any time to poke on this? (I <em>might</em> put in a bit of time over the next hour, will let you know if anything gets done)</p>",
+        "id": 243179676,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624031896
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123856\">@Vadim Petrochenkov</span> it seems to me that the <a href=\"https://github.com/jam1garner/rust/blob/dbc9da7962b7282c5752a7bc2c9907694b7c158c/compiler/rustc_hir/src/hir.rs#L2750-L2755\"><code>HirKind::Use</code></a> simply doesn't store the \"as X\" part of the name -- am I missing something?</p>",
+        "id": 243182209,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624033279
+    },
+    {
+        "content": "<p><em>oh</em></p>",
+        "id": 243182337,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624033347
+    },
+    {
+        "content": "<p>it's the <code>ident</code> of the Item</p>",
+        "id": 243182341,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624033351
+    },
+    {
+        "content": "<p>got it</p>",
+        "id": 243182344,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624033354
+    },
+    {
+        "content": "<p>I have today off, so I was planning on sinking some work into it mid-afternoon. So I can probably just follow up where you leave off!</p>",
+        "id": 243184491,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624034680
+    },
+    {
+        "content": "<p>ok, I made some progress</p>",
+        "id": 243185576,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624035345
+    },
+    {
+        "content": "<p>I'll push a commit</p>",
+        "id": 243185579,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624035347
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> done</p>",
+        "id": 243187913,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624036759
+    },
+    {
+        "content": "<p>there is a FIXME for what I believe to be the final step</p>",
+        "id": 243187921,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624036766
+    },
+    {
+        "content": "<p>Sweet! I’ll take care of that. Thanks for all the help :)</p>",
+        "id": 243190799,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624038393
+    },
+    {
+        "content": "<p>well. it's 'fortunate' for us that it seems like ffishim's organization makes for quite the edge case as far as covering issues. I made a minimal example: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=3465791fd3f15823212fa413e522ec1c\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=3465791fd3f15823212fa413e522ec1c</a></p>",
+        "id": 243201387,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624045638
+    },
+    {
+        "content": "<p>one thing I realized from this: I think in certain cases it's actually impossible to automatically migrate?</p>",
+        "id": 243201494,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624045691
+    },
+    {
+        "content": "<blockquote>\n<p>I think in certain cases it's actually impossible to automatically migrate?</p>\n</blockquote>\n<p>that is incorrect, I'm finding, as the trait being private to you means you can't call the method on <code>dyn Trait</code> (playground link: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f7be46b23cd970a78a18e48d35b3ef7b\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f7be46b23cd970a78a18e48d35b3ef7b</a> )</p>",
+        "id": 243202077,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624046147
+    },
+    {
+        "content": "<p>this whole migration could've been a lot easier if we had an unimport statement</p>",
+        "id": 243202184,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046210
+    },
+    {
+        "content": "<p><code>use !std::convert::TryInto;</code></p>",
+        "id": 243202201,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046220
+    },
+    {
+        "content": "<p>however the primary issue still stands: if the method is called on <code>dyn Trait</code>, the trait itself doesn't need to be in scope, meaning our assumption of \"there must be an import\" is incorrect</p>",
+        "id": 243202203,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624046221
+    },
+    {
+        "content": "<p>but is that a case that would actually break with the new prelude?</p>",
+        "id": 243202260,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046271
+    },
+    {
+        "content": "<p>from what I can tell without double checking, yes? that seems to be happening in ffishim</p>",
+        "id": 243202339,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624046305
+    },
+    {
+        "content": "<p>ah, yeah if you put the <code>use</code> inside the module in your example, it breaks :(</p>",
+        "id": 243202341,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046308
+    },
+    {
+        "content": "<p>the fun part about this one was, since ffishim has a struct of the same name which implements the trait, I believe the current code gives a semi-working correction that only fails due to type incompatibility</p>",
+        "id": 243202413,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624046363
+    },
+    {
+        "content": "<p>in a more convoluted example I'm fairly certain you could abuse associated types in order to make an example of this that actually compiles on our current code but has different behavior</p>",
+        "id": 243202442,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624046393
+    },
+    {
+        "content": "<p>I'm guessing the fix for this is just to detect the case of <code>self</code> being <code>dyn Trait</code>/something that derefs to <code>dyn Trait</code>?</p>",
+        "id": 243202607,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624046482
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> is't the fix here to keep the method syntax, put apply the autoderef expicitly?</p>",
+        "id": 243202748,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046547
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"n\">get_dyn_trait</span><span class=\"p\">()).</span><span class=\"n\">try_into</span><span class=\"p\">().</span><span class=\"n\">unwrap</span><span class=\"p\">()</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 243202751,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046550
+    },
+    {
+        "content": "<p>that compiles</p>",
+        "id": 243202774,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046567
+    },
+    {
+        "content": "<p>with the new prelude import inside the module</p>",
+        "id": 243202789,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046576
+    },
+    {
+        "content": "<p>huh. could impl dyn Trait or something similar break that? (even if it could, that's bordering on \"must be intentionally trying to break this lint\" territory)</p>",
+        "id": 243202971,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624046698
+    },
+    {
+        "content": "<p>the problem doesn't seem to be that the <code>.try_into()</code> becomes ambiguous. the problem here was that the autoderef no longer happens, because the TryInto trait  now matches without deref.</p>",
+        "id": 243203008,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046733
+    },
+    {
+        "content": "<p>the error was</p>\n<div class=\"codehilite\"><pre><span></span><code>the trait bound `u32: From&lt;Box&lt;dyn TryIntoU32&gt;&gt;` is not satisfied\n</code></pre></div>\n<p>and not something about ambiguity</p>",
+        "id": 243203097,
+        "sender_full_name": "Mara",
+        "timestamp": 1624046779
+    },
+    {
+        "content": "<p>yes, although my question is: could the new deref + import cause ambiguity that wasn't possible before? (most of what I've tried indicates no)</p>",
+        "id": 243203260,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624046889
+    },
+    {
+        "content": "<p>I think the answer <em>would</em> be yes, if <code>try_into</code> wasn't consuming (i.e. used <code>&amp;self</code>) as that means it must be <code>Sized</code>, which means you can't implement <code>TryInto&lt;u32&gt; for dyn TryIntoU32</code></p>",
+        "id": 243203429,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047006
+    },
+    {
+        "content": "<p>but due to that implicit Sized bounds, it coincidentally isn't possible to make it amibiguous</p>",
+        "id": 243203468,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047036
+    },
+    {
+        "content": "<p>nice</p>",
+        "id": 243203483,
+        "sender_full_name": "Mara",
+        "timestamp": 1624047047
+    },
+    {
+        "content": "<p>also, the migration doesn't have to be absolutely perfect.</p>",
+        "id": 243203519,
+        "sender_full_name": "Mara",
+        "timestamp": 1624047075
+    },
+    {
+        "content": "<p>I think I'll leave a comment as warning, just in case this code gets reused in the future</p>",
+        "id": 243203531,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047082
+    },
+    {
+        "content": "<p>it doesn't matter for us now, but I'd hate to be the person to have to come up with this edge case in the future if it ever <em>does</em> matter</p>",
+        "id": 243203613,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047139
+    },
+    {
+        "content": "<p>in all likelihood I don't think it'll ever matter, but eh why not</p>",
+        "id": 243203623,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047154
+    },
+    {
+        "content": "<p>sounds good  ^^</p>",
+        "id": 243203634,
+        "sender_full_name": "Mara",
+        "timestamp": 1624047168
+    },
+    {
+        "content": "<p>and just to make sure we're on the same page before I implement, the idea is to</p>\n<p>(a) check if self is <code>dyn Trait</code><br>\n(b) if so, instead of switching to fully qualified syntax, just add the derefs to self</p>",
+        "id": 243203762,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047280
+    },
+    {
+        "content": "<p>yeah that sounds right! but i don't have as much context about the problem as you do, so i can't tell you if that solves all the weird cases you saw ^^'</p>",
+        "id": 243203925,
+        "sender_full_name": "Mara",
+        "timestamp": 1624047399
+    },
+    {
+        "content": "<p>i can imagine it gets a bit annoying for <code>dyn Trait + Thing + ..</code> and things like that.</p>",
+        "id": 243203958,
+        "sender_full_name": "Mara",
+        "timestamp": 1624047439
+    },
+    {
+        "content": "<p>(quite possibly it's not worth it to handle those)</p>",
+        "id": 243204001,
+        "sender_full_name": "Mara",
+        "timestamp": 1624047475
+    },
+    {
+        "content": "<p>yeahhhhh I was thinking the same thing</p>",
+        "id": 243204048,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047485
+    },
+    {
+        "content": "<p>I'm frankly surprised the crater run hit such an impressive edge case. I would be surprised if there is any real-world example of a more difficult to handle variant of this</p>",
+        "id": 243204093,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047526
+    },
+    {
+        "content": "<p>just fork() the compiler to try out a few different solutions until one compiles <span aria-label=\"grimacing\" class=\"emoji emoji-1f62c\" role=\"img\" title=\"grimacing\">:grimacing:</span></p>",
+        "id": 243204110,
+        "sender_full_name": "Mara",
+        "timestamp": 1624047542
+    },
+    {
+        "content": "<p>exactly, ezpz</p>",
+        "id": 243204121,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047551
+    },
+    {
+        "content": "<p>alternative solution: it'd be easier for me to just manually migrate those people's code for them than to go further down this edge case rabbit hole :)</p>",
+        "id": 243204146,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624047575
+    },
+    {
+        "content": "<p>i'd be super happy with this migration even if it doesn't handle that case at all</p>",
+        "id": 243204244,
+        "sender_full_name": "Mara",
+        "timestamp": 1624047605
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"322737\">jam1garner</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/243202203\">said</a>:</p>\n<blockquote>\n<p>however the primary issue still stands: if the method is called on <code>dyn Trait</code>, the trait itself doesn't need to be in scope, meaning our assumption of \"there must be an import\" is incorrect</p>\n</blockquote>\n<p>I think there is a way to handle this, but let me read the rest of the topic to see if y'all got there already :)</p>",
+        "id": 243251180,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111079
+    },
+    {
+        "content": "<p>so, because the <code>dyn Trait</code> method is inherent</p>",
+        "id": 243251312,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111244
+    },
+    {
+        "content": "<p>you can invoke it without having the trait in scope</p>",
+        "id": 243251317,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111254
+    },
+    {
+        "content": "<p>by inserting the right number of <code>*</code></p>",
+        "id": 243251320,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111257
+    },
+    {
+        "content": "<p>e.g.</p>",
+        "id": 243251321,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111259
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>        (*get_dyn_trait()).try_into().unwrap()\n</code></pre></div>",
+        "id": 243251323,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111262
+    },
+    {
+        "content": "<p><a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=ab3cedcd6cba56a04dba7752994606e8\">playground link</a></p>",
+        "id": 243251330,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111278
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> <span aria-label=\"point up\" class=\"emoji emoji-1f446\" role=\"img\" title=\"point up\">:point_up:</span></p>",
+        "id": 243251334,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111302
+    },
+    {
+        "content": "<p>this would actually work for <em>any</em> inherent method</p>",
+        "id": 243251337,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111307
+    },
+    {
+        "content": "<p>alternatively you could do</p>",
+        "id": 243251382,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111331
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>        (&amp;*get_dyn_trait()).try_into().unwrap()\n</code></pre></div>",
+        "id": 243251386,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111334
+    },
+    {
+        "content": "<p>basically, use the same \"add-auto-ref-and-auto-deref\" algorithm, but keep the <code>.</code> notation</p>",
+        "id": 243251391,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624111349
+    },
+    {
+        "content": "<p>yeah that's what i said yesterday</p>",
+        "id": 243266357,
+        "sender_full_name": "Mara",
+        "timestamp": 1624132836
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> can you clarify the desired outcome of <code>future-prelude-collision-shadow.rs</code>? it's marked as <code>check-pass</code>, but has an <code>ERROR</code> comment included. Should it be compile-fail, or should it be check-pass but not have the ERROR? I'm honestly not sure what it could be testing, even if I can vaguely see the intention</p>",
+        "id": 243267712,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624134841
+    },
+    {
+        "content": "<p>(asking mainly because \"editing the test you made so it passes without understanding it\" sounds like a bad idea :P)</p>",
+        "id": 243267754,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624134868
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> I think the \"check-pass\" was in error</p>",
+        "id": 243268654,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624136111
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310399\">Mara</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/243266357\">said</a>:</p>\n<blockquote>\n<p>yeah that's what i said yesterday</p>\n</blockquote>\n<p>ok, sorry, I didn't follow :)</p>",
+        "id": 243268658,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624136118
+    },
+    {
+        "content": "<p>the test arose from me exploring different scenarios</p>",
+        "id": 243268663,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624136139
+    },
+    {
+        "content": "<p>that particular one created a compilation error, so and hence didn't need to be migrated, I wanted to document that</p>",
+        "id": 243268672,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624136151
+    },
+    {
+        "content": "<p>hmmmm. I can't seem to get it to expect cargo-fix to still fail to compile</p>",
+        "id": 243272225,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624141780
+    },
+    {
+        "content": "<p>as far as I can tell from the rustc dev guide, there isn't anything for run-rustfix to produce a failing build</p>",
+        "id": 243272284,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624141840
+    },
+    {
+        "content": "<p>However, I've fixed the last FIXME + the issue I found. So I believe \"should we remove the compile fail test\" is the last outstanding issue I know about?</p>",
+        "id": 243272826,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624142718
+    },
+    {
+        "content": "<p>(and have pushed that as a commit)</p>",
+        "id": 243272828,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624142727
+    },
+    {
+        "content": "<p>I summarized the remaining two issues better on github: <a href=\"https://github.com/rust-lang/rust/pull/85707#issuecomment-864473967\">https://github.com/rust-lang/rust/pull/85707#issuecomment-864473967</a></p>\n<p>I think it's ready for re-review?</p>",
+        "id": 243274293,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624145047
+    },
+    {
+        "content": "<p>So, I was just reading over the PR, but it seems like it doesn't have a test for the dyn case?</p>",
+        "id": 243401196,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624289925
+    },
+    {
+        "content": "<p>Did I miss something?</p>",
+        "id": 243401228,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624289931
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> do you have a test to add? I can try to make one</p>",
+        "id": 243401562,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624290012
+    },
+    {
+        "content": "<p>There was a test case linked earlier in this thread: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=3465791fd3f15823212fa413e522ec1c\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=3465791fd3f15823212fa413e522ec1c</a></p>",
+        "id": 243401829,
+        "sender_full_name": "Mara",
+        "timestamp": 1624290139
+    },
+    {
+        "content": "<p>Ah yep forgot to add that to the rust tree. Feel free to if you’d like, otherwise I’ll add it when I get off work</p>",
+        "id": 243402620,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624290516
+    },
+    {
+        "content": "<p>I've got a test</p>",
+        "id": 243402715,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624290573
+    },
+    {
+        "content": "<p>I was trying to make a test for other sorts of inherent methods</p>",
+        "id": 243402723,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624290579
+    },
+    {
+        "content": "<p>but it didn't quite seem to trigger, for reasons I don't understand</p>",
+        "id": 243402731,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624290587
+    },
+    {
+        "content": "<p>by which I mean: no lint, and the code worked in Rust 2021</p>",
+        "id": 243402843,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624290628
+    },
+    {
+        "content": "<p>rust works in mysterious ways</p>",
+        "id": 243403294,
+        "sender_full_name": "Mara",
+        "timestamp": 1624290809
+    },
+    {
+        "content": "<p>current status: fighting compile test</p>",
+        "id": 243403419,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624290854
+    },
+    {
+        "content": "<p>ok</p>",
+        "id": 243403514,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624290897
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310399\">Mara</span> <a href=\"#narrow/stream/268952-edition-2021/topic/Prelude.20Changes.20Lint/near/243403294\">said</a>:</p>\n<blockquote>\n<p>rust works in mysterious ways</p>\n</blockquote>\n<p>Really though. Autoref/autoderef/method resolution has a lot of magic going on to make things Just Work. my main takeaway from this lint is that I understand significantly less about it than I thought :)</p>",
+        "id": 243431807,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624304114
+    },
+    {
+        "content": "<p>I feel lke it's largely a success if you didn't know how much you didn't know</p>",
+        "id": 243434691,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624305497
+    },
+    {
+        "content": "<p>(i.e., it's not biting you on the regular :)</p>",
+        "id": 243434702,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624305503
+    },
+    {
+        "content": "<p>though I do sometimes wish it were simpler</p>",
+        "id": 243434715,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624305510
+    },
+    {
+        "content": "<p>yeah no I 100% agree, I couldn't figure out the wording but \"the reasoning once you understand any given part is clear but it works exactly how you expect, just not how you think you expect\"</p>",
+        "id": 243435358,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624305838
+    },
+    {
+        "content": "<p>r+d</p>",
+        "id": 243436471,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1624306386
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"310399\">@Mara</span> just to keep you in the loop, I submitted a fix for the issue you cc'd me in on, in case you want to review it or anything. (<a href=\"https://github.com/rust-lang/rust/pull/86657\">https://github.com/rust-lang/rust/pull/86657</a>) However the issue/fix is surface-level enough that I'm pretty sure you could also just ignore and let rust-highfive run its course if it doesn't interest you <span aria-label=\"thumbs up\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"thumbs up\">:thumbs_up:</span></p>",
+        "id": 244049883,
+        "sender_full_name": "jam1garner",
+        "timestamp": 1624769737
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"322737\">@jam1garner</span> that was fast! thanks! looks good to me, but I don't think i should be the one r+'ing it since i'm not on compiler(-contributors).</p>",
+        "id": 244061022,
+        "sender_full_name": "Mara",
+        "timestamp": 1624790644
+    },
+    {
+        "content": "<p>I ran into a small issue with the lint: <a href=\"https://github.com/rust-lang/rust/issues/86940\">#86940</a></p>\n<p>It suggests to change <code>X::from_iter</code> to <code>&lt;X as Trait&gt;::from_iter</code> when it should be <code>&lt;X&lt;_&gt; as Trait&gt;::from_iter</code>.</p>",
+        "id": 245194199,
+        "sender_full_name": "Mara",
+        "timestamp": 1625670032
+    }
+]

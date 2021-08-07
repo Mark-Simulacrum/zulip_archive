@@ -1,0 +1,266 @@
+[
+    {
+        "content": "<p>Hello!<br>\nWhile trying to add some tests for <code>Duration</code> in order to constify the rest of the methods, i encountered this behavior: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=87b3e97d49f1002d0fbb32510b8d33f9\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=87b3e97d49f1002d0fbb32510b8d33f9</a><br>\nTL;DR a value returned by <code>as_secs_f32</code> can panic when passed back to <code>from_secs_f32</code>.<br>\nI find this behavior rather odd, is this intended?</p>",
+        "id": 208484874,
+        "sender_full_name": "marmeladema",
+        "timestamp": 1598793447
+    },
+    {
+        "content": "<p>This is probably floating point rounding.</p>",
+        "id": 208484924,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1598793491
+    },
+    {
+        "content": "<p>Hum ok that's unfortunate</p>",
+        "id": 208485124,
+        "sender_full_name": "marmeladema",
+        "timestamp": 1598793886
+    },
+    {
+        "content": "<p>I think it's an actual bug.</p>\n<p><code>from_secs_f32</code> says that it panics (only) if the duration overflows. <code>new</code> also panics if the duration overflows. So you shouldn't be able to trigger a panic using <code>from_secs_f32</code> on a value created using <code>new</code>.</p>\n<p>Here's how it happens:</p>\n<ol>\n<li><code>new</code> checks for overflow in integer precision (96 bits): <a href=\"https://doc.rust-lang.org/src/core/time.rs.html#134-139\">https://doc.rust-lang.org/src/core/time.rs.html#134-139</a></li>\n<li>But <code>from_secs_f32</code> checks for overflow in f32 precision (24 bits): <a href=\"https://doc.rust-lang.org/src/core/time.rs.html#636-653\">https://doc.rust-lang.org/src/core/time.rs.html#636-653</a></li>\n</ol>\n<p>The bug happens for f32 because the calculated overflow limit uses a greater than or equal check, excluding some valid values. (Greater than doesn't work either - it would allow some invalid values.)</p>\n<p>To fix this bug, do the secs division in u128, check the range, panic if needed, then convert to u64.</p>\n<p>(<code>from_secs_f64</code> also has a similar bug, because its limit has a precision of 53 bits.)</p>",
+        "id": 208508833,
+        "sender_full_name": "teor",
+        "timestamp": 1598829444
+    },
+    {
+        "content": "<p><em>Related Issue</em></p>\n<p>Unfortunately, there is still another rounding issue in <code>from_secs_f32</code>, and I don't think it has a neat solution.</p>\n<p><code>secs * (NANOS_PER_SEC as f32)</code> rounds twice. Once for the conversion (32 bits to 24 bits precision), and once for the multiplication.</p>\n<p>The f64 equivalent <code>secs * (NANOS_PER_SEC as f64)</code> only rounds once. f64 has 53 bits of precision, so the conversion does not round.</p>\n<p>So people who run into issues with <code>from_secs_f32</code> could try using <code>from_secs_f64</code> as a workaround. Documenting that workaround is probably the best we can do here.</p>\n<p>(We could use f64 inside <code>from_secs_f32</code>, but that might be surprising. And it doesn't remove all the rounding. We can't multiply using u128, because then we'd lose precision for smaller f32 values.)</p>",
+        "id": 208509211,
+        "sender_full_name": "teor",
+        "timestamp": 1598830136
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"325209\">@teor</span> Why would it be surprising to use a larger precision internally for that conversion?</p>",
+        "id": 208509309,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598830245
+    },
+    {
+        "content": "<p>Are there platforms where f64 calculations are significantly more expensive?</p>",
+        "id": 208509321,
+        "sender_full_name": "teor",
+        "timestamp": 1598830277
+    },
+    {
+        "content": "<p>To a first approximation \"most of them\", as far as I know.</p>",
+        "id": 208509329,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598830295
+    },
+    {
+        "content": "<p>But this seems like a correctness issue.</p>",
+        "id": 208509333,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598830305
+    },
+    {
+        "content": "<p>(The same goes for using u128 internally.)</p>",
+        "id": 208509336,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598830317
+    },
+    {
+        "content": "<p>Is there some way we can avoid the double-rounding without using f64?</p>",
+        "id": 208509460,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598830461
+    },
+    {
+        "content": "<p>No, it's inherent in the precision of f32. 24 bits of precision for a 30 bit constant means you always lose 6 bits.</p>",
+        "id": 208509487,
+        "sender_full_name": "teor",
+        "timestamp": 1598830542
+    },
+    {
+        "content": "<p>It seems unlikely to me that <code>Duration::from_secs_f32</code> would be on anyone's hot path.</p>",
+        "id": 208509685,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598830814
+    },
+    {
+        "content": "<p>Yeah it shouldn't be</p>",
+        "id": 208509696,
+        "sender_full_name": "teor",
+        "timestamp": 1598830839
+    },
+    {
+        "content": "<p>Doing the multiplication in a sufficiently high-precision type seems like it'd be preferable, especially if that addresses round-tripping failures.</p>",
+        "id": 208509701,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598830854
+    },
+    {
+        "content": "<p>I think using f64 internally is the way to go. f32 has 24 bits of precision, and NANOS_PER_SEC is a 30 bit constant. So <code>secs * (NANOS_PER_SEC as f64)</code> has 54 bits of precision, which almost fits in the 53 bits of a f64.</p>\n<p>So the conversion is exact, and the multiplication loses an extra 1 bit. Then the conversion to u128 loses no precision (but it might round).</p>",
+        "id": 208509711,
+        "sender_full_name": "teor",
+        "timestamp": 1598830891
+    },
+    {
+        "content": "<p>So you could still have a round-trip failure due to the lost extra bit, or the rounding during multiplication or conversion.</p>\n<p>But it would be extremely rare. (And might be impossible, if all the rounding happens in the right direction.)</p>",
+        "id": 208509797,
+        "sender_full_name": "teor",
+        "timestamp": 1598831033
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"325209\">@teor</span> Is it actually accurate to describe <code>1000000000</code> as a \"30-bit\" constant? I don't think it needs that much precision, in floating-point terms.</p>",
+        "id": 208509857,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831125
+    },
+    {
+        "content": "<p>In binary: 0b111011100110101100101000000000</p>",
+        "id": 208509861,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831141
+    },
+    {
+        "content": "<p>I <em>think</em> that's a 20-bit constant (because it's 21 bits wide and floating point gives you one 1 bit for free).</p>",
+        "id": 208509909,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831190
+    },
+    {
+        "content": "<p>I just checked, and 1000000000 converts exactly into an f32.</p>",
+        "id": 208509920,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831235
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">c</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">1000000000</span><span class=\"k\">u64</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">println</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"s\">&quot;{}&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">c</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">f64</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">println</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"s\">&quot;{}&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">c</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">f32</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 208509923,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831245
+    },
+    {
+        "content": "<p>Output:</p>\n<div class=\"codehilite\"><pre><span></span><code>1000000000\n1000000000\n</code></pre></div>",
+        "id": 208509926,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831258
+    },
+    {
+        "content": "<p>If I do the same thing with 1000000001, the f32 gets truncated to 1000000000.</p>",
+        "id": 208509930,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831275
+    },
+    {
+        "content": "<p>You're definitely likely to lose precision in the multiplication, but you shouldn't lose any in the conversion.</p>",
+        "id": 208509993,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831352
+    },
+    {
+        "content": "<p>I think you might have confused nanosecond and microsecond. There are 10^9 nanoseconds in a second, which is slightly less than 2^30, because 10^3 is slightly less than 2^10.</p>",
+        "id": 208510076,
+        "sender_full_name": "teor",
+        "timestamp": 1598831517
+    },
+    {
+        "content": "<p>Oh right, I see what you're saying, you're taking the powers of two into account.</p>",
+        "id": 208510125,
+        "sender_full_name": "teor",
+        "timestamp": 1598831577
+    },
+    {
+        "content": "<p>Right; precision only depends on the \"width\" from the first 1 to the last 1.</p>",
+        "id": 208510135,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831608
+    },
+    {
+        "content": "<p>The point floats. :)</p>",
+        "id": 208510137,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831613
+    },
+    {
+        "content": "<p>I know that it takes 30 bits to represent <code>10**9</code> as an integer, but it doesn't take that many bits to represent it as a floating-point mantissa.</p>",
+        "id": 208510199,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831700
+    },
+    {
+        "content": "<p>The trailing zeroes don't count.</p>",
+        "id": 208510209,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831707
+    },
+    {
+        "content": "<p>Yeah since there's a factor of 2^9, you get those bits in the exponent.</p>",
+        "id": 208510212,
+        "sender_full_name": "teor",
+        "timestamp": 1598831711
+    },
+    {
+        "content": "<p>Exactly. So I don't <em>think</em> it's a problem. I could still imagine someone wanting more precision in the multiplication, but in <em>that</em> case, I think they <em>should</em> call <code>from_secs_f64</code>.</p>",
+        "id": 208510264,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598831769
+    },
+    {
+        "content": "<p>Yeah so if you work purely in f32, then your multiplication result has 24 + 21 = 45 bits of precision. Which is rounded to the nearest 24 bits.</p>\n<p>So using f64 internally would get you an exact multiplication result, which would further reduce your round-trip errors. But you'd still see rounding on conversion to and from integers, so there would still be some edge cases.</p>\n<p>Not sure if it's worth it.</p>",
+        "id": 208510422,
+        "sender_full_name": "teor",
+        "timestamp": 1598832085
+    },
+    {
+        "content": "<p>I think using symmetrical conversions would be less likely to cause errors. And easier to maintain.</p>",
+        "id": 208510490,
+        "sender_full_name": "teor",
+        "timestamp": 1598832238
+    },
+    {
+        "content": "<p>Also, I <em>think</em> that multiplications of two floating-point values use enough precision internally that they give the right bits in the answer up to rounding.</p>",
+        "id": 208510559,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598832336
+    },
+    {
+        "content": "<p>Yes, that's the IEEE 754 standard, <em>if</em> the CPU implements it correctly</p>",
+        "id": 208510622,
+        "sender_full_name": "teor",
+        "timestamp": 1598832430
+    },
+    {
+        "content": "<p>If it doesn't, that's definitely not Rust's issue to fix.</p>",
+        "id": 208510632,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1598832456
+    },
+    {
+        "content": "<p>Rounding can be wrong though - if the conversion from Duration to f32 rounds up, then the multiplication rounds up, you could get an overflow when checking if the result fits in the Duration. But that's still better than the current check, which is guaranteed to fail on large values.</p>",
+        "id": 208510698,
+        "sender_full_name": "teor",
+        "timestamp": 1598832571
+    },
+    {
+        "content": "<p>So is it a bug after all? I think if it's expected, we should probably mention in the doc that from_secs_f32 can panic even for value previously returned by as_secs_f32.</p>",
+        "id": 208519839,
+        "sender_full_name": "marmeladema",
+        "timestamp": 1598848499
+    },
+    {
+        "content": "<p>And same for f64</p>",
+        "id": 208519861,
+        "sender_full_name": "marmeladema",
+        "timestamp": 1598848531
+    },
+    {
+        "content": "<p>Yes, it's a bug.</p>\n<p>We should fix <code>from_secs_f32</code> and <code>from_secs_f64</code> to do their overflow checks on integers, rather than floating point values.</p>\n<p>And we should mention in the doc that in very rare cases, either function could still panic on round-trip, due to double-rounding.</p>",
+        "id": 208521933,
+        "sender_full_name": "teor",
+        "timestamp": 1598852308
+    },
+    {
+        "content": "<p>I see! Thanks! I'll try to provide a fix and probably ask here for advises if I am stuck</p>",
+        "id": 208522395,
+        "sender_full_name": "marmeladema",
+        "timestamp": 1598853173
+    },
+    {
+        "content": "<p>That would be great, feel free to ping me here or on GitHub as @teor2345 if you'd like a code review.</p>\n<p>(I can help with the calculations, but others will need to check the Rust project side of things.)</p>",
+        "id": 208531418,
+        "sender_full_name": "teor",
+        "timestamp": 1598862371
+    }
+]

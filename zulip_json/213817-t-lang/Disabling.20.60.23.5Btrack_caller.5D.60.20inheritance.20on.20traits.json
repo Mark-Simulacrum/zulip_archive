@@ -1,0 +1,116 @@
+[
+    {
+        "content": "<p>After revisiting PR <a href=\"https://github.com/rust-lang/rust/pull/81360\">https://github.com/rust-lang/rust/pull/81360</a>, I realized that the current (stable) behavior of <code>#[track_caller]</code> on traits does not support an important use-case:</p>\n<p>Suppose that we have an existing function with <code>#[track_caller]</code> applied:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[track_caller]</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"fm\">unimplemented!</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Later on, we decide to make this function <code>async</code>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[track_caller]</span><span class=\"w\"></span>\n<span class=\"k\">async</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"fm\">unimplemented!</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>However, this currently will not work as expected. Even if we start forwarding <code>#[track_caller]</code> to the underlying generator that's returned by <code>foo</code>, all of the calls to the returned future will go through the <code>Future</code> trait. If we make this future into a trait object (e.g. <code>Pin&lt;Box&lt;dyn Future&gt;&gt;</code>), then we will <em>not</em> forward the caller location information, since <code>Future::poll</code> does not have <code>#[track_caller]</code>.</p>\n<p>If we were to add <code>#[track_caller]</code> to <code>Future::poll</code>, then we would force <em>all</em> implementations of <code>Future</code> to be <code>#[track_caller]</code>, since the <code>#[track_caller]</code> attribute would get inherited by the impl. In the vast majority of cases, this would be the wrong decision - we want panics / caller locations to point into the <code>Future</code> implementation, not whatever code happened to call it.</p>\n<p>I propose that we add a new mode: <code>#[track_caller(no_inherit)]</code> (name bikesheddable). This would suppress the inheritance behavior - we would only forward the caller location argument if the trait implementation has <code>#[track_caller]</code>. This would introduce some overhead for trait objects (we would need to pass in the caller location parameter in case the implementation has <code>#[track_caller]</code>), but would not impact monomorphized calls.</p>\n<div class=\"codehilite\"><pre><span></span><code>\n</code></pre></div>",
+        "id": 241573815,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1622830425
+    },
+    {
+        "content": "<p>oof, that's pretty rough!</p>",
+        "id": 241573991,
+        "sender_full_name": "anp",
+        "timestamp": 1622830503
+    },
+    {
+        "content": "<p>i like the idea of letting traits mark it as available to implementations but not required, but im curious whether the performance of the extra arg for trait objects is measurable, esp. with something like <code>Future</code></p>",
+        "id": 241574148,
+        "sender_full_name": "anp",
+        "timestamp": 1622830580
+    },
+    {
+        "content": "<p>My working assumption is that these extra parameters are actually free</p>",
+        "id": 245083973,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1625598068
+    },
+    {
+        "content": "<p>Is there any evidence to the contrary?</p>",
+        "id": 245083985,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1625598073
+    },
+    {
+        "content": "<p>what do you mean by \"free\" I guess? Certainly they cause a little extra register pressure</p>",
+        "id": 245084728,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1625598396
+    },
+    {
+        "content": "<p>and at call sites there's a few more instructions to setup the registers, I assume, right?</p>",
+        "id": 245084825,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1625598447
+    },
+    {
+        "content": "<p>The extra parameter could also be the one that spills onto the stack, for a reasonably large number of parameters, so it could cost a full push/pop</p>",
+        "id": 245086278,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1625599137
+    },
+    {
+        "content": "<p>To the best of my knowledge there has been no thorough review of the impact of this attribute at all. It just gets slap'd on whatever functions people find panicked without much useful info.</p>",
+        "id": 245089452,
+        "sender_full_name": "nagisa",
+        "timestamp": 1625600705
+    },
+    {
+        "content": "<p>And if there was ever an attempt to quantify the perf impact it was by running the perfbot, which measures the compilation times and therefore is very unlikely to reveal much about the impact to a function which the compiler might very well not be using at all.</p>",
+        "id": 245089632,
+        "sender_full_name": "nagisa",
+        "timestamp": 1625600783
+    },
+    {
+        "content": "<p>In practice these arguments will be free if the function that was annotated with <code>#[track_caller]</code> gets inlined.</p>",
+        "id": 245089706,
+        "sender_full_name": "nagisa",
+        "timestamp": 1625600827
+    },
+    {
+        "content": "<p>That's because in absence of <code>#[track_caller]</code> we'd just set up a different location info in the same place.</p>",
+        "id": 245089768,
+        "sender_full_name": "nagisa",
+        "timestamp": 1625600861
+    },
+    {
+        "content": "<p>what I mean by \"free\" is that I think it's unlikely to have real impact</p>",
+        "id": 245090360,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1625601147
+    },
+    {
+        "content": "<p>but I definitely think testing that hypothesis is a good idea!</p>",
+        "id": 245090373,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1625601159
+    },
+    {
+        "content": "<p>well, some methods are very hot code, like collecting into collections. those loops may allocate and thus panic</p>",
+        "id": 245090513,
+        "sender_full_name": "The 8472",
+        "timestamp": 1625601238
+    },
+    {
+        "content": "<p>allocation failure wouldn't panic, just abort (at least, as currently implemented)</p>",
+        "id": 245093751,
+        "sender_full_name": "bstrie",
+        "timestamp": 1625603007
+    },
+    {
+        "content": "<p>I do remember seeing some uses of <code>#[track_caller]</code> on very hot functions for which a perf run showed a substantial hit.</p>",
+        "id": 245095192,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1625603762
+    },
+    {
+        "content": "<p>I think the reserve() code paths still contain potential panics due to arithmetic overflows</p>",
+        "id": 245097608,
+        "sender_full_name": "The 8472",
+        "timestamp": 1625604976
+    },
+    {
+        "content": "<p>It would be nice to be able to opt into this even if no default solution is good.</p>",
+        "id": 248367095,
+        "sender_full_name": "Jeremiah Senkpiel",
+        "timestamp": 1628091378
+    }
+]

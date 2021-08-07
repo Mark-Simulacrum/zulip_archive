@@ -1,0 +1,530 @@
+<html>
+<head><meta charset="utf-8"><title>MIR building of `let _ = ...` · t-compiler/help · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/index.html">t-compiler/help</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html">MIR building of `let _ = ...`</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="221029939"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221029939" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221029939">(Dec 28 2020 at 00:19)</a>:</h4>
+<p>To fix <a href="https://github.com/rust-lang/rust/issues/80059">#80059</a>, I need to figure out why the following code:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">foo</span><span class="p">(</span><span class="n">ptr</span>: <span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">ptr</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>optimizes away the pointer dereference, even with <code>-Zmir-opt-level=0</code></p>
+
+
+
+<a name="221030017"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030017" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030017">(Dec 28 2020 at 00:21)</a>:</h4>
+<p>ah yes, the <code>_</code> binding special casing... fun</p>
+
+
+
+<a name="221030068"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030068" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030068">(Dec 28 2020 at 00:22)</a>:</h4>
+<p>so... super quick intro into mir building. The birds eye view is that we shallowly translate <code>HIR</code> to <code>THIR</code> which then gets converted to <code>MIR</code> by recursively walking the <code>THIR</code></p>
+
+
+
+<a name="221030078"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030078" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030078">(Dec 28 2020 at 00:22)</a>:</h4>
+<p>I think I kind of understand the process</p>
+
+
+
+<a name="221030083"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030083" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030083">(Dec 28 2020 at 00:23)</a>:</h4>
+<p><code>THIR</code> is a funky thing that doesn't fully convert a <code>HIR</code> node to a <code>THIR</code> equivalent, but only the <em>outermost</em> node</p>
+
+
+
+<a name="221030084"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030084" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030084">(Dec 28 2020 at 00:23)</a>:</h4>
+<p>But the pattern matching stuff just throws me out :(</p>
+
+
+
+<a name="221030086"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030086" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030086">(Dec 28 2020 at 00:23)</a>:</h4>
+<p>oh yea, that's a different beast</p>
+
+
+
+<a name="221030090"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030090" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030090">(Dec 28 2020 at 00:23)</a>:</h4>
+<p>but I think you don't need to get into it too deep</p>
+
+
+
+<a name="221030094"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030094" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030094">(Dec 28 2020 at 00:23)</a>:</h4>
+<p>Hopefully</p>
+
+
+
+<a name="221030097"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030097" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030097">(Dec 28 2020 at 00:23)</a>:</h4>
+<p>And many builder functions take a <code>BasicBlockData</code> and return a <code>BlockAnd&lt;{some-other-data}&gt;</code>.</p>
+
+
+
+<a name="221030133"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030133" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030133">(Dec 28 2020 at 00:24)</a>:</h4>
+<p>the only thing you are interested in is <code>PatKind::Wild</code></p>
+
+
+
+<a name="221030147"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030147" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030147">(Dec 28 2020 at 00:25)</a>:</h4>
+<p>Looks like <a href="https://github.com/rust-lang/rust/blob/257becbfe4987d1f7b12af5a8dd5ed96697cd2e8/compiler/rustc_mir_build/src/build/block.rs#L104-L106">this</a> might be the relevant code:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">                </span><span class="n">StmtKind</span>::<span class="n">Let</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">remainder_scope</span><span class="p">,</span><span class="w"> </span><span class="n">init_scope</span><span class="p">,</span><span class="w"> </span><span class="n">pattern</span><span class="p">,</span><span class="w"> </span><span class="n">initializer</span><span class="p">,</span><span class="w"> </span><span class="n">lint_level</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="n">ignores_expr_result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="fm">matches!</span><span class="p">(</span><span class="o">*</span><span class="n">pattern</span><span class="p">.</span><span class="n">kind</span><span class="p">,</span><span class="w"> </span><span class="n">PatKind</span>::<span class="n">Wild</span><span class="p">);</span><span class="w"></span>
+<span class="w">                    </span><span class="n">this</span><span class="p">.</span><span class="n">block_context</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">BlockFrame</span>::<span class="n">Statement</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ignores_expr_result</span><span class="w"> </span><span class="p">});</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="221030151"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030151" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030151">(Dec 28 2020 at 00:25)</a>:</h4>
+<p>that looks very promising</p>
+
+
+
+<a name="221030153"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030153" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030153">(Dec 28 2020 at 00:25)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="307537">Camelid</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60/near/221030147">said</a>:</p>
+<blockquote>
+<p>Looks like this might be the relevant code:</p>
+<p><div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">                </span><span class="n">StmtKind</span>::<span class="n">Let</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">remainder_scope</span><span class="p">,</span><span class="w"> </span><span class="n">init_scope</span><span class="p">,</span><span class="w"> </span><span class="n">pattern</span><span class="p">,</span><span class="w"> </span><span class="n">initializer</span><span class="p">,</span><span class="w"> </span><span class="n">lint_level</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="n">ignores_expr_result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="fm">matches!</span><span class="p">(</span><span class="o">*</span><span class="n">pattern</span><span class="p">.</span><span class="n">kind</span><span class="p">,</span><span class="w"> </span><span class="n">PatKind</span>::<span class="n">Wild</span><span class="p">);</span><span class="w"></span>
+<span class="w">                    </span><span class="n">this</span><span class="p">.</span><span class="n">block_context</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">BlockFrame</span>::<span class="n">Statement</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ignores_expr_result</span><span class="w"> </span><span class="p">});</span><span class="w"></span>
+</code></pre></div><br>
+</p>
+</blockquote>
+<p>This is what I thought! But I don't see where that BlockFrame gets used</p>
+
+
+
+<a name="221030196"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030196" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030196">(Dec 28 2020 at 00:26)</a>:</h4>
+<p>so... has there been any discussion about how this should get resolved? I'm not sure I'm up to date on the issue, even if aware of it?</p>
+
+
+
+<a name="221030209"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030209" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030209">(Dec 28 2020 at 00:26)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/issues/80059#issuecomment-751527973">Relevant comment</a></p>
+
+
+
+<a name="221030219"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030219" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030219">(Dec 28 2020 at 00:27)</a>:</h4>
+<p>Basically, I think this code should be compiled like</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="n">ptr</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="221030221"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030221" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030221">(Dec 28 2020 at 00:27)</a>:</h4>
+<p>Which does emit the deref in the raw MIR</p>
+
+
+
+<a name="221030222"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030222" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030222">(Dec 28 2020 at 00:27)</a>:</h4>
+<p>hmm... but... that's not quite the same thing</p>
+
+
+
+<a name="221030266"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030266" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030266">(Dec 28 2020 at 00:28)</a>:</h4>
+<p>I just posted this on the issue:</p>
+<blockquote>
+<p>I think scottmcm is saying that adding curly braces makes a new value, rather than a "projection" on a Place. A projection is a field access, a pointer dereference, etc.</p>
+</blockquote>
+
+
+
+<a name="221030269"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030269" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030269">(Dec 28 2020 at 00:28)</a>:</h4>
+<p>Right, but it sounds fine to lower it to the same MIR, doesn't it?</p>
+
+
+
+<a name="221030273"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030273" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030273">(Dec 28 2020 at 00:28)</a>:</h4>
+<p>I find it helpful to look at the MIR output on the Playground to figure out what's going on, so I'll be right back <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="221030283"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030283" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030283">(Dec 28 2020 at 00:29)</a>:</h4>
+<p>that is far after optimizations, you'll likely want to do local mir dumps and look at the mir right after building</p>
+
+
+
+<a name="221030287"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030287" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030287">(Dec 28 2020 at 00:29)</a>:</h4>
+<p>(I used godbolt to set the <code>-Zmir-opt-level=0</code>)</p>
+
+
+
+<a name="221030297"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030297" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030297">(Dec 28 2020 at 00:30)</a>:</h4>
+<p>still, we have guaranteed optimizations like deaggregation, which can really change the MIR in nontrivial ways</p>
+
+
+
+<a name="221030338"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030338" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030338">(Dec 28 2020 at 00:30)</a>:</h4>
+<p>Ah <span aria-label="confused" class="emoji emoji-1f615" role="img" title="confused">:confused:</span></p>
+
+
+
+<a name="221030344"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030344" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030344">(Dec 28 2020 at 00:30)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60/near/221030283">said</a>:</p>
+<blockquote>
+<p>that is far after optimizations, you'll likely want to do local mir dumps and look at the mir right after building</p>
+</blockquote>
+<p>What will the filename for that be like?</p>
+
+
+
+<a name="221030348"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030348" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030348">(Dec 28 2020 at 00:30)</a>:</h4>
+<p>well, any solution is probably a breaking change, and what we really need is a way to ensure that the deref happens, but not necessarily cause a move out of the value?</p>
+
+
+
+<a name="221030354"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030354" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030354">(Dec 28 2020 at 00:31)</a>:</h4>
+<p>uh... it was something weird and short... lemme check</p>
+
+
+
+<a name="221030368"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030368" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030368">(Dec 28 2020 at 00:31)</a>:</h4>
+<p><code>....mir_map.0.mir</code></p>
+
+
+
+<a name="221030370"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030370" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030370">(Dec 28 2020 at 00:31)</a>:</h4>
+<p>because... obviously...</p>
+
+
+
+<a name="221030423"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030423" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030423">(Dec 28 2020 at 00:32)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60/near/221030348">said</a>:</p>
+<blockquote>
+<p>well, any solution is probably a breaking change, and what we really need is a way to ensure that the deref happens, but not necessarily cause a move out of the value?</p>
+</blockquote>
+<p>So when you say that <code>*ptr</code> and <code>{ *ptr }</code> are different, it's related to move shenanigans?</p>
+
+
+
+<a name="221030439"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030439" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030439">(Dec 28 2020 at 00:32)</a>:</h4>
+<p>I... think so.. It's 01:30 here, my brain may not be at a useful capacity... writing down my thoughts, sec</p>
+
+
+
+<a name="221030466"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030466" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030466">(Dec 28 2020 at 00:33)</a>:</h4>
+<p>We're on the same timezone :D<br>
+Would you prefer to defer this conversation to tomorrow?</p>
+
+
+
+<a name="221030513"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030513" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030513">(Dec 28 2020 at 00:34)</a>:</h4>
+<p>So... what I'm wondering is instead of treating <code>let _ = ...;</code> as <code>let _ = {...};</code> whether we should essentially make it <code>let _tmp_ = {...}; drop(_tmp);</code>, it gets a bit messy around multiple <code>_</code> patterns within the same main pattern, but I think we'll be able to figure out the drop order</p>
+
+
+
+<a name="221030516"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030516" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030516">(Dec 28 2020 at 00:34)</a>:</h4>
+<p>My main worry is that we're missing some other fancy feature of <code>_</code> patterns</p>
+
+
+
+<a name="221030530"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030530" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030530">(Dec 28 2020 at 00:35)</a>:</h4>
+<p>Never mind, that was for non-<code>_</code> <span aria-label="embarrassed" class="emoji emoji-1f633" role="img" title="embarrassed">:embarrassed:</span></p>
+
+
+
+<a name="221030576"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030576" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030576">(Dec 28 2020 at 00:36)</a>:</h4>
+<p>for example: <code>let (_, some_i32) = ...;</code> does not move out of <code>...</code> even if <code>_</code> refers to a <code>String</code> (see <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=e233032675b7a8df2fd6555f7e7eb852">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=e233032675b7a8df2fd6555f7e7eb852</a>)</p>
+
+
+
+<a name="221030581"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030581" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030581">(Dec 28 2020 at 00:36)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="307537">Camelid</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60/near/221030530">said</a>:</p>
+<blockquote>
+<p>Never mind, that was for non-<code>_</code> <span aria-label="embarrassed" class="emoji emoji-1f633" role="img" title="embarrassed">:embarrassed:</span></p>
+</blockquote>
+<p>Just curious, what command(s) are you using?</p>
+
+
+
+<a name="221030586"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030586" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030586">(Dec 28 2020 at 00:37)</a>:</h4>
+<p>so we actually need to treat <code>_</code> as a <code>ref</code> pattern to make sure it does not cause a move</p>
+
+
+
+<a name="221030594"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030594" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030594">(Dec 28 2020 at 00:37)</a>:</h4>
+<p>but <code>let _ = s;</code> needs to move out of <code>s</code></p>
+
+
+
+<a name="221030596"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030596" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030596">(Dec 28 2020 at 00:37)</a>:</h4>
+<p>I think? checking... sec</p>
+
+
+
+<a name="221030600"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030600" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030600">(Dec 28 2020 at 00:37)</a>:</h4>
+<p><a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f9d9d5e870efcd97473f845a01790fe4">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f9d9d5e870efcd97473f845a01790fe4</a> nope, does not move</p>
+
+
+
+<a name="221030601"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030601" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030601">(Dec 28 2020 at 00:37)</a>:</h4>
+<p>ok, so <code>_</code> is a ref pattern</p>
+
+
+
+<a name="221030639"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030639" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030639">(Dec 28 2020 at 00:38)</a>:</h4>
+<p>so you can't use the "block trick"</p>
+
+
+
+<a name="221030642"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030642" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030642">(Dec 28 2020 at 00:38)</a>:</h4>
+<p>Here's the <em>correct</em> MIR dump:</p>
+<h1>NO curly braces</h1>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="c1">// MIR for `foo` 0 mir_map</span>
+
+<span class="k">fn</span> <span class="nf">foo</span><span class="p">(</span><span class="n">_1</span>: <span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">debug</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">_1</span><span class="p">;</span><span class="w">                     </span><span class="c1">// in scope 0 at no-curlies.rs:1:12: 1:15</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">_0</span>: <span class="p">();</span><span class="w">                      </span><span class="c1">// return place in scope 0 at no-curlies.rs:1:30: 1:30</span>
+<span class="w">    </span><span class="n">scope</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">bb0</span>: <span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">_0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">();</span><span class="w">                   </span><span class="c1">// scope 0 at no-curlies.rs:1:30: 3:2</span>
+<span class="w">        </span><span class="k">return</span><span class="p">;</span><span class="w">                          </span><span class="c1">// scope 0 at no-curlies.rs:3:2: 3:2</span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<h1>YES curly braces</h1>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="c1">// MIR for `foo` 0 mir_map</span>
+
+<span class="k">fn</span> <span class="nf">foo</span><span class="p">(</span><span class="n">_1</span>: <span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">debug</span><span class="w"> </span><span class="n">ptr</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">_1</span><span class="p">;</span><span class="w">                     </span><span class="c1">// in scope 0 at yes-curlies.rs:1:12: 1:15</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">_0</span>: <span class="p">();</span><span class="w">                      </span><span class="c1">// return place in scope 0 at yes-curlies.rs:1:30: 1:30</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">_2</span>: <span class="kt">bool</span><span class="p">;</span><span class="w">                    </span><span class="c1">// in scope 0 at yes-curlies.rs:2:13: 2:21</span>
+<span class="w">    </span><span class="n">scope</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">bb0</span>: <span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">StorageLive</span><span class="p">(</span><span class="n">_2</span><span class="p">);</span><span class="w">                 </span><span class="c1">// scope 0 at yes-curlies.rs:2:13: 2:21</span>
+<span class="w">        </span><span class="n">_2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">_1</span><span class="p">);</span><span class="w">                      </span><span class="c1">// scope 0 at yes-curlies.rs:2:15: 2:19</span>
+<span class="w">        </span><span class="n">StorageDead</span><span class="p">(</span><span class="n">_2</span><span class="p">);</span><span class="w">                 </span><span class="c1">// scope 0 at yes-curlies.rs:2:21: 2:22</span>
+<span class="w">        </span><span class="n">_0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="p">();</span><span class="w">                   </span><span class="c1">// scope 0 at yes-curlies.rs:1:30: 3:2</span>
+<span class="w">        </span><span class="k">return</span><span class="p">;</span><span class="w">                          </span><span class="c1">// scope 0 at yes-curlies.rs:3:2: 3:2</span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="221030643"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030643" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030643">(Dec 28 2020 at 00:38)</a>:</h4>
+<p>and we can't use a temporary that we drop</p>
+
+
+
+<a name="221030655"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030655" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030655">(Dec 28 2020 at 00:39)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="255061">Léo Lanteri Thauvin</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60/near/221030581">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="307537">Camelid</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60/near/221030530">said</a>:</p>
+<blockquote>
+<p>Never mind, that was for non-<code>_</code> <span aria-label="embarrassed" class="emoji emoji-1f633" role="img" title="embarrassed">:embarrassed:</span></p>
+</blockquote>
+<p>Just curious, what command(s) are you using?</p>
+</blockquote>
+<div class="codehilite" data-code-language="Bash Session"><pre><span></span><code><span class="gp">$</span> rustc +nightly -Z dump-mir<span class="o">=</span>all no-curlies.rs --crate-type<span class="o">=</span>lib
+</code></pre></div>
+<p>Output is in <code>mir_dump/no_curlies.foo.-------.mir_map.0.mir</code> in this case.</p>
+
+
+
+<a name="221030663"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030663" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030663">(Dec 28 2020 at 00:39)</a>:</h4>
+<p>This is "just" for unsafety checking though</p>
+
+
+
+<a name="221030723"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030723" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030723">(Dec 28 2020 at 00:40)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@oli</span> I got the MIR from <code>no_curlies.foo.-------.mir_map.0.mir</code>, but it still doesn't have any code from the deref. Is it not generating the deref at all? (If you're too tired, don't worry about answering :)</p>
+
+
+
+<a name="221030724"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030724" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030724">(Dec 28 2020 at 00:40)</a>:</h4>
+<p>hmm... so... could we just emit a fake read statement for all <code>_</code> patterns?</p>
+
+
+
+<a name="221030740"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030740" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030740">(Dec 28 2020 at 00:41)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="307537">Camelid</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60/near/221030723">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> I got the MIR from <code>no_curlies.foo.-------.mir_map.0.mir</code>, but it still doesn't have any code from the deref. Is it not generating the deref at all? (If you're too tired, don't worry about answering <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+</blockquote>
+<p>you found the <code>ignores_expr_result</code> thing earlier, I'm assuming at its use site it will just not generate code?</p>
+
+
+
+<a name="221030757"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030757" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030757">(Dec 28 2020 at 00:42)</a>:</h4>
+<p>instead of not generating code, we could keep generating a <code>FakeRead</code></p>
+
+
+
+<a name="221030792"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030792" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030792">(Dec 28 2020 at 00:42)</a>:</h4>
+<p>but yea, I'm going to bed now, I don't wanna end up hacking 'till 4am like yesterday <span aria-label="grinning" class="emoji emoji-1f600" role="img" title="grinning">:grinning:</span></p>
+
+
+
+<a name="221030797"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030797" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030797">(Dec 28 2020 at 00:42)</a>:</h4>
+<p>Thanks a lot already <span aria-label="heart" class="emoji emoji-2764" role="img" title="heart">:heart:</span></p>
+
+
+
+<a name="221030870"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221030870" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221030870">(Dec 28 2020 at 00:44)</a>:</h4>
+<p>Thank you Oli! <span aria-label="love" class="emoji emoji-2764" role="img" title="love">:love:</span></p>
+
+
+
+<a name="221031922"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221031922" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221031922">(Dec 28 2020 at 01:13)</a>:</h4>
+<p>This looks the same as <a href="https://github.com/rust-lang/unsafe-code-guidelines/issues/261">https://github.com/rust-lang/unsafe-code-guidelines/issues/261</a> . Is it even clear that this is unintended behavior? Any "fix" here seems like it will make general desugaring more complicated esp. regarding why <code>match *x { pat =&gt; ... }</code> may or may not actually dereference <code>x</code> depending on <code>pat</code></p>
+
+
+
+<a name="221031994"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221031994" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221031994">(Dec 28 2020 at 01:15)</a>:</h4>
+<p>From the issue:</p>
+<blockquote>
+<p>The conversation in the 2020-12-15 lang team meeting implied that this was an unexpected regression, so opening and nomination for further discussion.</p>
+</blockquote>
+
+
+
+<a name="221032362"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221032362" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aman Arora <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221032362">(Dec 28 2020 at 01:25)</a>:</h4>
+<p>I haven't read through all of this but how we pass around things for <code>let _ = x</code> will be changing a bit</p>
+
+
+
+<a name="221032414"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221032414" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aman Arora <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221032414">(Dec 28 2020 at 01:26)</a>:</h4>
+<p>Essentially instead of passing a place around, we will be passing a PlaceBuilder around</p>
+
+
+
+<a name="221032419"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221032419" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221032419">(Dec 28 2020 at 01:26)</a>:</h4>
+<p>I would like to see an RFC or something like that to explain what the overall story is here if something is to change. I don't think this is just a compiler bug because the semantics themselves haven't been hammered down. Under the current semantics, it's not that the dereference of <code>x</code> is optimized away, it never happened - a place was constructed and nothing was done with it, so no MIR is generated, it's not unsafe or cause UB, etc etc. I can definitely see why this result is counterintuitive, but it is regular, and if we deviate from that regularity to decrease surprise factor I would want to see what the actual rules are.</p>
+
+
+
+<a name="221032431"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221032431" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aman Arora <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221032431">(Dec 28 2020 at 01:27)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="281950">Aman Arora</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60/near/221032414">said</a>:</p>
+<blockquote>
+<p>Essentially instead of passing a place around, we will be passing a PlaceBuilder around</p>
+</blockquote>
+<p>This is to fix: <a href="https://github.com/rust-lang/project-rfc-2229/issues/24">https://github.com/rust-lang/project-rfc-2229/issues/24</a> and <a href="https://github.com/rust-lang/project-rfc-2229/issues/32">https://github.com/rust-lang/project-rfc-2229/issues/32</a></p>
+
+
+
+<a name="221032567"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221032567" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221032567">(Dec 28 2020 at 01:30)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60/near/221032419">said</a>:</p>
+<blockquote>
+<p>I would like to see an RFC or something like that to explain what the overall story is here if something is to change. I don't think this is just a compiler bug because the semantics themselves haven't been hammered down. Under the current semantics, it's not that the dereference of <code>x</code> is optimized away, it never happened - a place was constructed and nothing was done with it, so no MIR is generated, it's not unsafe or cause UB, etc etc. I can definitely see why this result is counterintuitive, but it is regular, and if we deviate from that regularity to decrease surprise factor I would want to see what the actual rules are.</p>
+</blockquote>
+<p>I think the reason I'd call it a bug is it <em>only</em> happens for the never type, not <code>std::convert::Infallible</code> or any other user type</p>
+
+
+
+<a name="221032699"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221032699" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221032699">(Dec 28 2020 at 01:35)</a>:</h4>
+<p>Oh I agree about the never type thing, I was referring specifically to <code>let _ = *x;</code> not performing a dereference of <code>x</code>. If <code>x: *const !</code> then under the current semantics I think we should not count this as a dereference, and constructing a place of type <code>!</code> should not cause an <code>unreachable</code> to be emitted unless it appears in an omitted match branch or something of that nature</p>
+
+
+
+<a name="221032749"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221032749" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221032749">(Dec 28 2020 at 01:36)</a>:</h4>
+<p>That is, <code>match *x { _ =&gt; {}}</code> should be a no op while <code>match *x {}</code> dereferences <code>x</code></p>
+
+
+
+<a name="221033095"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221033095" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221033095">(Dec 28 2020 at 01:47)</a>:</h4>
+<p>It just occurred to me that by treating the right side of <code>let x = foo</code> as a place (lvalue) instead of an rvalue, that's literally the origin of the lvalue/rvalue terminology. I know when I first started learning rust that I was tripped up by the fact that the scrutinee of a <code>match</code> expression is an lvalue instead of an rvalue like it is in most languages</p>
+
+
+
+<a name="221033158"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221033158" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Noah Lev <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221033158">(Dec 28 2020 at 01:49)</a>:</h4>
+<p>Can you explain what you mean? I'm curious <span aria-label="grinning" class="emoji emoji-1f600" role="img" title="grinning">:grinning:</span></p>
+
+
+
+<a name="221033403"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221033403" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221033403">(Dec 28 2020 at 01:57)</a>:</h4>
+<p>Well in C, <code>T x = foo()</code> will first evaluate <code>foo()</code> and stick it into <code>x</code>. The right side is an rvalue, the left side is an lvalue. Logical, right? So rvalues mean "values" and lvalues mean "places where we can put things", and then you add on stuff like <code>*x = foo()</code> or <code>*foo() = bar()</code> where both sides have some evaluation content to them but the left side still evaluates to what we would call a place, and the right side is still completely evaluated to a value.</p>
+<p>C doesn't have <code>match</code>, but I guess you could use <code>switch</code> as analogue, and there the thing in the switch is completely evaluated before you get into the branches. Similarly, even in Haskell (you know, the "lazy everything" language) <code>match</code> (or <code>case</code> as they say) is the main engine that drives the full program forward, the one thing in the language that is eager (which makes sense, because you can't continue evaluation until you know which branch to take).</p>
+<p>But Rust lets you write an expression in a <code>match</code> that is not evaluated unless the patterns say it should be. Or rather, it's an lvalue expression, which gets as much evaluation as lvalues usually do. To this day I still find it uncomfortable to write <code>match *pointer_to_big_struct { S { x, ..} =&gt; ...}</code> and prefer to match directly on the pointer because it looks like I'm putting a big rvalue on the stack before I match it.</p>
+
+
+
+<a name="221033544"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221033544" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221033544">(Dec 28 2020 at 02:00)</a>:</h4>
+<p>Given that <code>match</code> works this way, it's not too much of a stretch that <code>let pat = value</code> acts the same as <code>match value { pat =&gt; ... }</code>, but then that means that the canonical example of an rvalue, the right side of a variable expression, is not an rvalue any more. We've got two left feet</p>
+
+
+
+<a name="221033617"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20building%20of%20%60let%20_%20%3D%20...%60/near/221033617" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/182449-t-compiler/help/topic/MIR.20building.20of.20.60let.20_.20.3D.20.2E.2E.2E.60.html#221033617">(Dec 28 2020 at 02:02)</a>:</h4>
+<p>(at least we don't have five feet like C++)</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

@@ -1,0 +1,602 @@
+[
+    {
+        "content": "<p>Hello <span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span>, <span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span>, and anyone else from <span class=\"user-group-mention\" data-user-group-id=\"897\">@T-compiler/meeting</span> who is interested! I'd like to prepare for the design meeting this Friday so we can make progress there and hopefully unblock <a href=\"https://github.com/rust-lang/rust/pull/60035\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/60035\">https://github.com/rust-lang/rust/pull/60035</a>.</p>\n<p>Here are questions I have:</p>\n<ul>\n<li>\n<p>What does the new file format look like? A comment in the PR mentions</p>\n<blockquote>\n<p>The dep graph file format is now a list of changes to apply to the dep graph. Each compiler session will just appended the changes it did to the dep graph file.</p>\n</blockquote>\n<p>I'd like a little bit more detail. Is no part of the existing file overwritten? If so, what does this mean for reading such a file?</p>\n</li>\n<li>\n<p>When and how are changes written to new dep-graph?</p>\n</li>\n<li>Does this approach involve copying the dep-graph file before modifying it?</li>\n<li>Some PR comments mention garbage collection. What exactly is collected? Is the plan to have \"garbage collection\" compilation sessions that take longer?</li>\n</ul>\n<p>Maybe it would also help to walk through the steps that happen when trying to execute a query that turns out to be red.</p>",
+        "id": 179313679,
+        "sender_full_name": "mw",
+        "timestamp": 1572342644
+    },
+    {
+        "content": "<blockquote>\n<p>I'd like a little bit more detail. Is no part of the existing file overwritten? If so, what does this mean for reading such a file?</p>\n</blockquote>\n<p>Normally no part of the existing file overwritten, except when garbage collection occurs, then the entire file is rewritten to remove redundant changes.</p>\n<p>You'd read such a file from start to finish.</p>",
+        "id": 179317579,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572345984
+    },
+    {
+        "content": "<blockquote>\n<p>When and how are changes written to new dep-graph?</p>\n</blockquote>\n<p>Changes to the dep graph is buffered and when the buffer is full it is sent to a background worker. That worker then encodes the changes and appends them to the file. When debugging / testing the dep graph, the background worker also builds an in memory copy. When the compiler is done it flushes the buffer and asks for the background worker to finish, and that will also return the in memory copy for use in testing back to the main thread.</p>",
+        "id": 179317877,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572346228
+    },
+    {
+        "content": "<blockquote>\n<p>Does this approach involve copying the dep-graph file before modifying it?</p>\n</blockquote>\n<p>Yes, but we already copy the entire incremental state, so that's not a regression.</p>",
+        "id": 179317915,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572346268
+    },
+    {
+        "content": "<blockquote>\n<p>Some PR comments mention garbage collection. What exactly is collected?</p>\n</blockquote>\n<p>The dep graph file with the list of changes is garbage collected. We can't keep appending to the dep graph file forever, so we need to remove stuff from it at some point. It's probably the simplest implementation of a key value store, we could change it later to something more advanced that doesn't require garbage collection.</p>\n<blockquote>\n<p>Is the plan to have \"garbage collection\" compilation sessions that take longer?</p>\n</blockquote>\n<p>The garbage collection happens in the background thread which loads the dep graph. If there's free CPU cores, it shouldn't affect overall compilation time.</p>",
+        "id": 179318299,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572346599
+    },
+    {
+        "content": "<p>how is the file encoded? Is it a list of <code>(DepNode, [DepNode]) </code> pairs?</p>",
+        "id": 179320471,
+        "sender_full_name": "mw",
+        "timestamp": 1572348657
+    },
+    {
+        "content": "<p>what's the algorithm for garbage collection? is garbage collection done during each session?</p>",
+        "id": 179320657,
+        "sender_full_name": "mw",
+        "timestamp": 1572348852
+    },
+    {
+        "content": "<p>The file is basically <code>Vec&lt;Action&gt;</code>, <a href=\"https://github.com/rust-lang/rust/blob/9f268ad2f5009213d5f33fea02d359536cc89cec/src/librustc/dep_graph/serialized.rs#L341\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/9f268ad2f5009213d5f33fea02d359536cc89cec/src/librustc/dep_graph/serialized.rs#L341\">https://github.com/rust-lang/rust/blob/9f268ad2f5009213d5f33fea02d359536cc89cec/src/librustc/dep_graph/serialized.rs#L341</a></p>\n<p>When the dep graph is loaded, how much wasted space is calculated, and if it's above a ratio, garbage collection is triggered. Garbage collection reads the dep graph file again and records the byte location of the changes we'd want to keep, combining them if possible. Then it writes the changes  out again.</p>",
+        "id": 179321213,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572349463
+    },
+    {
+        "content": "<p>GC algorithm: <a href=\"https://github.com/rust-lang/rust/blob/9f268ad2f5009213d5f33fea02d359536cc89cec/src/librustc/dep_graph/serialized.rs#L85\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/9f268ad2f5009213d5f33fea02d359536cc89cec/src/librustc/dep_graph/serialized.rs#L85\">https://github.com/rust-lang/rust/blob/9f268ad2f5009213d5f33fea02d359536cc89cec/src/librustc/dep_graph/serialized.rs#L85</a><br>\nMethod which computes what to keep: <a href=\"https://github.com/rust-lang/rust/blob/9f268ad2f5009213d5f33fea02d359536cc89cec/src/librustc/dep_graph/serialized.rs#L30\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/9f268ad2f5009213d5f33fea02d359536cc89cec/src/librustc/dep_graph/serialized.rs#L30\">https://github.com/rust-lang/rust/blob/9f268ad2f5009213d5f33fea02d359536cc89cec/src/librustc/dep_graph/serialized.rs#L30</a></p>",
+        "id": 179321283,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572349560
+    },
+    {
+        "content": "<p>The dep node result hashes are stored in a separate file as an array indexed by <code>DepNodeIndex</code>and is written each session as it changes more often.</p>",
+        "id": 179323079,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572351408
+    },
+    {
+        "content": "<blockquote>\n<p>The dep node result hashes are stored in a separate file as an array indexed by <code>DepNodeIndex</code>and is written each session as it changes more often.</p>\n</blockquote>\n<p>So the entire array is loaded into memory (together with the previous dep-graph) and then the entire array is written to disk at the end of the session again, correct?</p>",
+        "id": 179327717,
+        "sender_full_name": "mw",
+        "timestamp": 1572355336
+    },
+    {
+        "content": "<p>There's 2 arrays, but yes.</p>",
+        "id": 179328105,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572355688
+    },
+    {
+        "content": "<p>2 arrays in what sense?</p>",
+        "id": 179328129,
+        "sender_full_name": "mw",
+        "timestamp": 1572355727
+    },
+    {
+        "content": "<p>that the \"old\" array is kept around immutably?</p>",
+        "id": 179328199,
+        "sender_full_name": "mw",
+        "timestamp": 1572355756
+    },
+    {
+        "content": "<p>And the serialized version of the dep-graph is a stream of <code>Action</code> where an <code>Action</code> is a list of additions and updates, with each entry in the list being conceptually <code>{ idx: DepNodeIndex, stable_id: DepNode, deps: [DepNodeIndex] }</code>?</p>",
+        "id": 179328320,
+        "sender_full_name": "mw",
+        "timestamp": 1572355852
+    },
+    {
+        "content": "<p>Is there a reason that <code>Action</code> is an enum of <code>New</code>, <code>Update</code>, <code>Invalidate</code>? Could it also be just one <code>Set</code> variant, so to speak?</p>",
+        "id": 179328432,
+        "sender_full_name": "mw",
+        "timestamp": 1572355951
+    },
+    {
+        "content": "<blockquote>\n<p>that the \"old\" array is kept around immutably?</p>\n</blockquote>\n<p>Yeah.</p>\n<blockquote>\n<p>And the serialized version of the dep-graph is a stream of Action where an Action is a list of additions and updates, with each entry in the list being conceptually { idx: DepNodeIndex, stable_id: DepNode, deps: [DepNodeIndex] }?</p>\n</blockquote>\n<p>Pretty much.</p>\n<blockquote>\n<p>Is there a reason that Action is an enum of New, Update, Invalidate? Could it also be just one Set variant, so to speak?</p>\n</blockquote>\n<p>The <code>Update</code> variant is encoded on disk without the <code>DepNode</code> part, so it's more space efficient.</p>",
+        "id": 179328960,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572356401
+    },
+    {
+        "content": "<p>do we have a hackmd document anywhere?</p>",
+        "id": 179332154,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572358427
+    },
+    {
+        "content": "<p>if not, can we create one and start to sketch out the plan based on these notes?</p>",
+        "id": 179332168,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572358437
+    },
+    {
+        "content": "<blockquote>\n<p>The <code>Update</code> variant is encoded on disk without the <code>DepNode</code> part, so it's more space efficient.</p>\n</blockquote>\n<p>OK, makes sense.</p>",
+        "id": 179336241,
+        "sender_full_name": "mw",
+        "timestamp": 1572360698
+    },
+    {
+        "content": "<p>How does this look to you? <a href=\"https://hackmd.io/@michaelwoerister/HkbS9CHqS/edit\" target=\"_blank\" title=\"https://hackmd.io/@michaelwoerister/HkbS9CHqS/edit\">https://hackmd.io/@michaelwoerister/HkbS9CHqS/edit</a></p>",
+        "id": 179342504,
+        "sender_full_name": "mw",
+        "timestamp": 1572364129
+    },
+    {
+        "content": "<p>Ideally much of the answers to the questions in there would go into the rustc-guide and/or source-level documentation.</p>",
+        "id": 179342670,
+        "sender_full_name": "mw",
+        "timestamp": 1572364210
+    },
+    {
+        "content": "<p>It looks good, <span class=\"user-mention\" data-user-id=\"124287\">@mw</span> , except that we have no idea what the answers are :)</p>",
+        "id": 179528168,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526592
+    },
+    {
+        "content": "<p>Well, presumably <span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span> has some thoughts</p>",
+        "id": 179528171,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526599
+    },
+    {
+        "content": "<p>I guess I meant <em>I</em> don't know</p>",
+        "id": 179528175,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526607
+    },
+    {
+        "content": "<p>I added one question, which has to do with a rust-analyzer-like model and live-updates</p>",
+        "id": 179528431,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526797
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124287\">@mw</span> -- remind me, with today's incremental, do we completely regenerate the dep-graph every time?</p>\n<p>i.e., we load the old dep-graph and then selectively copy over into the new one what we need, then write out the end reuslt?</p>",
+        "id": 179528508,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526830
+    },
+    {
+        "content": "<p>And when/where/how do we use garbage collection today?</p>",
+        "id": 179528516,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526844
+    },
+    {
+        "content": "<p>(Is that in the rustc-guide docs...? I should maybe go check first :)</p>",
+        "id": 179528528,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526858
+    },
+    {
+        "content": "<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"124287\">mw</span> -- remind me, with today's incremental, do we completely regenerate the dep-graph every time?</p>\n<p>i.e., we load the old dep-graph and then selectively copy over into the new one what we need, then write out the end reuslt?</p>\n</blockquote>\n<p>that is true.</p>",
+        "id": 179528547,
+        "sender_full_name": "mw",
+        "timestamp": 1572526874
+    },
+    {
+        "content": "<p>the garbage collection happens naturally as part of \"selectively copy[ing] over into the new one\"</p>",
+        "id": 179528608,
+        "sender_full_name": "mw",
+        "timestamp": 1572526910
+    },
+    {
+        "content": "<p>ok. If my understanding of what <span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span> is proposing is correct, I think that this would still be true</p>",
+        "id": 179528678,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526952
+    },
+    {
+        "content": "<p>I'm going to maybe add some notes at the top -- \"summary of the proposal\"</p>",
+        "id": 179528692,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526971
+    },
+    {
+        "content": "<p>I think that is currently .. well, there is none?</p>",
+        "id": 179528695,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526978
+    },
+    {
+        "content": "<p>maybe there are some comments?</p>",
+        "id": 179528704,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572526985
+    },
+    {
+        "content": "<p>yes, please edit the doc, it should be world-writable</p>",
+        "id": 179528719,
+        "sender_full_name": "mw",
+        "timestamp": 1572527011
+    },
+    {
+        "content": "<p>I'm editing -- another question that occurs to me, regarding motivation -- what are the goals</p>\n<ul>\n<li>lowering peak memory usage</li>\n<li>avoiding some costs?</li>\n</ul>",
+        "id": 179528900,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572527157
+    },
+    {
+        "content": "<p>do we have measurements?</p>",
+        "id": 179528907,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572527162
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120989\">@nnethercote</span> has done some analysis regarding memory usage</p>",
+        "id": 179529022,
+        "sender_full_name": "mw",
+        "timestamp": 1572527225
+    },
+    {
+        "content": "<p>that is in the PR</p>",
+        "id": 179529028,
+        "sender_full_name": "mw",
+        "timestamp": 1572527230
+    },
+    {
+        "content": "<p>we also want to avoid the cost of having to re-write the whole dep-graph.</p>",
+        "id": 179529076,
+        "sender_full_name": "mw",
+        "timestamp": 1572527265
+    },
+    {
+        "content": "<p>I don't have numbers on that at hand</p>",
+        "id": 179529133,
+        "sender_full_name": "mw",
+        "timestamp": 1572527284
+    },
+    {
+        "content": "<blockquote>\n<p>we also want to avoid the cost of having to re-write the whole dep-graph.</p>\n</blockquote>\n<p>to be clear, it's not so much that we're <em>avoiding</em> that cost</p>",
+        "id": 179529150,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572527298
+    },
+    {
+        "content": "<p>we're just kind of spreading it out over time, right?</p>",
+        "id": 179529163,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572527305
+    },
+    {
+        "content": "<p>(and maybe in a background thread)</p>",
+        "id": 179529172,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572527313
+    },
+    {
+        "content": "<p>well, only changes are written so the cost of writing the unchanged parts is avoided</p>",
+        "id": 179529239,
+        "sender_full_name": "mw",
+        "timestamp": 1572527369
+    },
+    {
+        "content": "<p>not sure how exactly garbage collection plays into that</p>",
+        "id": 179529277,
+        "sender_full_name": "mw",
+        "timestamp": 1572527396
+    },
+    {
+        "content": "<blockquote>\n<p>well, only changes are written so the cost of writing the unchanged parts is avoided</p>\n</blockquote>\n<p>ok I missed that part</p>",
+        "id": 179529372,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572527469
+    },
+    {
+        "content": "<p>yes it seems like we would want to begin by explaining exactly how that works</p>",
+        "id": 179529410,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572527512
+    },
+    {
+        "content": "<p>it seems like gc is the key question -- i.e., how do we avoid the time to load the old depgraph growing ever longer?</p>",
+        "id": 179529462,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572527531
+    },
+    {
+        "content": "<p>yes</p>",
+        "id": 179529527,
+        "sender_full_name": "mw",
+        "timestamp": 1572527605
+    },
+    {
+        "content": "<p>I'd argue thresholds/quotas is the way to go</p>",
+        "id": 179529619,
+        "sender_full_name": "eddyb",
+        "timestamp": 1572527662
+    },
+    {
+        "content": "<p>loading the dep-graph happens in a background, so that becoming more costly won't show as long as it is \"fast enough\"</p>",
+        "id": 179529621,
+        "sender_full_name": "mw",
+        "timestamp": 1572527663
+    },
+    {
+        "content": "<p>but writing and loading the dep-graph is not super expensive even now</p>",
+        "id": 179529669,
+        "sender_full_name": "mw",
+        "timestamp": 1572527707
+    },
+    {
+        "content": "<p>e.g. here we have only a  few percent for each: <a href=\"https://perf.rust-lang.org/detailed-query.html?commit=c553e8e8812c19809e70523064989e66c5cfd3f1&amp;benchmark=inflate-debug&amp;run_name=clean%20incremental\" target=\"_blank\" title=\"https://perf.rust-lang.org/detailed-query.html?commit=c553e8e8812c19809e70523064989e66c5cfd3f1&amp;benchmark=inflate-debug&amp;run_name=clean%20incremental\">https://perf.rust-lang.org/detailed-query.html?commit=c553e8e8812c19809e70523064989e66c5cfd3f1&amp;benchmark=inflate-debug&amp;run_name=clean%20incremental</a></p>",
+        "id": 179529704,
+        "sender_full_name": "mw",
+        "timestamp": 1572527733
+    },
+    {
+        "content": "<p>memory is the bigger issue, I think</p>",
+        "id": 179529726,
+        "sender_full_name": "mw",
+        "timestamp": 1572527751
+    },
+    {
+        "content": "<p>comparing the perf results from May 7 I see largely regressions (though a max of like 8%), but I'm not sure if I'm being misled because of instruction count and parallelism</p>",
+        "id": 179530166,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572528088
+    },
+    {
+        "content": "<p>walltime seems to show small gains, so perhaps so?</p>",
+        "id": 179530261,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572528145
+    },
+    {
+        "content": "<p>I can't tell if that's a parallel compiler run</p>",
+        "id": 179530287,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572528178
+    },
+    {
+        "content": "<p>ok, well, I updated the hackmd to the best of my ability, but there are definitely some areas where <span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span> would have to weigh in. <span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span>, if you are able, it'd be great if you could update <a href=\"https://hackmd.io/9GgAXPtrRSiwBPsI6saa_A?view\" target=\"_blank\" title=\"https://hackmd.io/9GgAXPtrRSiwBPsI6saa_A?view\">the hackmd</a> with answers to:</p>\n<ul>\n<li>what are the differences between the perf runs? </li>\n<li>some sketch of the on-disk format and details of what the GC story is<br>\n    * if we are only storing \"deltas\", how do we avoid it constantly growing?</li>\n</ul>",
+        "id": 179530732,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572528531
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124287\">@mw</span> by \"partial updates\", I think you mean things like a rust-analyzer scenario, where we don't do a single \"main compilation\"?</p>",
+        "id": 179530845,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572528604
+    },
+    {
+        "content": "<p>ok, I made a few more updates, coallescing some questions and leaving some notes that I <em>think</em> are accurate</p>",
+        "id": 179531261,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572528875
+    },
+    {
+        "content": "<p>I'm done for now :)</p>",
+        "id": 179531267,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572528878
+    },
+    {
+        "content": "<p>with partial updates I mean mainly updating the incremental cache for compilation sessions that error</p>",
+        "id": 179531361,
+        "sender_full_name": "mw",
+        "timestamp": 1572528951
+    },
+    {
+        "content": "<p>this question is not a high priority for me though.</p>",
+        "id": 179531429,
+        "sender_full_name": "mw",
+        "timestamp": 1572528986
+    },
+    {
+        "content": "<p>ah yes very good</p>",
+        "id": 179531431,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572528989
+    },
+    {
+        "content": "<p>I hadn't thought about it but that is indeed kind of a \"special case\" of the rust-analyzer scenario, isn't it?</p>",
+        "id": 179531448,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572529008
+    },
+    {
+        "content": "<p>I guess so, yes.</p>",
+        "id": 179531469,
+        "sender_full_name": "mw",
+        "timestamp": 1572529031
+    },
+    {
+        "content": "<p>there are probably some additional questions about correctness in any \"partial update\" scenario</p>",
+        "id": 179531519,
+        "sender_full_name": "mw",
+        "timestamp": 1572529071
+    },
+    {
+        "content": "<p>(did we get rid of query cycles yet? I hope so <code>:)</code>)</p>",
+        "id": 179531586,
+        "sender_full_name": "mw",
+        "timestamp": 1572529100
+    },
+    {
+        "content": "<p>hey <span class=\"user-mention\" data-user-id=\"124287\">@mw</span> did I show you <code>cyclotron</code>? it's a memoizer, that computes fixpoints when it hits cycles :)</p>",
+        "id": 179531653,
+        "sender_full_name": "eddyb",
+        "timestamp": 1572529160
+    },
+    {
+        "content": "<p>probably too inefficient/silly to use in the compiler, and potentially unsound in certain situations</p>",
+        "id": 179531672,
+        "sender_full_name": "eddyb",
+        "timestamp": 1572529182
+    },
+    {
+        "content": "<p>works for fixing left-recursion in parsing though,,,</p>",
+        "id": 179531766,
+        "sender_full_name": "eddyb",
+        "timestamp": 1572529243
+    },
+    {
+        "content": "<blockquote>\n<p>did I show you <code>cyclotron</code>? it's a memoizer, that computes fixpoints when it hits cycles :)</p>\n</blockquote>\n<p>I've debated about this for salsa -- this is of course kind of what trait solving winds up doing -- but I don't think it's correct in all cases</p>",
+        "id": 179534792,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572531256
+    },
+    {
+        "content": "<p>trait solving is also probably more efficient at computing those fixpoints, whereas all I do is repeat the \"head\" of the cycle until it stops changing</p>",
+        "id": 179535203,
+        "sender_full_name": "eddyb",
+        "timestamp": 1572531501
+    },
+    {
+        "content": "<blockquote>\n<p>move to a rust-analyzer like model, with live updates</p>\n</blockquote>\n<p>I'm not sure what this entails</p>",
+        "id": 179536011,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1572531994
+    },
+    {
+        "content": "<blockquote>\n<p>trait solving is also probably more efficient at computing those fixpoints, whereas all I do is repeat the \"head\" of the cycle until it stops changing</p>\n</blockquote>\n<p>yes, although there are prolog impl's that take that approach</p>",
+        "id": 179625561,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572614836
+    },
+    {
+        "content": "<p>there's something in this conversation that may be obvious but I don't think anyone's pointed it out explicitly:</p>",
+        "id": 179626008,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1572615172
+    },
+    {
+        "content": "<p>some have noted the primary driver for the work is to reduce memory usage (or at least peak memory usage?)</p>",
+        "id": 179626026,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1572615188
+    },
+    {
+        "content": "<p>the reason this is a memory usage issue, if I understand correctly, is that we have two graphs (that are likely to be approximately the same size and shape) in memory at once</p>",
+        "id": 179626114,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1572615249
+    },
+    {
+        "content": "<p>and therefore the \"best\" improvement in memory usage one could hope to achieve is to <em>halve</em> the impact in mem usage from incremental compilation</p>",
+        "id": 179626147,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1572615288
+    },
+    {
+        "content": "<p>do I have that right? (I'm not saying that a 50% reduction is not worthwhile! but I just want to make sure I understand.)</p>",
+        "id": 179626186,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1572615328
+    },
+    {
+        "content": "<p>I believe that is correct, <span class=\"user-mention\" data-user-id=\"116083\">@pnkfelix</span></p>",
+        "id": 179626358,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572615457
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124287\">@mw</span> with respect to how garbage collection works... <span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span> wrote this:</p>\n<blockquote>\n<p>The garbage collection algorithm reads the dep graph and records the location of information we want to keep. It then clears the file and writes only the useful information back. It is precise and happens in the background thread. The cost of garbage collection is similar to loading the dep graph, so it’s unlikely we’ll block on it.</p>\n</blockquote>\n<p>I think what this means (<span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span> can confirm) is that we:</p>\n<ul>\n<li>load the previous dep-graph</li>\n<li>do a \"mark\"-phase by walking from the root node of the graph to find all its transitive dependencies</li>\n<li>anything not marked can be deleted</li>\n</ul>",
+        "id": 179626445,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572615539
+    },
+    {
+        "content": "<p>one thing I did not yet fully understand -- is the dep-graph stored in one big file that we (ordinarily) append to?</p>",
+        "id": 179626460,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572615557
+    },
+    {
+        "content": "<p>and -- if we do a GC -- we fully rewrite it?</p>",
+        "id": 179626464,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572615562
+    },
+    {
+        "content": "<p>Basically, one thing I would like to spend time on in the meeting is <a href=\"https://hackmd.io/9GgAXPtrRSiwBPsI6saa_A#What-does-the-on-disk-format-look-like\" target=\"_blank\" title=\"https://hackmd.io/9GgAXPtrRSiwBPsI6saa_A#What-does-the-on-disk-format-look-like\">the on-disk format</a>, which is still not really covered at all</p>",
+        "id": 179626484,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572615593
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> Yes, I was mainly wondering about \"case two\" in the document: unused nodes. How are those identified?</p>",
+        "id": 179626620,
+        "sender_full_name": "mw",
+        "timestamp": 1572615714
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124287\">@mw</span> presumably they are just not marked?</p>",
+        "id": 179626672,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572615729
+    },
+    {
+        "content": "<p>that's basically how it works today, no?</p>",
+        "id": 179626676,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572615733
+    },
+    {
+        "content": "<p>Are they reliably \"invalidated\" somewhere else?</p>",
+        "id": 179626679,
+        "sender_full_name": "mw",
+        "timestamp": 1572615736
+    },
+    {
+        "content": "<p>except that the \"marking\" is done \"on the fly\"</p>",
+        "id": 179626694,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1572615748
+    },
+    {
+        "content": "<p>I tried to find something in the PR that looks like such a marking phase, but I cannot find it</p>",
+        "id": 179626713,
+        "sender_full_name": "mw",
+        "timestamp": 1572615769
+    },
+    {
+        "content": "<p>well, is the GC scheme implemented?</p>",
+        "id": 179626732,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1572615796
+    },
+    {
+        "content": "<p>yes, here: <a href=\"https://github.com/rust-lang/rust/pull/60035/files#diff-ad7502063d3dee7dc215765da3e83c58R85\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/60035/files#diff-ad7502063d3dee7dc215765da3e83c58R85\">https://github.com/rust-lang/rust/pull/60035/files#diff-ad7502063d3dee7dc215765da3e83c58R85</a></p>",
+        "id": 179626746,
+        "sender_full_name": "mw",
+        "timestamp": 1572615806
+    },
+    {
+        "content": "<p>I can see how this takes care of overwritten nodes, but I'm not sure how unreferenced nodes are handled</p>",
+        "id": 179626839,
+        "sender_full_name": "mw",
+        "timestamp": 1572615890
+    },
+    {
+        "content": "<p>I do see bits of code in the PR that seem like its looping over all the nodes and setting their state to <code>DepNodeState::Invalid</code>; I would think this is like setting all the mark-bits to \"unmarked\" in a normal GC?</p>",
+        "id": 179626937,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1572615976
+    },
+    {
+        "content": "<p>Am I wrong about the purpose of those loops? Or are you just saying you cannot see where they are called (because I will admit that I haven't looked into that yet)</p>",
+        "id": 179626976,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1572616021
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116083\">@pnkfelix</span> that could be -- I don't have a clear picture of how things play together exactly</p>",
+        "id": 179627231,
+        "sender_full_name": "mw",
+        "timestamp": 1572616248
+    },
+    {
+        "content": "<p>yeah, I'm clearly in a similar boat. The invalidation loops I was looking at are themselves fired off by <code>Action::InvalidateNodes</code> commands that I infer must be in the file itself ... so I feel like I must have misunderstood their purpose.</p>",
+        "id": 179627291,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1572616314
+    }
+]

@@ -1,0 +1,103 @@
+<html>
+<head><meta charset="utf-8"><title>diagnostics in queries · t-compiler/wg-diagnostics · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/147480-t-compiler/wg-diagnostics/index.html">t-compiler/wg-diagnostics</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics.20in.20queries.html">diagnostics in queries</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="229183123"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics%20in%20queries/near/229183123" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics.20in.20queries.html#229183123">(Mar 07 2021 at 12:15)</a>:</h4>
+<p>Diagnostics in queries cannot, by their very design, be adjusted to reflect the query call site. There may be multiple call sites after all. This is a problem for constants. We want to report detailed errors on constants. The first time we report a diagnostic, we want the full diagnostic, but all subsequent evaluations of the constant can just report something like the "referenced constant has errors" instead of repeating the entire diagnostic. My proposal is to make the <a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/mir/interpret/error/struct.InterpErrorInfo.html">InterpErrorInfo</a> type have interior mutability. We then add convenience functionality on top of it for reporting it as an error. After reporting it as an error, it replaces itself with the "AlreadyReported" variant, which future report attempts will silently allow. In order to not cause problems with the query engine, we will make the error type hash itself as a ZST (and always compare as equal with itself, even if it is not). We don't have to worry about serialization, as the const eval queries don't get serialized if they had errors. </p>
+<p>Doing this should improve all of our const eval error reporting problems around some of the errors being lints and the diagnostics generally not referring to the error site but to the declaration site.</p>
+<p>cc <span class="user-group-mention" data-user-group-id="1187">@WG-diagnostics</span> <span class="user-group-mention" data-user-group-id="1916">@WG-const-eval</span> <span class="user-mention" data-user-id="216206">@lcnr</span></p>
+<p>Right now, our diagnostics look like</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">warning</span>: <span class="nc">any</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="n">of</span><span class="w"> </span><span class="n">this</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="n">will</span><span class="w"> </span><span class="n">cause</span><span class="w"> </span><span class="n">an</span><span class="w"> </span><span class="n">error</span><span class="w"></span>
+<span class="w"> </span><span class="o">-</span>-&gt; <span class="nc">src</span><span class="o">/</span><span class="n">main</span><span class="p">.</span><span class="n">rs</span>:<span class="mi">3</span>:<span class="mi">18</span><span class="w"></span>
+<span class="w">  </span><span class="o">|</span><span class="w"></span>
+<span class="mi">3</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">FOO</span>: <span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="o">/</span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="o">|</span><span class="w"> </span><span class="o">-----------------^^^-</span><span class="w"></span>
+<span class="w">  </span><span class="o">|</span><span class="w">                  </span><span class="o">|</span><span class="w"></span>
+<span class="w">  </span><span class="o">|</span><span class="w">                  </span><span class="n">attempt</span><span class="w"> </span><span class="n">to</span><span class="w"> </span><span class="n">divide</span><span class="w"> </span><span class="err">`</span><span class="mi">1_</span><span class="k">i32</span><span class="err">`</span><span class="w"> </span><span class="n">by</span><span class="w"> </span><span class="n">zero</span><span class="w"></span>
+<span class="w">  </span><span class="o">|</span><span class="w"></span>
+<span class="n">note</span>: <span class="nc">the</span><span class="w"> </span><span class="n">lint</span><span class="w"> </span><span class="n">level</span><span class="w"> </span><span class="n">is</span><span class="w"> </span><span class="n">defined</span><span class="w"> </span><span class="n">here</span><span class="w"></span>
+<span class="w"> </span><span class="o">-</span>-&gt; <span class="nc">src</span><span class="o">/</span><span class="n">main</span><span class="p">.</span><span class="n">rs</span>:<span class="mi">1</span>:<span class="mi">8</span><span class="w"></span>
+<span class="w">  </span><span class="o">|</span><span class="w"></span>
+<span class="mi">1</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="cp">#[warn(const_err)]</span><span class="w"></span>
+<span class="w">  </span><span class="o">|</span><span class="w">        </span><span class="o">^^^^^^^^^</span><span class="w"></span>
+
+<span class="n">error</span><span class="p">[</span><span class="n">E0080</span><span class="p">]</span>: <span class="nc">erroneous</span><span class="w"> </span><span class="n">constant</span><span class="w"> </span><span class="n">used</span><span class="w"></span>
+<span class="w"> </span><span class="o">-</span>-&gt; <span class="nc">src</span><span class="o">/</span><span class="n">main</span><span class="p">.</span><span class="n">rs</span>:<span class="mi">6</span>:<span class="mi">13</span><span class="w"></span>
+<span class="w">  </span><span class="o">|</span><span class="w"></span>
+<span class="mi">6</span><span class="w"> </span><span class="o">|</span><span class="w">     </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">FOO</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="o">|</span><span class="w">             </span><span class="o">^^^</span><span class="w"> </span><span class="n">referenced</span><span class="w"> </span><span class="n">constant</span><span class="w"> </span><span class="n">has</span><span class="w"> </span><span class="n">errors</span><span class="w"></span>
+</code></pre></div>
+<p>and with my suggestion we would get</p>
+<div class="codehilite"><pre><span></span><code>error[E0080]: erroneous constant used
+ --&gt; src/main.rs:3:18
+  |
+3 | const FOO: i32 = 1/0;
+  | -----------------^^^-
+  |                  |
+  |                  attempt to divide `1_i32` by zero
+  |
+ --&gt; src/main.rs:6:13
+  |
+6 |     let x = FOO;
+  |             ^^^ constant used here
+</code></pre></div>
+<p>With further uses reporting just </p>
+<div class="codehilite"><pre><span></span><code>error[E0080]: erroneous constant used
+ --&gt; src/main.rs:6:13
+  |
+6 |     let x = FOO;
+  |             ^^^ referenced constant has errors
+</code></pre></div>
+
+
+
+<a name="229201321"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics%20in%20queries/near/229201321" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Esteban Küber <a href="https://rust-lang.github.io/zulip_archive/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics.20in.20queries.html#229201321">(Mar 07 2021 at 16:53)</a>:</h4>
+<p>That sounds reasonable but I am concerned about queries returning values that have internal mutability. There's no precedent for them, is there?</p>
+
+
+
+<a name="229201497"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics%20in%20queries/near/229201497" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics.20in.20queries.html#229201497">(Mar 07 2021 at 16:56)</a>:</h4>
+<p>is there a reason you're caching the whole error in the query system? could you have an untracked field on TyCtxt or something that sees if the diagnostic has already been reported, and only cache the info you need to generate the diagnostic?</p>
+
+
+
+<a name="229213674"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics%20in%20queries/near/229213674" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://rust-lang.github.io/zulip_archive/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics.20in.20queries.html#229213674">(Mar 07 2021 at 20:00)</a>:</h4>
+<p>That will cause problems if the query result is loaded from disk</p>
+
+
+
+<a name="229213766"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics%20in%20queries/near/229213766" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://rust-lang.github.io/zulip_archive/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics.20in.20queries.html#229213766">(Mar 07 2021 at 20:01)</a>:</h4>
+<p>Wait, nvm, I misunderstood you</p>
+
+
+
+<a name="229286220"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics%20in%20queries/near/229286220" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics.20in.20queries.html#229286220">(Mar 08 2021 at 11:51)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="232545">Joshua Nelson</span> <a href="#narrow/stream/147480-t-compiler.2Fwg-diagnostics/topic/diagnostics.20in.20queries/near/229201497">said</a>:</p>
+<blockquote>
+<p>is there a reason you're caching the whole error in the query system? could you have an untracked field on TyCtxt or something that sees if the diagnostic has already been reported, and only cache the info you need to generate the diagnostic?</p>
+</blockquote>
+<p>Since it's just for diagnostics, this sounds a lot like what we already have for diagnostic deduplication (and is a very similar use case). That sounds a lot better, as we aren't inventing a new thing</p>
+
+
+
+<a name="230152866"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics%20in%20queries/near/230152866" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/147480-t-compiler/wg-diagnostics/topic/diagnostics.20in.20queries.html#230152866">(Mar 13 2021 at 10:09)</a>:</h4>
+<p>FWIW, currently <code>InterpErrorInfo</code> is not returned from the query but consumed inside the query (and IIRC implementing the traits required for it to be returned from the query is tricky or impossible)</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

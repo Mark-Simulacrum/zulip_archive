@@ -1,0 +1,86 @@
+[
+    {
+        "content": "<p>I am musing a design for <a href=\"https://github.com/rust-lang/rust/issues/77960\">#77960</a> as a MIR transform. (Don't worry, this is a toy to learn MIR, nothing serious <span aria-label=\"big smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"big smile\">:big_smile:</span>.)<br>\nThe idea I have is essentially: to transform the function <code>f&lt;T&gt;</code></p>\n<ol>\n<li>take the original polymorphic MIR of <code>f</code> to define a helper function <code>f_impl</code>,</li>\n<li><code>f_impl</code> takes all the operations done on the generic parameter <code>T</code> as function pointers on a adequately-sized buffer,</li>\n<li>rewrite completely <code>f</code> to gather the proper function pointers and call <code>f_impl</code> with it.</li>\n</ol>\n<p>Of course, there is plenty of details to iron out. Steps 2 and 3 are a lot of MIR manipulations, which will require testing.<br>\nBefore going down this rabbit hole: is there even a way to create a new function <code>f_impl</code> out of thin air for step 1?<br>\nI sure can write its MIR, but can I even assign it a <code>DefId</code> and manipulate it?<br>\n(Step 3 will probably also require synthetizing new functions, but I'm not there yet.)</p>\n<p>Thanks for your advice.</p>",
+        "id": 221255450,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1609370870
+    },
+    {
+        "content": "<p>No, that requires additional refactoring I think</p>",
+        "id": 221259011,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1609374928
+    },
+    {
+        "content": "<p>Maybe check out how <code>InstanceDef</code> is defined, we could add a variant for compiler-generated MIR bodies there, similar to existing shims and drop glue</p>",
+        "id": 221259057,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1609374969
+    },
+    {
+        "content": "<p>You could do something similar to promoted MIR.</p>",
+        "id": 221273346,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1609396868
+    },
+    {
+        "content": "<p>so if I understand correctly, steps 2 and 3 look something like transforming</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">f</span><span class=\"p\">(</span><span class=\"n\">val</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">AsRef</span><span class=\"o\">&lt;</span><span class=\"kt\">str</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">usize</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">as_ref</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>into</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">f_impl</span><span class=\"p\">(</span><span class=\"n\">as_ref</span>: <span class=\"nc\">fn</span><span class=\"p\">()</span><span class=\"w\"> </span>-&gt; <span class=\"kp\">&amp;</span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">usize</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">as_ref</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">f</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">f_impl</span><span class=\"p\">(</span><span class=\"o\">||</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">as_ref</span><span class=\"p\">())</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>?</p>",
+        "id": 221305527,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1609436842
+    },
+    {
+        "content": "<p>there's a problem here which is that the closure is not a function pointer, it captures <code>val</code> - were you planning to pass that as a parameter to <code>f_impl</code>? And if so, how do you do that without making f_impl generic again?</p>",
+        "id": 221305603,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1609436909
+    },
+    {
+        "content": "<p>I guess you could take <code>*mut ()</code> for <code>val</code> and pass that to <code>as_ref</code>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">f_impl</span><span class=\"p\">(</span><span class=\"n\">val</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"n\">as_ref</span>: <span class=\"nc\">fn</span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">())</span><span class=\"w\"> </span>-&gt; <span class=\"kp\">&amp;</span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">usize</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">as_ref</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">f</span><span class=\"p\">(</span><span class=\"n\">val</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">AsRef</span><span class=\"o\">&lt;</span><span class=\"kt\">str</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">f_impl</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"n\">val</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">()</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"n\">transmute</span><span class=\"p\">(</span><span class=\"n\">val</span><span class=\"p\">).</span><span class=\"n\">as_ref</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 221305750,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1609437056
+    },
+    {
+        "content": "<p>I don't think the suggested <code>fn()</code> method would work because of captured state, that'd probably end up making <em>more</em> IR for the compiler and LLVM to sift through, a more realistic strategy might be to emulate what users are already doing:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">f_impl</span><span class=\"p\">(</span><span class=\"n\">val</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">usize</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n\n<span class=\"k\">fn</span> <span class=\"nf\">f</span><span class=\"p\">(</span><span class=\"n\">val</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">AsRef</span><span class=\"o\">&lt;</span><span class=\"kt\">str</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">usize</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">as_ref</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">f_impl</span><span class=\"p\">(</span><span class=\"n\">val</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Edit: I typed this up before the latter suggestion, that could work too</p>",
+        "id": 221305883,
+        "sender_full_name": "Chase Wilson",
+        "timestamp": 1609437236
+    },
+    {
+        "content": "<p>I think we'd only do the split when the generic method calls are at the top of the function</p>",
+        "id": 221308067,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1609439599
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"232545\">Joshua Nelson</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/MIR.20outlining/near/221305750\">said</a>:</p>\n<blockquote>\n<p>I guess you could take <code>*mut ()</code> for <code>val</code> and pass that to <code>as_ref</code>:</p>\n<p><div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">f_impl</span><span class=\"p\">(</span><span class=\"n\">val</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"n\">as_ref</span>: <span class=\"nc\">fn</span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">())</span><span class=\"w\"> </span>-&gt; <span class=\"kp\">&amp;</span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">usize</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">as_ref</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">f</span><span class=\"p\">(</span><span class=\"n\">val</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">AsRef</span><span class=\"o\">&lt;</span><span class=\"kt\">str</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">f_impl</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"n\">val</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">()</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"n\">transmute</span><span class=\"p\">(</span><span class=\"n\">val</span><span class=\"p\">).</span><span class=\"n\">as_ref</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div><br>\n</p>\n</blockquote>\n<p>Yes, this is essentially what I mean here. The point is to transform as close to the original MIR as possible.</p>",
+        "id": 221326017,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1609459851
+    },
+    {
+        "content": "<p>At least, this method works for stuff that can be represented by an <code>*mut u8</code>, ie things that are (mut?) references to <code>Sized</code> objects.<br>\nThe transform for non-<code>Sized</code> references and for values will come in a second time.</p>",
+        "id": 221326100,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1609459970
+    },
+    {
+        "content": "<p>This could be a great feature, and I think it'd be totally worth doing. We did some analysis a few years ago on fuchsia, and found a lot of code bloat was coming from generic functions like this, and so I pitched that idea to <span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> and <span class=\"user-mention\" data-user-id=\"116883\">@tmandry</span> rustconf before last. We did some optimizations by hand for the easily identified hotspots, but it's such a prevalent issue that having this done automatically would really simplify things At the time, we had thought it'd be pretty reasonable to just split off the generic methods at the top of the function, since that's the most common case, and would probably lead to a lot of big wins</p>",
+        "id": 221569302,
+        "sender_full_name": "Erick Tryzelaar",
+        "timestamp": 1609788730
+    },
+    {
+        "content": "<p>there's also been recent work on outlining in LLVM (from Apple IIRC) with a more general and usable design than the previous attempts</p>",
+        "id": 221569813,
+        "sender_full_name": "lqd",
+        "timestamp": 1609789015
+    },
+    {
+        "content": "<p>Would be great to get this, even if just for a few well-known traits.  <code>AsRef&lt;Path&gt;</code> seems particularly likely -- I <a href=\"https://github.com/rust-lang/rust/pull/58530\">did it manually</a> for a few <code>fs</code> methods, for example.</p>",
+        "id": 221575117,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1609791486
+    }
+]

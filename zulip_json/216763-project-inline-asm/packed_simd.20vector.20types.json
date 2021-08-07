@@ -1,0 +1,236 @@
+[
+    {
+        "content": "<p>What would it take to make packed_simd vector types usable with zmm registers in the new asm?</p>",
+        "id": 208029146,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598392508
+    },
+    {
+        "content": "<p>They need to use <code>#[repr(simd)]</code> and match one of the native SIMD types for the target.</p>",
+        "id": 208029493,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598392723
+    },
+    {
+        "content": "<p>Is there another crate that is usable now? It's hard to tell what crates are current.</p>",
+        "id": 208030577,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598393321
+    },
+    {
+        "content": "<p>Ah, it looks like they (packed_simd types) already repr(simd) (e.g. <a href=\"https://github.com/rust-lang/packed_simd/blob/master/src/codegen.rs#L15\">https://github.com/rust-lang/packed_simd/blob/master/src/codegen.rs#L15</a>) , but they definitely don't work for me, I get a message saying \"only integers, floats, SIMD vectors, pointers and function pointers can be used as arguments for inline assembly\"</p>",
+        "id": 208031612,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598394097
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span>  are there any examples you know of that use SIMD (with any crate) with the new asm! ? I just went and surveyed the simd crates landscape again, and it looks like packed_simd is maybe the main one in use right now in the ecosystem. If it doesn't work, what does?</p>",
+        "id": 208037173,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598398276
+    },
+    {
+        "content": "<p>You can use the SIMD types from <code>std::arch</code> like <code>__m128</code>.</p>",
+        "id": 208037194,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598398312
+    },
+    {
+        "content": "<p>Ah, I see. I'll try that, thanks.</p>",
+        "id": 208037377,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598398456
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span> sorry if I'm being dense, but how do I even instantiate one of those? I need an __m512i. If I do it like __m512i(0,0,0,0,0,0,0,0) it says it expected a function call, and hints that I should use the explicit struct syntax. If I use the explicit struct syntax: __m512i { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5:0, 6:0, 7:0}, it says all the fields are private.</p>",
+        "id": 208038996,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598399860
+    },
+    {
+        "content": "<p>you can transmute an array of appropriate size and type into the register type. Also you can call an appropriate intrinsic.</p>",
+        "id": 208041346,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1598401956
+    },
+    {
+        "content": "<p>Thanks <span class=\"user-mention\" data-user-id=\"224471\">@Lokathor</span>  and <span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span>  that helped. Now it compiles, yay! But when it runs, I get illegal hardware instruction. My asm is only one instruction, so I know which one it is, but I can't see what I did wrong. Here's the function, can anyone tell what I'm doing wrong?</p>\n<div class=\"codehilite\"><pre><span></span><code>const ONES_64: __m512i = unsafe { std::mem::transmute([1u8; 64]) };\n\nunpack_u64(packed: u64) -&gt; u8x64 {\n  unsafe {\n      let mut block :__m512i  = core::mem::zeroed();\n\n      asm! {\n          &quot;vpexpandb {unpacked}{{ {mask} }}{{z}}, {packed}&quot;,\n          packed = in(zmm_reg) ONES_64,\n          mask = in(kreg) packed,\n          unpacked = out(zmm_reg) block,\n      }\n      std::mem::transmute(block)\n  }\n}\n</code></pre></div>\n\n\n<p>I've also tried actually initializing <code>block</code> to zeros in the same way I did the const, and I've tried returning a dummy value instead of transmuting <code>block</code> at the end, so the problem is definitely in the vpexpand call, and gdb also confirms.</p>",
+        "id": 208107854,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598455847
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>vpexpandb zmm2{ k0 }{z}, zmm1\n</code></pre></div>\n\n\n<p>gives an assembler error for me.</p>",
+        "id": 208108764,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1598456287
+    },
+    {
+        "content": "<p>But rustc was happy? This is an avx512f instruction, maybe your cpu doesn't support it?</p>",
+        "id": 208109078,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598456443
+    },
+    {
+        "content": "<p>MaybeUninit and then immediately assuming it's init is exactly how you should not use the type. it's instant UB</p>",
+        "id": 208109784,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1598456818
+    },
+    {
+        "content": "<p>How should it be done instead? The examples in MaybeUninit docs aren't clear for this kind of case.</p>",
+        "id": 208109864,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598456864
+    },
+    {
+        "content": "<p>Also, I tried initializing it instead of using MaybeUninit, the illegal hardware instruction error still happens</p>",
+        "id": 208109967,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598456897
+    },
+    {
+        "content": "<p>MaybeUninit should essentially never be used unless you're a super pro at rust. It's that easy to get wrong.</p>\n<p>Use <code>core::mem::zeroed()</code> instead</p>",
+        "id": 208110311,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1598457087
+    },
+    {
+        "content": "<p>OK, thanks.</p>",
+        "id": 208110402,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598457124
+    },
+    {
+        "content": "<p>I've updated the example to use core::mem::zeroed as you suggested. The illegal hardware instruction still happens.</p>",
+        "id": 208110738,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598457283
+    },
+    {
+        "content": "<p>Use a debugger, it's probably your CPU not supporting AVX512</p>",
+        "id": 208110868,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598457352
+    },
+    {
+        "content": "<p>I have CPUs where it's not supported, it doesn't compile there. On this machine, I have AVX512 and it compiles.</p>",
+        "id": 208110996,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598457409
+    },
+    {
+        "content": "<p>Flags:                 fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc aperfmperf eagerfpu pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 fma cx16 xtpr pdcm pcid dca sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch epb cat_l3 cdp_l3 invpcid_single intel_pt spec_ctrl ibpb_support tpr_shadow vnmi flexpriority ept vpid fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm cqm mpx rdt_a avx512f avx512dq rdseed adx smap clflushopt clwb avx512cd avx512bw avx512vl xsaveopt xsavec xgetbv1 cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local dtherm ida arat pln pts hwp hwp_act_window hwp_epp hwp_pkg_req</p>",
+        "id": 208111107,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598457477
+    },
+    {
+        "content": "<p>Program received signal SIGILL, Illegal instruction.<br>\n[Switching to Thread 0x7ffd56bf5700 (LWP 21181)]<br>\n0x00007fffdd74b2a8 in unpack_u64 (packed=&lt;optimized out&gt;) at src/posh.rs:95<br>\n95              asm! {</p>",
+        "id": 208111646,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598457710
+    },
+    {
+        "content": "<p>So I have avx512 in all its glory, but this is still an illegal instruction somehow. What does that mean?</p>",
+        "id": 208112209,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598457968
+    },
+    {
+        "content": "<p><code>disas</code></p>",
+        "id": 208112296,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598458019
+    },
+    {
+        "content": "<p>in gdb</p>",
+        "id": 208112301,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598458024
+    },
+    {
+        "content": "<p>To show the instruction it's crashing on</p>",
+        "id": 208112548,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598458140
+    },
+    {
+        "content": "<p>0x00007fffdd74b2a8 &lt;+312&gt;:   (bad)  {%k1}{z}</p>",
+        "id": 208112741,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598458232
+    },
+    {
+        "content": "<p>I don't know what could be causing that...</p>",
+        "id": 208112880,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598458320
+    },
+    {
+        "content": "<p>Could be a bug in LLVM's assembler.</p>",
+        "id": 208112934,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598458328
+    },
+    {
+        "content": "<p>OK</p>",
+        "id": 208112978,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598458359
+    },
+    {
+        "content": "<p><a href=\"https://rust.godbolt.org/z/7WM8ad\">This</a> seems to generate a valid instruction</p>",
+        "id": 208113003,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598458369
+    },
+    {
+        "content": "<p>Yes, and the code in --emit asm looks similar, though it's inlined into other functions</p>",
+        "id": 208113247,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598458502
+    },
+    {
+        "content": "<p>It seems that vpexpandb is part of AVX512-VBMI2 which your cpu doesn't support.</p>",
+        "id": 208113535,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598458623
+    },
+    {
+        "content": "<p>It's not part of the base AVX512 ISA.</p>",
+        "id": 208113559,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598458634
+    },
+    {
+        "content": "<p>Arggh! Thanks so much for helping me track this down.</p>",
+        "id": 208114027,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598458830
+    },
+    {
+        "content": "<p>Oh wait, according to the manual it's in AVX512VL as well, which I do have</p>",
+        "id": 208114245,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598458934
+    },
+    {
+        "content": "<p>Oh wait again, most of them are, but not this specific variant. Sigh</p>",
+        "id": 208114314,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598458976
+    },
+    {
+        "content": "<p>No, the manual says it requires <em>both</em> VL and VBMI</p>",
+        "id": 208114334,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1598458986
+    },
+    {
+        "content": "<p>Ah. Oh well. Thanks again for all your help!</p>",
+        "id": 208114525,
+        "sender_full_name": "Bryn Keller",
+        "timestamp": 1598459081
+    }
+]

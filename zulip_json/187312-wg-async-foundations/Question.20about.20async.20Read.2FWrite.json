@@ -1,0 +1,140 @@
+[
+    {
+        "content": "<p>It seems a challenge with the async read/write traits is for objects which want to do both (SSL is the example given in the vision doc). Why is this more of a challenge in the async world than in the sync world? In other words, why is option D from the doc (implement AsyncRead + AsyncWrite) not the obvious winning choice of API?</p>",
+        "id": 247279504,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1627344868
+    },
+    {
+        "content": "<p>It is a challenge in the synchronous world, but also a matter of use-cases. Look at your favorite TLS library. You likely can either just do a blocking read, or a blocking write on it, but it's not full duplex. </p>\n<p>That might not matter for a lot of use-cases, since e.g. for a trivial HTTP/1.1 client you don't need to read and write at the same time.<br>\nFor HTTP/2 library you need due to multiplexing. But everything which does that will also uses the event-driven versions of the TLS library.</p>\n<p>I think Go and Java TLS libraries might be an exception here. In those cases the objects are just thread-safe reference types, and thereby equivalent to some kind of <code>Arc&lt;dyn Read + Write&gt;</code> types in the Rust world - but where the types only require <code>&amp;self</code>.</p>",
+        "id": 247282653,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1627348380
+    },
+    {
+        "content": "<p>So what exactly is the concrete problem with using just the Read and Write traits? E.g., if I have a TlsSocket type and it implements both Read and Write, or AsyncRead and AsyncWrite, traits, what is the code that I can't write?</p>",
+        "id": 247284061,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1627349883
+    },
+    {
+        "content": "<p>Can you link the vision doc you're looking at?</p>",
+        "id": 247302518,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1627371244
+    },
+    {
+        "content": "<p><a href=\"https://nikomatsakis.github.io/wg-async-foundations/vision/deliverables/portable/async_read_write.html\">https://nikomatsakis.github.io/wg-async-foundations/vision/deliverables/portable/async_read_write.html</a></p>",
+        "id": 247304628,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1627372938
+    },
+    {
+        "content": "<p>You can't really implement <code>AsyncRead</code>/<code>AsyncWrite</code> for immutable references in a reasonable way</p>",
+        "id": 247304702,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1627372994
+    },
+    {
+        "content": "<p>This is because poll methods generally come with a guarantee that only the most recent caller is woken, but this wont work if you have multiple readers via an immutable reference.</p>",
+        "id": 247304797,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1627373045
+    },
+    {
+        "content": "<p>So you either have to risk not waking all readers, or store a possibly unbounded amount of wakers.</p>",
+        "id": 247304840,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1627373074
+    },
+    {
+        "content": "<p>(or do what async-std does, and have concurrent I/O operations be caught in a busy-loop of waking each other)</p>",
+        "id": 247305453,
+        "sender_full_name": "Kestrer",
+        "timestamp": 1627373555
+    },
+    {
+        "content": "<p>If we get unsized function parameters, then AsyncWrite could be defined as an async trait that desugars to something like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">trait</span><span class=\"w\"> </span><span class=\"n\">AsyncWrite</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">type</span> <span class=\"nc\">Write</span><span class=\"o\">&lt;'</span><span class=\"na\">a</span><span class=\"o\">&gt;</span>: <span class=\"nc\">Future</span><span class=\"o\">&lt;</span><span class=\"n\">Output</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">write</span><span class=\"o\">&lt;'</span><span class=\"na\">a</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"o\">&amp;'</span><span class=\"na\">a</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">buf</span>: <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"na\">a</span> <span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">cb</span>: <span class=\"nc\">dyn</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">(</span><span class=\"bp\">Self</span>::<span class=\"n\">Write</span><span class=\"o\">&lt;'</span><span class=\"na\">a</span><span class=\"o\">&gt;</span><span class=\"p\">));</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>When writing to a concrete type, the caller will simply allocate enough space for the future on the stack / in the containing future. Trait objects would implement it by setting <code>Write&lt;'a&gt; = dyn Future&lt;Output = usize&gt; + 'a</code>, so callers can choose how to deal with the unsized future: box it, <code>ReusableBoxFuture</code> it, etc. This trait would also work on shared references, because each I/O operation gets its own future.</p>",
+        "id": 247306106,
+        "sender_full_name": "Kestrer",
+        "timestamp": 1627374080
+    },
+    {
+        "content": "<p>Sorry, I don't understand why being an immutable reference is important. It seems orthogonal whether a type is bounded by <code>AsyncReadWrite</code> or <code>AsyncRead + AsyncWrite</code> and whether the reference is <code>mut</code> or not</p>",
+        "id": 247368173,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1627408761
+    },
+    {
+        "content": "<p>isn't \"being an immutable reference\" the defining property of Variant D (from the vision doc you linked)?</p>",
+        "id": 247419701,
+        "sender_full_name": "Andrew Chin (eminence)",
+        "timestamp": 1627444938
+    },
+    {
+        "content": "<p>Aiui, the defining property is that there are two independent traits?</p>",
+        "id": 247420388,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1627445958
+    },
+    {
+        "content": "<p>I guess if you have one object that need to be passed to two different functions at the same time, one for reading and one for writing, then they both have to be immutable</p>",
+        "id": 247420441,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1627446017
+    },
+    {
+        "content": "<p>Is that the scenario being targeted here? As opposed to say one function which reads and writes?</p>",
+        "id": 247420461,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1627446066
+    },
+    {
+        "content": "<p>i think that's the scenario being targeted, yes (though i admit i'm not 100% clear)</p>",
+        "id": 247420775,
+        "sender_full_name": "Andrew Chin (eminence)",
+        "timestamp": 1627446502
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"218683\">Alice Ryhl</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Question.20about.20async.20Read.2FWrite/near/247304797\">said</a>:</p>\n<blockquote>\n<p>This is because poll methods generally come with a guarantee that only the most recent caller is woken, but this wont work if you have multiple readers via an immutable reference.</p>\n</blockquote>\n<p>Well, that's kind of a \"epoll\" wrapper problem, and less of one of the trailts in general. And you can even fix that. Eg.</p>\n<div class=\"codehilite\"><pre><span></span><code>struct ReadWriteImpl {\n    inner: Mutex&lt;Inner&gt;;\n    write_ready: AsyncManualResetEvent;\n}\n\nimpl ReadWriteImpl&lt;T&gt; {\n    async fn write(&amp;self, buf: &amp;[u8]) -&gt; Result&lt;usize, Error&gt; {\n        loop {\n            self.write_ready.wait().await;\n\n            let inner = self.inner.lock();\n            let written =  inner.write(buf)?;\n            if written != 0 {\n                return Ok(written);\n            }\n       }\n    }\n\n    /* Something equiivalent for read */\n}\n</code></pre></div>\n<p>I guess this is also what <span class=\"user-mention\" data-user-id=\"360486\">@Kestrer</span> meant with \"busy-loop\".</p>",
+        "id": 247423839,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1627450589
+    },
+    {
+        "content": "<p>Practically speaking I think while this is doable for low-level implementations, such an impl gets annoyinng for everyone who wants to do a wrapper. You want to have a writer which just counts the number of bytes written? Too bad, you either need an atomic, refcell or mutex.<br>\nYou want to do something even more complex, like compression? You almost certainly need mutex.</p>",
+        "id": 247423929,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1627450778
+    },
+    {
+        "content": "<p>That fix works because the <code>write</code> future is an async function, and not a <code>poll_*</code> function. If you tried to write that function as <code>async fn poll_write(&amp;self, ...)</code> (as the <code>AsyncWrite</code> trait requires) you would run into the issues Alice mentioned.</p>\n<p>What I meant by \"busy loop\" is this:</p>\n<ul>\n<li>Task A tries to write to the <code>&amp;TcpStream</code>, sees it is not ready and registers its waker</li>\n<li>Task B tries to write to the <code>&amp;TcpStream</code>, sees it is not ready and, upon seeing Task A's waker, wakes it and then replaces it with its own.</li>\n<li>Task A is woken, sees the socket is not ready and upon seeing Task B's waker it wakes it and replaces it with its own.</li>\n<li>Task B is woken, sees the socket is not ready and upon seeing Task A's waker it wakes it and replaces it with its own.</li>\n<li>and so on and so on and so on...</li>\n</ul>\n<p>This is what happens in async-std when you try to write to a <code>&amp;TcpStream</code> concurrently.</p>",
+        "id": 247423989,
+        "sender_full_name": "Kestrer",
+        "timestamp": 1627450896
+    },
+    {
+        "content": "<p>And while I briefly thought \"this could be interesting, because one could use the same trait to represent multiple queued operations when using an IO completion system like IOCP or io-uring\" I then realized that you couldn't submit moree than one op without risking garbage, since every write could be a \"short\" one. That might work better if the return value is <code>Result&lt;(), Error&gt;</code></p>",
+        "id": 247424006,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1627450905
+    },
+    {
+        "content": "<blockquote>\n<p>This is what happens in async-std when you try to write to a &amp;TcpStream concurrently.</p>\n</blockquote>\n<p>Ok, that sounds rather bad. With the <code>ManualResetEvent</code> approach you can store multiple wakers, and just wake everyone when the object gets ready. Might still be a storm, but not a constant busy-loop. But yes, you can't have that with a <code>poll</code> function - it needs to return a <code>Future</code> per waiter and you can poll that. But we don't want poll functions anyway ;)</p>",
+        "id": 247424130,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1627451075
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"256841\">Nick Cameron</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Question.20about.20async.20Read.2FWrite/near/247368173\">said</a>:</p>\n<blockquote>\n<p>Sorry, I don't understand why being an immutable reference is important. It seems orthogonal whether a type is bounded by <code>AsyncReadWrite</code> or <code>AsyncRead + AsyncWrite</code> and whether the reference is <code>mut</code> or not</p>\n</blockquote>\n<p><code>AsyncReadWrite</code> was just one proposed solution to the problem, it is the asynchronous equivalent of a trait like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">trait</span><span class=\"w\"> </span><span class=\"n\">ReadWrite</span>: <span class=\"nc\">Read</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"n\">Write</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">split</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"p\">(</span><span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">Read</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"nb\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">Write</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"nb\">_</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>It's not inherently related to async, it's just a way of getting concurrent reads and writes _without_ implementing the Async I/O traits on references (since that's not currently possible).</p>",
+        "id": 247424206,
+        "sender_full_name": "Kestrer",
+        "timestamp": 1627451190
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"256841\">@Nick Cameron</span> Variant D in the linked page is explicitly about implementing the two traits for immutable references.</p>",
+        "id": 247918148,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1627909865
+    }
+]

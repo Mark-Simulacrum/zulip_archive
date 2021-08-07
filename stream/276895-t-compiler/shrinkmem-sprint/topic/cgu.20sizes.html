@@ -1,0 +1,424 @@
+<html>
+<head><meta charset="utf-8"><title>cgu sizes · t-compiler/shrinkmem-sprint · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/index.html">t-compiler/shrinkmem-sprint</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html">cgu sizes</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="228807884"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228807884" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228807884">(Mar 04 2021 at 16:48)</a>:</h4>
+<p>So I spent yesterday looking at cgu sizes for <code>rustc_mir</code> on the theory that if we can get a more even partitioning, we can probably improve peak memory usage and hopefully that would be true of other large crates as well. What's interesting to me was that I found we have a huge disparity between the largest CGUs and the smallest CGUs after merging. </p>
+<p>To give an idea:</p>
+<ul>
+<li>1st largest CGU: <code>178769</code></li>
+<li>2nd &amp; 3rd largest CGUs: <code>~82000</code></li>
+<li>Next 8 CGUs: <code>40000 - 60000</code></li>
+<li>Next 8 CGUs: <code>20000 - 34000</code></li>
+<li>Next 18 CGUs: <code>10000 - 20000</code></li>
+<li>Remaining 219 CGUs: <code>1100 - 9800</code></li>
+</ul>
+<p>What's even more interesting is that the largest CGU is not the result of the merging algorithm adding some large CGUs together, it's actually that way before the merging step even runs! So the question in mind was then "What's in that cgu?" and the answer appears to be <code>hashbrown</code> monomorphizations for the various <code>HashMaps</code> we use in <code>rustc_mir</code>. (<a href="https://gist.github.com/wesleywiser/cc2bab8da28971f8e91df0638ba46d09">gist with details</a>)</p>
+
+
+
+<a name="228808803"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228808803" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228808803">(Mar 04 2021 at 16:53)</a>:</h4>
+<p><span class="user-mention" data-user-id="125250">@Wesley Wiser</span> am I right to assume that in theory all of those functions are independent - since they are all generic with different arguments - and so there's pretty much no chance they'd get inlined into each other? the only win might be llvm merging them (i.e. seeing they're identical) which seems not high priority to me?</p>
+
+
+
+<a name="228809463"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228809463" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228809463">(Mar 04 2021 at 16:57)</a>:</h4>
+<p>As for what to do with this, I see two potential avenues worth exploring:</p>
+<ol>
+<li>
+<p>Implement CGU splitting. When we have a "large" CGU (for some definition of large) before merging, we should break it up into smaller CGUs so the merge step can do a better job of generating more evenly sized CGUs. One complication here is that after splitting a CGU, we need to make sure it still has all of the necessary inline functions inside it (basically we need to re-run the inlining CGU partitioning step). </p>
+</li>
+<li>
+<p>Change the initial partitioning so we don't put all this code in the same CGU to begin with. Perhaps for things like <code>Vec&lt;T&gt;</code> instead of putting every <code>Vec&lt;_&gt;</code> instantiation together, we can split them across multiple CGUs in some way? For example we could do something similar to what we do for local items and group all the <code>Vec&lt;T&gt;</code> instances where <code>T</code> is in the same module together.</p>
+</li>
+</ol>
+
+
+
+<a name="228809708"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228809708" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228809708">(Mar 04 2021 at 16:59)</a>:</h4>
+<p><span class="user-mention" data-user-id="116122">@simulacrum</span> No, I'm pretty sure a lot of these are calling each other and going to be inlined. Just as an example, <code>Vec&lt;Foo&gt;::get(usize)</code> calls <code>Vec&lt;Foo&gt;::len()</code> and we want that to be inlined.</p>
+
+
+
+<a name="228809763"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228809763" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228809763">(Mar 04 2021 at 16:59)</a>:</h4>
+<p>right, but Vec&lt;bar&gt; and vec&lt;foo&gt; are pretty much independent, since we don't have polymorphization</p>
+
+
+
+<a name="228809792"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228809792" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228809792">(Mar 04 2021 at 16:59)</a>:</h4>
+<p>Yes, that's true.</p>
+
+
+
+<a name="228809874"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228809874" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228809874">(Mar 04 2021 at 17:00)</a>:</h4>
+<p>i.e., point 2 in what you said</p>
+
+
+
+<a name="228809879"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228809879" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228809879">(Mar 04 2021 at 17:00)</a>:</h4>
+<p>Which is why I'm thinking option 2 might be the first thing to try here.</p>
+
+
+
+<a name="228809991"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228809991" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228809991">(Mar 04 2021 at 17:00)</a>:</h4>
+<p>it's definitely my instinct</p>
+
+
+
+<a name="228810023"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228810023" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228810023">(Mar 04 2021 at 17:00)</a>:</h4>
+<p>I'm a bit surprised we group them</p>
+
+
+
+<a name="228810089"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228810089" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228810089">(Mar 04 2021 at 17:01)</a>:</h4>
+<p>seems odd to group by the self type w/o generics? or maybe we're grouping by the module of definition</p>
+
+
+
+<a name="228810179"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228810179" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228810179">(Mar 04 2021 at 17:01)</a>:</h4>
+<p>I think it'll be annoying to get inlining still nice, but it might not be too bad</p>
+
+
+
+<a name="228810534"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228810534" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228810534">(Mar 04 2021 at 17:03)</a>:</h4>
+<p>I'm pretty sure it's a result of using <a href="https://github.com/rust-lang/rust/blob/8fe989dd768f5dfdb0fc90933f3f74fa4579fefd/compiler/rustc_mir/src/monomorphize/partitioning/default.rs#L266"><code>characteristic_def_id_of_mono_item</code></a> to decide what CGU to initially put the item in.</p>
+
+
+
+<a name="228851668"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228851668" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228851668">(Mar 04 2021 at 21:15)</a>:</h4>
+<p>Based on the big comment at the top of<code>rustc_mir/src/monomorphize/partitioning/mod.rs</code>, it looks like reducing CGU invalidation in incremental was a primary motivator for the current partitioning scheme.</p>
+<p>IIUC, grouping instantiations of a generic together has the advantage that only one CGU will be invalidated if the generic definition changes.</p>
+<p>So, when generic instantiations all being in one CGU isn't actually a problem, then splitting them into different CGUs might be all downside.</p>
+
+
+
+<a name="228851835"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228851835" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228851835">(Mar 04 2021 at 21:16)</a>:</h4>
+<p>Though I don't have a full understanding of all that goes into partitioning, so I could be off</p>
+
+
+
+<a name="228852701"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228852701" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228852701">(Mar 04 2021 at 21:22)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="306073">Tyson Nottingham</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/228851668">said</a>:</p>
+<blockquote>
+<p>IIUC, grouping instantiations of a generic together has the advantage that only one CGU will be invalidated if the generic definition changes.</p>
+<p>So, when generic instantiations all being in one CGU isn't actually a problem, then splitting them into different CGUs might be all downside.</p>
+</blockquote>
+<p>Yeah, that's a great point! I think the tweak I want to pursue is doing something differently when the type is not local to the current crate.</p>
+
+
+
+<a name="228854806"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228854806" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228854806">(Mar 04 2021 at 21:37)</a>:</h4>
+<p>If the smaller cgus are faster to process and less long-tail, then invalidating more cgus seems fine to me. Presuming that the new scheme doesn't result in too much overhead (functions we "add" to more than one cgu for inlining), it may still be worthwhile. And in non-incr is just a win.</p>
+
+
+
+<a name="228855339"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228855339" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228855339">(Mar 04 2021 at 21:40)</a>:</h4>
+<p>When you modify a dependency crate, are all of the work products for downstream crates thrown out (or invalidated)?</p>
+
+
+
+<a name="228855901"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228855901" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228855901">(Mar 04 2021 at 21:45)</a>:</h4>
+<p>I'm ... not entirely sure.</p>
+
+
+
+<a name="228856465"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228856465" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228856465">(Mar 04 2021 at 21:48)</a>:</h4>
+<p>If they are, then it seems like there might be little downside to separating the generic instantiations into separate CGUs for generics from upstream crates. Since any modification to the upstream crate would invalidate all the downstream CGUs anyway... if that's how it works. :)</p>
+
+
+
+<a name="228856592"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228856592" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228856592">(Mar 04 2021 at 21:49)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116122">simulacrum</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/228854806">said</a>:</p>
+<blockquote>
+<p>If the smaller cgus are faster to process and less long-tail, then invalidating more cgus seems fine to me. Presuming that the new scheme doesn't result in too much overhead (functions we "add" to more than one cgu for inlining), it may still be worthwhile. And in non-incr is just a win.</p>
+</blockquote>
+<p>True, it might not be a problem in practice.</p>
+
+
+
+<a name="228857244"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228857244" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228857244">(Mar 04 2021 at 21:53)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="306073">Tyson Nottingham</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/228855339">said</a>:</p>
+<blockquote>
+<p>When you modify a dependency crate, are all of the work products for downstream crates thrown out (or invalidated)?</p>
+</blockquote>
+<p>I don't know, but I'd guess the answer is no. It may depend on the modification, though.</p>
+
+
+
+<a name="228858179"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228858179" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228858179">(Mar 04 2021 at 22:00)</a>:</h4>
+<p>I can also imagine this creating a bunch of smaller CGUs that end up having to get merged into larger CGUs, which might be a bad thing. A modification to the generic would invalidate every CGU that the instantiations got merged into, which might be a lot if there were many instantiations. But this is all speculation...</p>
+
+
+
+<a name="228858624"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228858624" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228858624">(Mar 04 2021 at 22:03)</a>:</h4>
+<p>Anyway, not trying to naysay. Just thinking we could factor some of these considerations into the design. :)</p>
+
+
+
+<a name="228859846"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228859846" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228859846">(Mar 04 2021 at 22:10)</a>:</h4>
+<p>Yeah, I'd love to get a collection of traces or something like that so we could write quick simulators to evaluate the cache invalidation and expected runtime of various strategies. Not sure how to do that though.</p>
+
+
+
+<a name="228887606"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228887606" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228887606">(Mar 05 2021 at 02:35)</a>:</h4>
+<p>Just to corroborate Wesley's findings, rustc_middle's and rustc_query_impl's largest CGUs are also just instantiations from <code>hashbrown::raw</code>.</p>
+<p>Estimated sizes and contents of some significant CGUs in rustc_query_impl (built with debug assertions) at each stage of partitioning:</p>
+<div class="codehilite"><pre><span></span><code>Initial partitioning:
+
+584685: hashbrown::raw generics
+412743: rustc_query_system::query generics
+324035: Vec generics
+214190: RawVec generics
+61992:  rustc_query_system::query::caches generics
+
+Post merging:
+
+Same.
+
+Post inlining:
+
+744205: hashbrown::raw generics + inlines
+684480: rustc_query_system::query generics + inlines
+529637: Vec generics + inlines
+314849: RawVec generics + inlines
+513496: rustc_query_system::query::caches + inlines
+</code></pre></div>
+<p>Interesting how much <code>rustc_query_system::query::caches</code> ballooned from inlining. While it didn't matter here, it shows how it could be important to consider the effects of inlining before merging. If a couple CGUs like that had been merged, it might have created a monster CGU after inlining.</p>
+<p>FWIW, a large number of the inlined items in that CGU were related to iterators.</p>
+
+
+
+<a name="228889464"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228889464" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228889464">(Mar 05 2021 at 02:57)</a>:</h4>
+<p>One other question I've had is the extent to which these sizes are "real", i.e. do we have an estimate for how accurate our size counts are? I think they're based on MIR statements, it'd be interesting to compare to pre and post opt llvm IR for that cgu</p>
+
+
+
+<a name="228889779"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228889779" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228889779">(Mar 05 2021 at 03:00)</a>:</h4>
+<p>Relevant -- <a href="https://github.com/rust-lang/rust/issues/69382">#69382</a></p>
+
+
+
+<a name="228911285"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/228911285" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#228911285">(Mar 05 2021 at 08:03)</a>:</h4>
+<p>Seeing if I can reduce the explosion of that <code>rustc_query_system::query::caches</code> CGU. Looks like it might be overly generic.</p>
+
+
+
+<a name="229027053"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229027053" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229027053">(Mar 05 2021 at 21:23)</a>:</h4>
+<p>Well, I tried the "change the initial partitioning" idea and it didn't make much of a difference. Most of the hashmap instantiations in rustc_mir are for types defined in rustc_middle.</p>
+
+
+
+<a name="229027207"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229027207" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229027207">(Mar 05 2021 at 21:24)</a>:</h4>
+<p>However, I do have a patch set that implements the cgu splitting idea. It does a much better job of creating evenly sized cgus and <em>I think</em> we're seeing lower peak memory usage during bootstrap.</p>
+
+
+
+<a name="229027227"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229027227" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229027227">(Mar 05 2021 at 21:24)</a>:</h4>
+<p>I need to profile more.</p>
+
+
+
+<a name="229027544"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229027544" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tm <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229027544">(Mar 05 2021 at 21:26)</a>:</h4>
+<p>What was the new idea behind the initial partitioning?</p>
+
+
+
+<a name="229027598"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229027598" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229027598">(Mar 05 2021 at 21:27)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125250">Wesley Wiser</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/228809463">said</a>:</p>
+<blockquote>
+<p>As for what to do with this, I see two potential avenues worth exploring:</p>
+<ol>
+<li>
+<p>Implement CGU splitting. When we have a "large" CGU (for some definition of large) before merging, we should break it up into smaller CGUs so the merge step can do a better job of generating more evenly sized CGUs. One complication here is that after splitting a CGU, we need to make sure it still has all of the necessary inline functions inside it (basically we need to re-run the inlining CGU partitioning step). </p>
+</li>
+<li>
+<p>Change the initial partitioning so we don't put all this code in the same CGU to begin with. Perhaps for things like <code>Vec&lt;T&gt;</code> instead of putting every <code>Vec&lt;_&gt;</code> instantiation together, we can split them across multiple CGUs in some way? For example we could do something similar to what we do for local items and group all the <code>Vec&lt;T&gt;</code> instances where <code>T</code> is in the same module together.</p>
+</li>
+</ol>
+</blockquote>
+
+
+
+<a name="229027610"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229027610" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229027610">(Mar 05 2021 at 21:27)</a>:</h4>
+<ol start="2">
+<li>in that list</li>
+</ol>
+
+
+
+<a name="229027619"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229027619" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229027619">(Mar 05 2021 at 21:27)</a>:</h4>
+<p>and then</p>
+
+
+
+<a name="229027637"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229027637" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229027637">(Mar 05 2021 at 21:27)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125250">Wesley Wiser</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/228852701">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="306073">Tyson Nottingham</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/228851668">said</a>:</p>
+<blockquote>
+<p>IIUC, grouping instantiations of a generic together has the advantage that only one CGU will be invalidated if the generic definition changes.</p>
+<p>So, when generic instantiations all being in one CGU isn't actually a problem, then splitting them into different CGUs might be all downside.</p>
+</blockquote>
+<p>Yeah, that's a great point! I think the tweak I want to pursue is doing something differently when the type is not local to the current crate.</p>
+</blockquote>
+
+
+
+<a name="229027831"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229027831" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229027831">(Mar 05 2021 at 21:29)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="306073">Tyson Nottingham</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/228911285">said</a>:</p>
+<blockquote>
+<p>Seeing if I can reduce the explosion of that <code>rustc_query_system::query::caches</code> CGU. Looks like it might be overly generic.</p>
+</blockquote>
+<p>Indeed, <code>QueryCache::lookup</code> is instantiated 3 times for each query. That's... a lot.</p>
+
+
+
+<a name="229028588"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229028588" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229028588">(Mar 05 2021 at 21:34)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125250">Wesley Wiser</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/229027637">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="125250">Wesley Wiser</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/228852701">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="306073">Tyson Nottingham</span> <a href="#narrow/stream/276895-t-compiler.2Fshrinkmem-sprint/topic/cgu.20sizes/near/228851668">said</a>:</p>
+<blockquote>
+<p>IIUC, grouping instantiations of a generic together has the advantage that only one CGU will be invalidated if the generic definition changes.</p>
+<p>So, when generic instantiations all being in one CGU isn't actually a problem, then splitting them into different CGUs might be all downside.</p>
+</blockquote>
+<p>Yeah, that's a great point! I think the tweak I want to pursue is doing something differently when the type is not local to the current crate.<br>
+</p>
+</blockquote>
+</blockquote>
+<p>Can we consider that a function from non-local types is either: inlined at MIR level, or optimized through LTO? This would avoid having to include it in another function's CGU.</p>
+
+
+
+<a name="229029982"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229029982" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229029982">(Mar 05 2021 at 21:46)</a>:</h4>
+<p>Actually, all instantiation of a same function with non-local types should pretty much be independent. Could we be dumber and put them all in a different CGU?</p>
+
+
+
+<a name="229569484"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229569484" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229569484">(Mar 09 2021 at 22:41)</a>:</h4>
+<p>So I have data about the split large CGUs idea. The idea is basically that after the initial partitioning, we check if any CGUs are large and if they are, we split them in half and then repeat the check again on each part recursively. A large CGU is defined as a CGU that is 10x larger than the median CGU's size and is at least 50,000 estimation units in size. </p>
+<p>The net effect on bootstrap that it don't change memory used much at all and it regresses compilation time by about 2%. (Note: an initial version did not have the "must be at least 50,000 estimation units in size" restriction and the regression was much more significant there). The issue is that without more intelligent CGU splitting  and merging  algorithms, we end up generating many more copies of inlined functions than we do previously which causes the regressions (the extra copies increased the total estimated size by ~30%). </p>
+<p>While that's unfortunate, I think the good news here is that if we can be more intelligent to avoid having to duplicate the inlined functions so much, we could probably see some significant wins here. </p>
+<p>The data I collected:</p>
+<table>
+<thead>
+<tr>
+<th>Stat</th>
+<th>baseline</th>
+<th>with splitting</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Largest CGU</td>
+<td>253,976</td>
+<td>37,598</td>
+</tr>
+<tr>
+<td>Smallest CGU</td>
+<td>1,209</td>
+<td>8,706</td>
+</tr>
+<tr>
+<td>Delta from largest &amp; smallest</td>
+<td>252,767</td>
+<td>28,892</td>
+</tr>
+<tr>
+<td>Count of CGUs less than avg size</td>
+<td>202</td>
+<td>148 (out of 256 CGUs total)</td>
+</tr>
+<tr>
+<td>Stddev</td>
+<td>26,705.86214</td>
+<td>6,312.718697</td>
+</tr>
+<tr>
+<td>Total size of all CGUs</td>
+<td>3,502,838.00</td>
+<td>4,333,445.00</td>
+</tr>
+</tbody>
+</table>
+
+
+
+<a name="229645587"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/229645587" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#229645587">(Mar 10 2021 at 12:09)</a>:</h4>
+<p>is the 2% longer build time accounting for the time taken to do this partitioning, or purely downstream from that (I assume it's included, and that's it the overall bootstrap time) ? I should know this, so I'm sorry in advance if this is wrong/stupid: I assume the sizes are still the "instance def size estimate"s but do we have an idea whether in this test there were many MIR statements that are not really used in codegen (say, fake reads) or heavily skew the numbers w.r.t to "total estimated size" increasing by 30% (maybe we filter those out before partitioning so ignore this if that's the case) (that is, was the 30% cgu size increase also seen in the codegen) ? "if we can be more intelligent" do you think we could have a way to test this theory, à la "we analyze which are the costly duplicated inlined functions, manually figure out what a good partitioning would look like in this case, hardcode that ideal results for this test and measure again" to see if there are indeed the probable significant wins we hope for with this technique ? (maybe we can then work backwards from those results to infer the tweaks that strategy needs, and of course see how well it generalizes to many different tests)</p>
+
+
+
+<a name="230586122"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu%20sizes/near/230586122" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/276895-t-compiler/shrinkmem-sprint/topic/cgu.20sizes.html#230586122">(Mar 16 2021 at 20:31)</a>:</h4>
+<blockquote>
+<p>is the 2% longer build time accounting for the time taken to do this partitioning, or purely downstream from that (I assume it's included, and that's it the overall bootstrap time) ?</p>
+</blockquote>
+<p>The 2% time regression is in terms of the overall bootstrap process. </p>
+<blockquote>
+<p>I assume the sizes are still the "instance def size estimate"s</p>
+</blockquote>
+<p>Yeah, it's still that same code. </p>
+<blockquote>
+<p>do we have an idea whether in this test there were many MIR statements that are not really used in codegen (say, fake reads) or heavily skew the numbers w.r.t to "total estimated size" increasing by 30% (maybe we filter those out before partitioning so ignore this if that's the case) (that is, was the 30% cgu size increase also seen in the codegen) ? </p>
+</blockquote>
+<p>I'm not sure. I thought we had a pass that removed those statements at the beginning of the MIR opt pipeline. In terms of your overall question, yeah it's very possible the actual work is not 30% larger, it's just our bad estimates that are making it look that way. </p>
+<blockquote>
+<p>do you think we could have a way to test this theory, à la "we analyze which are the costly duplicated inlined functions, manually figure out what a good partitioning would look like in this case, hardcode that ideal results for this test and measure again" to see if there are indeed the probable significant wins we hope for with this technique ? </p>
+</blockquote>
+<p>That's an interesting approach! I think we could do that if we use a much smaller crate. There's ~70,000 instances that get codegen'd from rustc_mir so doing any kind of manual analysis on it felt intractable to me <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

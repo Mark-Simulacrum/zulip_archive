@@ -1,0 +1,296 @@
+<html>
+<head><meta charset="utf-8"><title>Iterator::{pairwise, windows} · t-libs · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/index.html">t-libs</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html">Iterator::{pairwise, windows}</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="224585156"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224585156" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224585156">(Jan 30 2021 at 13:28)</a>:</h4>
+<p>For context, see <a href="https://github.com/rust-lang/rust/pull/81382#issuecomment-766886730">https://github.com/rust-lang/rust/pull/81382#issuecomment-766886730</a> . In short: two potential iterator adapters similar to <code>[T]::array_windows</code>. CC <span class="user-mention" data-user-id="310399">@Mara</span> <span class="user-mention" data-user-id="204346">@Ashley Mannix</span> </p>
+<p>I think <code>pairwise</code> or <code>array_windows</code> would be very useful and versatile iterator adapters. I pondered about potential implementations/APIs again and by now I'm pretty certain that, unfortunately, we cannot currently implement them in a good way. I only see two possibilities: either clone the items or wait for GATs and a change of the <code>Iterator</code> trait. </p>
+<p>As <code>array_windows</code> would just be a generalization of <code>pairwise</code>, I will use the latter to demonstrate the problem. The iterator of <code>pairwise</code> has basically three potential item types (where <code>I</code> is the item type of the wrapped iterator): </p>
+<ul>
+<li>(a) <code>[I; 2]</code></li>
+<li>(b) <code>&amp;[I; 2]</code> (or <code>[&amp;I; 2]</code>; doesn't really matter)</li>
+<li>(c) <code>(&amp;I, I)</code>. </li>
+</ul>
+<p>Option (a) requires cloning items, as each item is yielded twice (except the first and last). Options (b) and (c) both yield references to items, which have to be stored somewhere. Ignoring <code>static</code> shenanigans, the only place to temporarily store the items is in the iterator adaptor. But that would mean <code>Pairwise::next</code> would return references to <code>self</code>, which is not allowed by the current <code>Iterator</code> trait. This is often referred to as "streaming iterators". With GATs, it would be possible to define an <code>Iterator</code> trait that supports streaming iterators, but it's absolutely not clear yet if it's even possible to change <code>std::iter::Iterator</code> in a backwards compatible way.</p>
+<p>That leaves us with the following options:</p>
+<ul>
+<li>(A) Add the methods with the names used above with <code>Self::Item: Clone</code> bound.</li>
+<li>(B) Add the methods with <code>Self::Item: Clone</code> bound, but with a <code>cloned</code> pre- or postfix to the name, e.g. <code>windows_cloned</code> and <code>pairwise_cloned</code>. Possible advantages of this:<br>
+    - If in the future, we can make <code>Iterator</code> work with streaming iterators, we can implement a non-cloning version with the "normal" names <code>pairwise</code> and <code>windows</code>.<br>
+    - The <code>cloned</code> in the name makes it very clear to the user that items are cloned, so the risk of accidentally performing lots of expensive clones should be lower.<br>
+    - This would allow  for<code>_copied</code> variants with <code>Copy</code> bound (for motivation see <code>Iterator::copied</code>). </li>
+<li>(C) Not add these methods now in the hope that we will be able to do it properly in the future.</li>
+<li>(D) Of course, never adding these methods because they are not useful enough is also an option.</li>
+</ul>
+
+
+
+<a name="224585171"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224585171" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224585171">(Jan 30 2021 at 13:29)</a>:</h4>
+<p>After writing all this down, I think option (B) is what we should go with. I almost created a PR already, but wanted to gather some feedback beforehand.</p>
+
+
+
+<a name="224587511"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224587511" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224587511">(Jan 30 2021 at 14:24)</a>:</h4>
+<p><span class="user-mention" data-user-id="118772">@Lukas Kalbertodt</span>  <code>cloned</code> might cause some confusion, as the <code>.cloned()</code> method/adapter converts an iterator over <code>&amp;T</code> to an iterator over <code>T</code>. But <code>windows_cloned</code> would not clone the <code>T</code> but the <code>&amp;T</code>, right?</p>
+
+
+
+<a name="224587549"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224587549" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224587549">(Jan 30 2021 at 14:25)</a>:</h4>
+<p>The <code>windows_cloned</code> would clone the actual iterator item. So if the iterator yields <code>T</code>, then <code>T</code> is cloned.</p>
+
+
+
+<a name="224587638"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224587638" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224587638">(Jan 30 2021 at 14:27)</a>:</h4>
+<p>exactly. so on an iterator of <code>&amp;Thing</code>, <code>.cloned()</code> would start producing <code>Thing</code>s by cloning <code>Thing</code>s. but <code>.windows_cloned()</code> would not clone <code>Thing</code>s, but just make copies (clones) of references.</p>
+
+
+
+<a name="224587644"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224587644" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224587644">(Jan 30 2021 at 14:27)</a>:</h4>
+<p>using the same name 'cloned' for both will be confusing</p>
+
+
+
+<a name="224587715"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224587715" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224587715">(Jan 30 2021 at 14:29)</a>:</h4>
+<p><code>["abc".to_string(), "xyz".to_string()].iter().cloned()</code> will be cloning <code>Strings</code>.</p>
+<p><code>["abc".to_string(), "xyz".to_string()].iter().windows_cloned()</code> will be cloning/copying references.</p>
+
+
+
+<a name="224587771"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224587771" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224587771">(Jan 30 2021 at 14:30)</a>:</h4>
+<p>how about a<code>map_windows(|&amp;[a, b]| ..)</code>? then that <code>MapWindows</code> adapter can own the values, as they don't need to be returned from a <code>.next()</code>.</p>
+
+
+
+<a name="224587941"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224587941" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224587941">(Jan 30 2021 at 14:35)</a>:</h4>
+<p>Oh yeah, now I get it. Yeah okay good point, that could be confusing indeed :/</p>
+
+
+
+<a name="224587991"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224587991" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224587991">(Jan 30 2021 at 14:36)</a>:</h4>
+<p>yeah :(, names are hard.</p>
+
+
+
+<a name="224588080"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224588080" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224588080">(Jan 30 2021 at 14:38)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="310399">Mara</span> <a href="#narrow/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D/near/224587771">said</a>:</p>
+<blockquote>
+<p>how about a<code>map_windows(|&amp;[a, b]| ..)</code>? then that <code>MapWindows</code> adapter can own the values, as they don't need to be returned from a <code>.next()</code>.</p>
+</blockquote>
+<p>That's an interesting idea!  With that, we could replace <code>is_sorted_by(...)</code> -&gt; <code>.map_windows(...).all()</code>. Oh and it's even more general than my suggestions as the user could decide for themselves whether to clone the values or whatnot. MHHHH interesting.</p>
+
+
+
+<a name="224588087"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224588087" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224588087">(Jan 30 2021 at 14:39)</a>:</h4>
+<p>Just for the protocol, here is an example impl of <code>windows_cloned</code>: <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=3312e4f46f6a089210758bafc63ca574">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=3312e4f46f6a089210758bafc63ca574</a></p>
+
+
+
+<a name="224588145"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224588145" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224588145">(Jan 30 2021 at 14:40)</a>:</h4>
+<p>yeah, except that <code>.all()</code> takes a closure :(, and <code>.all(|x| x)</code> is a bit ugly</p>
+
+
+
+<a name="224588233"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224588233" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224588233">(Jan 30 2021 at 14:42)</a>:</h4>
+<p>Don't we have <code>std::convert::identity</code> now? :D</p>
+
+
+
+<a name="224588255"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224588255" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224588255">(Jan 30 2021 at 14:43)</a>:</h4>
+<p>But still, I think something like <code>map_windows</code> is way more valuable than <code>is_sorted_by</code>. The latter cooould be added as well, but that would just be useful for "readability" as the name describes a specific thing.</p>
+
+
+
+<a name="224588320"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224588320" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224588320">(Jan 30 2021 at 14:45)</a>:</h4>
+<p>yeah :)</p>
+
+
+
+<a name="224588411"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224588411" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224588411">(Jan 30 2021 at 14:47)</a>:</h4>
+<p>So... should I give adding <code>map_windows</code> a shot? Or do you want to create a PR? Or do you think it's not clear yet if that method would be useful enough?</p>
+
+
+
+<a name="224588703"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224588703" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224588703">(Jan 30 2021 at 14:53)</a>:</h4>
+<p>Sounds useful to me! I haven't put much thought into it yet, but I think it could be good adition.</p>
+<p>Though, it might be good to think of other use cases first. If this will only be used with <code>.all(identity)</code> attached, maybe <code>fold_windows</code> or <code>all_windows</code> might be better. And maybe look at the other iterator methods to see how adding <code>_windows</code> versions of iterator methods would work out. Otherwise we might end up with <code>_windows</code> versions of <code>map</code>, <code>fold</code>, <code>reduce</code>, <code>position</code>, <code>sum</code>, <code>last</code>, <code>first</code>, <code>filter</code>, <code>next</code>, <code>for_each</code>, <code>find</code>, and many more.</p>
+
+
+
+<a name="224599793"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/224599793" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#224599793">(Jan 30 2021 at 19:05)</a>:</h4>
+<p>some sort of cloned windows thing seems pretty useful still, since it would efficiently on references still.  With a <code>Vec&lt;Expensive&gt;</code> I could still do <code>v.iter().bikeshed_windows::&lt;5&gt;()</code> without excess cost.</p>
+
+
+
+<a name="225478092"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225478092" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225478092">(Feb 07 2021 at 18:55)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="310399">Mara</span> <a href="#narrow/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D/near/224588703">said</a>:</p>
+<blockquote>
+<p>And maybe look at the other iterator methods to see how adding <code>_windows</code> versions of iterator methods would work out. Otherwise we might end up with <code>_windows</code> versions of <code>map</code>, <code>fold</code>, <code>reduce</code>, <code>position</code>, <code>sum</code>, <code>last</code>, <code>first</code>, <code>filter</code>, <code>next</code>, <code>for_each</code>, <code>find</code>, and many more.</p>
+</blockquote>
+<p>I went through all (stable) iterator methods and checked if a windowed version would make sense for them. I came up with this categorization:</p>
+<ul>
+<li>Windowed version would make sense: <code>scan</code>, <code>fold</code>, <code>try_fold</code>, <code>inspect</code></li>
+<li>Can be somewhat awkwardly replaced by <code>map_windows().$method</code>: <code>all</code>, <code>any</code>, <code>position</code>, <code>rposition</code>, <code>for_each</code>, <code>try_for_each</code>, <code>find</code>, <code>find_map</code></li>
+<li>Can easily be replaced <code>map_windows().$method</code>: <code>filter_map</code>, <code>flat_map</code>, <code>flatten</code>, <code>last</code>, <code>nth</code></li>
+<li>Unclear what it would do or just strange: <code>filter</code>, <code>skip_while</code>, <code>take_while</code>, <code>max*</code>, <code>min*</code>, <code>copied</code>, <code>cloned</code>, <code>peekable</code>, <code>cmp</code>, <code>partial_cmp</code>, <code>eq</code>, <code>ne</code>, <code>lt</code>, <code>le</code>, <code>gt</code>, <code>ge</code></li>
+<li>Windowed version does not make sense: everything else I looked at</li>
+</ul>
+<p>So it's basically the <code>scan</code>/<code>fold</code> methods that would make sense as you can't get the same functionality with <code>map_windows</code> without cloning a bunch. And amusingly, <code>inspect</code>, though I don't think there is any need to add that one. Regarding all methods from the other categories: I don't think it would be useful to add windowed version of those. </p>
+<p>So yeah, I don't think adding <code>map_windows</code> has the risk of prompting us to add windowed version of many other methods. That's especially true if a proper <code>Iterator::windows</code> is added in the future (the GATs tracking issue currently talks about changing <code>Iterator</code> in a backwards-compatible way).</p>
+
+
+
+<a name="225478159"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225478159" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225478159">(Feb 07 2021 at 18:56)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="310399">Mara</span> <a href="#narrow/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D/near/224588703">said</a>:</p>
+<blockquote>
+<p>Though, it might be good to think of other use cases first. If this will only be used with <code>.all(identity)</code> attached, maybe <code>fold_windows</code> or <code>all_windows</code> might be better. </p>
+</blockquote>
+<p>I'm pretty sure there are plenty of use cases. Two quick examples: just cloning the elements to get what I described above as <code>windows_cloned</code> or doing something with Pascal's triangle.</p>
+
+
+
+<a name="225478288"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225478288" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225478288">(Feb 07 2021 at 18:59)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125270">scottmcm</span> <a href="#narrow/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D/near/224599793">said</a>:</p>
+<blockquote>
+<p>some sort of cloned windows thing seems pretty useful still, since it would efficiently on references still.  With a <code>Vec&lt;Expensive&gt;</code> I could still do <code>v.iter().bikeshed_windows::&lt;5&gt;()</code> without excess cost.</p>
+</blockquote>
+<p>I agree it would be useful. Do you think restricting such a <code>bikeshed_windows</code> to iterators with references as items would be fine? Or do you think it should stay as flexible as possible (i.e. <code>Item: Clone</code>)?</p>
+
+
+
+<a name="225480778"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225480778" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225480778">(Feb 07 2021 at 19:59)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="118772">Lukas Kalbertodt</span> <a href="#narrow/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D/near/225478288">said</a>:</p>
+<blockquote>
+<p>I agree it would be useful. Do you think restricting such a <code>bikeshed_windows</code> to iterators with references as items would be fine? Or do you think it should stay as flexible as possible (i.e. <code>Item: Clone</code>)?</p>
+</blockquote>
+<p>I think "just references" is overkill.  <code>Item: Copy</code> might make a reasonable middle ground, allowing <code>&amp;</code>s but also a bit more.</p>
+<p>I was using <code>.windows(2)</code> with an item type of <code>f32</code> the other day, for example.  It was an <a href="https://en.cppreference.com/w/cpp/algorithm/adjacent_difference"><code>adjacent_difference</code></a>-style thing like <code>.bikeshed_windows(|[a, b]| b / a)</code>.</p>
+<p>(And it sure would have been nice to have an array pattern there instead of <code>|x| x[1] / x[0]</code> that I was using because it wasn't important enough to move off stable.)</p>
+
+
+
+<a name="225484869"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225484869" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jacob Lifshay <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225484869">(Feb 07 2021 at 21:29)</a>:</h4>
+<p>I think we shouldn't limit it to just <code>Copy</code>, something like <code>Rc&lt;T&gt;</code> would be useful, or some type that's cheap to clone but isn't <code>Copy</code> for aesthetic reasons, like <code>Range&lt;usize&gt;</code></p>
+
+
+
+<a name="225485235"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225485235" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225485235">(Feb 07 2021 at 21:37)</a>:</h4>
+<p>I guess this doesn't have the "it works way better as <code>Copy</code>" kind of thing that <code>copy_from_slice</code> does, so "take <code>Clone</code> but make it clear in the documentation" is probably consistent.  (Although <code>.copied()</code> and friends do seem to indicate that whenever there's such a method people end up wanting a version that makes it clear it's <code>Copy</code> and not just <code>Clone</code>...)</p>
+
+
+
+<a name="225485811"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225485811" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225485811">(Feb 07 2021 at 21:49)</a>:</h4>
+<p>I would also probably tend to add a <code>Item: Clone</code> and another <code>Item: Copy</code> version. But then the name probably somehow needs to contain <code>clone[d]</code> and <code>cop[y|ied]</code> which brings the naming problem Mara mentioned above :/</p>
+
+
+
+<a name="225485887"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225485887" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225485887">(Feb 07 2021 at 21:51)</a>:</h4>
+<p>If only min_specialization were stable, then we could tell people to specialize their iterator implementations when appropriate without the naming noise.</p>
+
+
+
+<a name="225486054"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225486054" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225486054">(Feb 07 2021 at 21:54)</a>:</h4>
+<p><span class="user-mention" data-user-id="330154">@The 8472</span>  I'm not quite sure what you mean. The reason for <code>copied</code> is for code readability and for people to be sure to not accidentally do expensive clones.</p>
+
+
+
+<a name="225486335"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225486335" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225486335">(Feb 07 2021 at 22:00)</a>:</h4>
+<p>Mhm, that seems like a slightly different concern that could also be solved by an <code>assert_copy</code> or something like that (type ascription!). If the default clone implementation boils down to copy anyway for many adapters then it doesn't make sense to implement two methods. It only makes sense if the implementation can do something better for Copy types (often <code>ptr::copy...</code>).</p>
+<p>So instead of <code>map_windows_copied</code> and <code>map_windows_cloned</code> you would just have <code>map_windows</code> which requires <code>T: Clone</code> and if you want to make sure  you're not accidentally calling clone you either put <code>T: Copy</code> on your own method that invokes <code>map_windows</code> or assert the type somewhere in your iterator chain.</p>
+<p>I may be wrong here but I think a lot of the _copied/_cloned patterns come from a time before even std had specialization, it was a matter of necessity.</p>
+
+
+
+<a name="225486478"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225486478" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225486478">(Feb 07 2021 at 22:03)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="330154">The 8472</span> <a href="#narrow/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D/near/225486335">said</a>:</p>
+<blockquote>
+<p>I may be wrong here but I think a lot of the _copied/_cloned patterns come from a time before even std had specialization, it was a matter of necessity.</p>
+</blockquote>
+<p><code>Iterator::copied</code> was only <a href="https://github.com/rust-lang/rust/pull/60333">stabilized in 2019</a>, so I don't think that's accurate.</p>
+
+
+
+<a name="225486628"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225486628" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225486628">(Feb 07 2021 at 22:06)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="330154">The 8472</span> <a href="#narrow/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D/near/225486335">said</a>:</p>
+<blockquote>
+<p>or assert the type somewhere in your iterator chain.</p>
+</blockquote>
+<p>There's certainly the possibility of something like <code>trait Iterator { fn do_not_worry_it_is_copy(self) -&gt; Self where Self::Item: Copy { self } }</code>.  So instead of adding new things like <code>.copied()</code> one could use <code>.cloned().do_not_worry_it_is_copy()</code>.  But the ergonomics are pretty bad.</p>
+
+
+
+<a name="225487386"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225487386" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225487386">(Feb 07 2021 at 22:24)</a>:</h4>
+<p>Also, since you both (probably accidentally) confused the two things here, just to make this clear, we are talking about two different methods:</p>
+<ul>
+<li><code>fn map_windows&lt;R, const N: usize&gt;(self, f: impl FnMut(&amp;[Self::Item; N]) -&gt; R) -&gt; impl Iterator&lt;Item = R&gt;</code>: was suggested by Mara above. This doesn't have any problems with <code>Clone</code> or <code>Copy</code> bound because the user provides a closure anyway.</li>
+<li><code>fn bikeshed_windows&lt;const N: usize&gt;(self) -&gt; impl iterator&lt;Item = [Self::Item; N]&gt; where Self::Item: C???</code>: this is the one where the <code>Clone</code>/<code>Copy</code> bound discussion is relevant.</li>
+</ul>
+
+
+
+<a name="225488399"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/225488399" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#225488399">(Feb 07 2021 at 22:48)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125270">scottmcm</span> <a href="#narrow/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D/near/225486628">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="330154">The 8472</span> <a href="#narrow/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D/near/225486335">said</a>:</p>
+<blockquote>
+<p>or assert the type somewhere in your iterator chain.</p>
+</blockquote>
+<p>There's certainly the possibility of something like <code>trait Iterator { fn do_not_worry_it_is_copy(self) -&gt; Self where Self::Item: Copy { self } }</code>.  So instead of adding new things like <code>.copied()</code> one could use <code>.cloned().do_not_worry_it_is_copy()</code>.  But the ergonomics are pretty bad.</p>
+</blockquote>
+<p>Arguably those ergonomics are still better than having two of a dozen methods. And ideally we'd have <code>.iter(): impl Iterator&lt;Item: Copy&gt;.cloned() </code>, alas the generalized type ascription RFC was postponed too. So I was argueing based on a fictional Rust  <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span></p>
+
+
+
+<a name="226305525"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/226305525" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#226305525">(Feb 14 2021 at 14:01)</a>:</h4>
+<p>Just an update: I have a patch for <code>Iterator::map_windows</code> ready. But since its implementation copied a bunch of code from <code>[T; N]::map</code>, I tried tackling the "duplicate code in array functions" problem first: <a href="https://github.com/rust-lang/rust/pull/82098">https://github.com/rust-lang/rust/pull/82098</a></p>
+
+
+
+<a name="227328113"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Iterator%3A%3A%7Bpairwise%2C%20windows%7D/near/227328113" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lukas Kalbertodt <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Iterator.3A.3A.7Bpairwise.2C.20windows.7D.html#227328113">(Feb 22 2021 at 19:59)</a>:</h4>
+<p>And just for the protocol again, the PR for <code>Iterator::map_windows</code> is here: <a href="https://github.com/rust-lang/rust/pull/82413">https://github.com/rust-lang/rust/pull/82413</a></p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

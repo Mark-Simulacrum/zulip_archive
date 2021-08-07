@@ -1,0 +1,122 @@
+[
+    {
+        "content": "<p>Hey all! This is roughly the current design of the filesystem crate I'm working on:</p>\n<div class=\"codehilite\"><pre><span></span><code>pub struct FileSystem&lt;T: io::Read + io::Seek&gt; {\n    partition: T,\n}\n\npub struct Files&lt;&#39;a, T: io::Read + io::Seek&gt; {\n    fs: &amp;&#39;a mut FileSystem&lt;T&gt;,\n    current_offset: u64,\n    last_offset: u64,\n}\n\nimpl&lt;&#39;a, T&gt; Iterator for Files&lt;&#39;a, T: io::Read + io::Seek&gt; {\n    type Item = io::Result&lt;File&lt;&#39;a, T&gt;&gt;;\n\n    fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt; {\n        ...\n    }\n}\n\npub struct File&lt;&#39;a, T: io::Read + io::Seek&gt; {\n    fs: &amp;&#39;a mut FileSystem&lt;T&gt;,\n    name: [u8; 255],\n}\n\nimpl&lt;&#39;a, T&gt; io::Read for File&lt;&#39;a, T: io::Read + io::Seek&gt; {\n    fn read(&amp;mut self, buf: &amp;mut [u8]) -&gt; Result&lt;usize&gt; {\n        ...\n    }\n}\n\nimpl&lt;&#39;a, T&gt; io::Seek for File&lt;&#39;a, T: io::Read + io::Seek&gt; {\n    fn seek(&amp;mut self, pos: SeekFrom) -&gt; Result&lt;u64, Self::Error&gt; {\n        ...\n    }\n}\n</code></pre></div>\n<p>Now Rust's borrow checker and the design of <code>std::io::Read</code> are giving me a hard time to actually implement my plan.<br>\n<code>fn read</code> needs a <code>&amp;mut self</code>, so I need to carry mutable references to <code>FileSystem</code> in <code>Files</code> and <code>File</code> just to be able to read.<br>\nHowever, when doing that, I cannot return a <code>File</code> from <code>Files::next</code> due to the lifetime limitations of <code>Iterator</code>.</p>\n<p>I have a few ideas around this, but none that really convinces me. It feels a lot like \"pick your poison\":</p>\n<ol>\n<li>\n<p><code>FileSystem::partition</code> becomes a <code>RefCell&lt;T&gt;</code> (like the fatfs crate does)</p>\n<p>- Advantages: All references to <code>FileSystem</code> can be constant. <code>Iterator</code>, <code>io::Read</code>/<code>io::Seek</code>, and even <code>io::Write</code> could be implemented without any hassles.<br>\n  - Disadvantages: Borrow-checking happens at runtime. I lose fundamental guarantees of the Rust compiler, and contributors need to be extra-cautious to not cause any panics.</p>\n</li>\n<li>\n<p>Using the positioned-io crate (like the ext4 crate does)</p>\n<p>- Advantages: Reading is possible with a constant reference to <code>FileSystem</code>.<br>\n  - Disadvantages: This is no solution for later adding write support, and incompatible to <code>std::io</code>.</p>\n</li>\n<li>\n<p>Not implementing <code>Iterator</code>, but just <code>fn next</code> (like the streaming-iterator crate does)</p>\n<p>- Advantages: <code>io::Read</code>, <code>io::Seek</code>, and <code>io::Write</code> can be implemented.<br>\n  - Disadvantages: I lose all advantages of <code>Iterator</code>, like for loops or combining my iterator with others (<code>map</code>, <code>zip</code>, etc.).<br>\n    By holding mutable references, I'm also subject to very rigid lifetime restrictions. Two simultaneous <code>File</code> instances aren't possible, and this is a likely case.</p>\n</li>\n<li>\n<p>Only store small frequently accessed data (like the name) inside <code>File</code>, pass a temporary mutable reference to <code>FileSystem</code> every time we access the file content</p>\n<p>- Advantages: I can implement <code>Iterator</code> and have two simultaneous <code>File</code> instances.<br>\n  - Disadvantages: I cannot implement <code>io::Read</code>/<code>io::Seek</code>/<code>io::Write</code> on <code>File</code>, as their function signatures don't take a <code>&amp;mut FileSystem</code>.<br>\n    A caller may also pass me a different <code>&amp;mut FileSystem</code> than I expect.</p>\n</li>\n</ol>\n<p>Any advice, other ideas, or good examples that help me choose here?</p>",
+        "id": 233173744,
+        "sender_full_name": "Colin Finck",
+        "timestamp": 1617630476
+    },
+    {
+        "content": "<p>Read is implemented for &amp;std::fs::File. It is possible that Seek is also implemented for &amp;std::fs::File.</p>",
+        "id": 233174162,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617630695
+    },
+    {
+        "content": "<p>Just make sure that your types don't implement Sync to prevent race conditions between seeking and reading.</p>",
+        "id": 233174213,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617630723
+    },
+    {
+        "content": "<p>Do you consider it a logic bug to have the same file open twice?</p>",
+        "id": 233174596,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1617630936
+    },
+    {
+        "content": "<p>Is it possible for the filesystem implementation to handle concurrent modification of distinct files? The same file?</p>",
+        "id": 233174792,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1617631041
+    },
+    {
+        "content": "<p>My guess is that you need something like (1), except that locking the entire filesystem on any file mutation is too strict, so you will have to split it into chunks and lock them individually.</p>",
+        "id": 233175384,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1617631377
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> Nice find! Not sure I can apply it to my case though. If my <code>FileSystem::partition</code> field takes something that implements <code>std::io::Read</code>, I can still only call <code>filesystem.partition.read</code> on a <code>&amp;mut FileSystem</code>, not a <code>&amp;FileSystem</code>.</p>",
+        "id": 233215773,
+        "sender_full_name": "Colin Finck",
+        "timestamp": 1617649902
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span> These questions need to be asked indeed. Ultimately, someone should be able to write a perfect filesystem crate supporting all these things of course :)<br>\nWhat I know for sure already: I cannot lock the partition on a byte slice basis, as every data range on a filesystem can refer to any other data range.</p>\n<p>I had hoped to hear about other good examples. Basically every crate that parses a binary format should face similar problems.<br>\nAm I really the first one trying to write such a universal Rust filesystem crate? <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 233219375,
+        "sender_full_name": "Colin Finck",
+        "timestamp": 1617651733
+    },
+    {
+        "content": "<p>\"universal\" is often a Bad Word in my experience. Why would you need such a thing?</p>",
+        "id": 233219463,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1617651776
+    },
+    {
+        "content": "<p>Let's say I want to write an operating system and a bootloader for that operating system. Both need to access files on a filesystem - the OS with full read/write and concurrency support while the bootloader only needs basic read features.<br>\nI don't want to duplicate work and share as much filesystem code as possible in a crate. Projects in C usually have two distinct implementations, but I'm sure Rust can do better than that</p>",
+        "id": 233222821,
+        "sender_full_name": "Colin Finck",
+        "timestamp": 1617653429
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"350190\">@Colin Finck</span>  I think you should think about how the actual underlying data races are resolved to determine what the borrowing structure is. You say that if you want the backing store to be an arbitrary implementation of <code>io::Read</code> then you need mutable access. Why is this? Because the object might be loading and caching read bytes. So now suppose you have multiple files open and they each want to read some data. They are going to have to query the backing store, which is going to need to get mutated to retrieve the data. That can't happen concurrently, so you either need to assume more about the backing store (for example, it's just a byte array, or a <code>fs::File</code>, so the read implementation can just be a cursor over an immutable backing store), or the two files need to synchronize the mutation, meaning a <code>Mutex</code> or <code>RefCell</code>. This isn't \"losing the fundamental guarantees of the Rust compiler\", it is expressing the required borrowing patterns using the type system.</p>",
+        "id": 233225658,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1617654986
+    },
+    {
+        "content": "<p>Ah, so universal doesn't mean \"an abstraction over HFS and ZFS and EXT3/4 and JFS and NFS and ...\"</p>",
+        "id": 233225694,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1617655008
+    },
+    {
+        "content": "<p>You want to actually <em>implement</em> EXT3/4 or FAT or whatever. You \"just\" want both a small code version and a full-featured version of it.</p>",
+        "id": 233226368,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1617655361
+    },
+    {
+        "content": "<p>You could also use something like <a href=\"https://man7.org/linux/man-pages/man2/pwrite.2.html\">pread</a>, as represented by <a href=\"https://doc.rust-lang.org/std/os/unix/fs/trait.FileExt.html\">os::unix::fs::FileExt</a>  instead of Read + Seek. That avoids the need to keep state between seeking and reading.</p>",
+        "id": 233247029,
+        "sender_full_name": "The 8472",
+        "timestamp": 1617666768
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span> Thanks for the reminder about a cached <code>io::Read</code> implementor. I had only thought about the inner cursor, which already explained the need for <code>&amp;mut</code>.<br>\nStill, I look to avoid <code>RefCell</code>, as the compiler happily accepts two subsequent <code>borrow_mut</code> calls, only screwing me at runtime, whereas it outright denies two regular mutable borrows. Guess I will end up there anyway though after thinking through all locking boundaries again.</p>",
+        "id": 233343783,
+        "sender_full_name": "Colin Finck",
+        "timestamp": 1617724162
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116155\">@Jake Goulding</span> Exactly! In particular, this is becoming a crate around the NTFS filesystem.</p>",
+        "id": 233343868,
+        "sender_full_name": "Colin Finck",
+        "timestamp": 1617724188
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"330154\">@The 8472</span> Yep, just like my proposal (2) employing the positioned-io crate. Only helps for reading, not writing though.</p>",
+        "id": 233344039,
+        "sender_full_name": "Colin Finck",
+        "timestamp": 1617724244
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"350190\">@Colin Finck</span> I think you should use a <code>Mutex</code> rather than a <code>RefCell</code>, since in the case of concurrent modifications to the device, I guess you want to block instead of crash the program or othewise return an error. (Remember that <code>RefCell</code> also has APIs that allow it to report an error instead of panicking, and you can turn that error into an <code>io::Error</code>, which any downstream consumer should already be prepared to handle,  so it's not completely hopeless.)</p>",
+        "id": 233365933,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1617733508
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span> Thinking more about this, I'm leaning towards my proposal (4) now: Let none of my structures own the partition bytes (or just a mutable reference to it) and temporarily pass it to all functions that require it.<br>\nThis gives the caller the ability to perform locking as necessary (a full-fledged kernel needs more granular locking than a single-threaded bootloader) and avoids making choices deep in my crate now that I will regret later. For example, a <code>Mutex</code> isn't no-std aware, which is very important for writing a bootloader.<br>\n(Granted, <code>std::io</code> isn't no-std aware either, but there are at least 5 no-std implementations of the same traits)</p>\n<p><span class=\"user-mention\" data-user-id=\"307680\">@Kitlith</span> also hinted me to the petgraph crate, which follows a similar pattern through its <code>detach</code> function that converts a borrowing <code>Neighbors</code> struct into a non-borrowing <code>WalkNeighbors</code> struct: <a href=\"https://docs.rs/petgraph/0.5.1/petgraph/graph/struct.Neighbors.html#method.detach\">https://docs.rs/petgraph/0.5.1/petgraph/graph/struct.Neighbors.html#method.detach</a></p>",
+        "id": 233444803,
+        "sender_full_name": "Colin Finck",
+        "timestamp": 1617780623
+    },
+    {
+        "content": "<blockquote>\n<p>For example, a <code>Mutex</code> isn't no-std aware, which is very important for writing a bootloader.</p>\n</blockquote>\n<p>Well, here again, there is the question of \"why\" that leads to a design question about your own library: Why is <code>Mutex</code> not no_std? Because it needs a mechanism to handle blocking and waking threads, that may be OS dependent. So the question becomes, what do you actually want to happen in this case? If you want a non-blocking solution, the <code>RefCell</code> version does that. If you want to parameterize over the behavior, you can supply the handler via a trait implementation.</p>\n<p>One danger of the <code>detach</code> approach is that you lose some type safety in the detached objects; for example you could use a <code>WalkNeighbors</code> from one graph and index into another. This not only leads to some API unsafety, it also means that you need validity checks whenever you use the object (in the example that would be <code>WalkNeighbors::next_edge</code>). I think it is better for the <code>FileReader</code> structure to be borrowed, like <code>std::vec::Iter&lt;'a, T&gt;</code>, but rather than borrowing the entire filesystem it only borrows what it needs to in order to support reading, using <code>RefCell</code> or an equivalent at the relevant level of granularity in the guts of the filesystem.</p>\n<p>(Note that what is actually borrowed need not be some chunk of memory, it can just be a token that means \"I'm reading this file\" with the actual synchronization mechanism being implemented with raw pointers and unsafe, assuming you can implement a safe abstraction for it with the property that disjoint files can be read concurrently without synchronization.)</p>",
+        "id": 233460389,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1617789340
+    }
+]

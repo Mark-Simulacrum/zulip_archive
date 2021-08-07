@@ -1,0 +1,98 @@
+[
+    {
+        "content": "<p>Hi, I'm trying to debug the error: <code>Assertion `isa&lt;X&gt;(Val) &amp;&amp; \"cast&lt;Ty&gt;() argument of incompatible type!\"' failed.</code> from <a href=\"https://github.com/rust-lang/rust/pull/81469#issuecomment-809428126\">https://github.com/rust-lang/rust/pull/81469#issuecomment-809428126</a>. I thought this was an LLVM bug and followed the <a href=\"https://rustc-dev-guide.rust-lang.org/backend/debugging.html\">Debugging LLVM guide</a>. When adding the \"--emit=llvm-ir\", the abort seems to happen <em>before</em> the IR is created (I can see the .ll for other crates built before it).<br>\nI thought LLVM was only used after the IR was generated. What am I missing? Any idea on how to debug this? Thanks.</p>",
+        "id": 232388639,
+        "sender_full_name": "Thiébaud Weksteen",
+        "timestamp": 1617091716
+    },
+    {
+        "content": "<p><code>--emit=llvm-ir</code> shows the ir after optimizations. You can use <code>-Cno-prepopulate-passes</code> to disable the optimization passes that run even when optimizations are \"disabled\".</p>",
+        "id": 232391425,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617093298
+    },
+    {
+        "content": "<p>Thanks, I'll try that.</p>",
+        "id": 232392261,
+        "sender_full_name": "Thiébaud Weksteen",
+        "timestamp": 1617093796
+    },
+    {
+        "content": "<p>So here are the different options I now have: <code>-C no-prepopulate-passes --emit=llvm-ir -C passes=name-anon-globals -C save-temps</code>. But again, the abort seems to happen before any kind of output (except the .d) is generated. No .ll, no .bc.</p>",
+        "id": 232435427,
+        "sender_full_name": "Thiébaud Weksteen",
+        "timestamp": 1617114813
+    },
+    {
+        "content": "<p><code>env RUSTC_LOG=rustc_codegen_ssa=info rustc</code> should give you the concrete instance that is being codegened just before the crash</p>",
+        "id": 232438694,
+        "sender_full_name": "tm",
+        "timestamp": 1617115875
+    },
+    {
+        "content": "<p>Thanks, trying now.</p>",
+        "id": 232440947,
+        "sender_full_name": "Thiébaud Weksteen",
+        "timestamp": 1617116554
+    },
+    {
+        "content": "<p>If you can reproduce this, I would look at debug logs around <code>get_fn</code> / <code>declare_fn</code> / <code>declare_raw_fn</code> and find out what is being declared and with what type and why it doesn't match the previous declaration (I would suspect personality function).</p>",
+        "id": 232452171,
+        "sender_full_name": "tm",
+        "timestamp": 1617120543
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>INFO rustc_codegen_ssa::base codegen_instance(&lt;usize as Ord&gt;::max)\nINFO rustc_codegen_ssa::base codegen_instance(core::cmp::max::&lt;usize&gt;)\nINFO rustc_codegen_ssa::base codegen_instance(core::cmp::impls::&lt;impl Ord for usize&gt;::cmp)\nINFO rustc_codegen_ssa::base codegen_instance(core::cmp::max_by::&lt;usize, for&lt;&#39;r, &#39;s&gt; fn(&amp;&#39;r usize, &amp;&#39;s usize) -&gt; core::cmp::Ordering {&lt;usize as Ord&gt;::cmp}&gt;)\n</code></pre></div>",
+        "id": 232543665,
+        "sender_full_name": "Thiébaud Weksteen",
+        "timestamp": 1617173059
+    },
+    {
+        "content": "<p>With rustc_codegen_llvm logs, there is :</p>\n<div class=\"codehilite\"><pre><span></span><code>INFO rustc_codegen_ssa::base codegen_instance(core::cmp::max_by::&lt;usize, for&lt;&#39;r, &#39;s&gt; fn(&amp;&#39;r usize, &amp;&#39;s usize) -&gt; core::cmp::Ordering {&lt;usize as Ord&gt;::cmp}&gt;)\nDEBUG rustc_codegen_llvm::callee get_fn(instance=Instance { def: Item(WithOptConstParam { did: DefId(1:2543 ~ core[f647]::cmp::max_by), const_param_did: None }), substs: [usize, for&lt;&#39;r, &#39;s&gt; fn(&amp;&#39;r usize, &amp;&#39;s usize) -&gt; core::cmp::Ordering {&lt;usize as core::cmp::Ord&gt;::cmp}] })\nDEBUG rustc_codegen_ssa::mir fn_abi: FnAbi   [....truncated here....]\nDEBUG rustc_codegen_llvm::declare declare_raw_fn(name=&quot;rust_eh_personality&quot;, ty=i32 (...))\n</code></pre></div>\n<p>So yes, a declare_raw_fn on personality.  What does that mean?</p>",
+        "id": 232588813,
+        "sender_full_name": "Thiébaud Weksteen",
+        "timestamp": 1617196686
+    },
+    {
+        "content": "<p>I think I know what happens. Previously <code>eh_personality</code> wasn't used in <code>panic_abort</code> and now it is for some reason. The <code>eh_personality</code> defined by <code>panic_abort</code> doesn't take any arguments as it aborts immediately and at assembly level it doesn't matter how many arguments it takes. Now that it is actually used, the code emitting the reference uses the real function signature, which conflicts with the previous definition in the same codegen unit.</p>",
+        "id": 232590515,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617197294
+    },
+    {
+        "content": "<p>I think <code>eh_personality</code> is now used due to importing an <code>#[inline]</code> function from a crate that was compiled with <code>-Cpanic=unwind</code>.</p>",
+        "id": 232590686,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617197353
+    },
+    {
+        "content": "<p>I think <a href=\"https://github.com/rust-lang/rust/blob/a5029ac0ab372aec515db2e718da6d7787f3d122/compiler/rustc_codegen_ssa/src/mir/block.rs#L115\">https://github.com/rust-lang/rust/blob/a5029ac0ab372aec515db2e718da6d7787f3d122/compiler/rustc_codegen_ssa/src/mir/block.rs#L115</a> or something like that will need to be changed to use <code>call</code> instead of <code>invoke</code> for all function calls in <code>-Cpanic=abort</code> crates. Not just when the MIR doesn't have a cleanup target for the call.</p>",
+        "id": 232590960,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617197441
+    },
+    {
+        "content": "<p>Right, <code>Vec::new</code> is inline, that explains it.</p>",
+        "id": 232607710,
+        "sender_full_name": "Thiébaud Weksteen",
+        "timestamp": 1617203271
+    },
+    {
+        "content": "<p>You could use <code>malloc</code> and <code>memcpy</code> instead of <code>Vec</code>. No need to free the memory. (if allowed at all)</p>",
+        "id": 232608866,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617203680
+    },
+    {
+        "content": "<p>As in <a href=\"https://doc.rust-lang.org/alloc/alloc/fn.alloc.html\">https://doc.rust-lang.org/alloc/alloc/fn.alloc.html</a> ? I would still need to call Layout::new which is also inline?</p>",
+        "id": 232610462,
+        "sender_full_name": "Thiébaud Weksteen",
+        "timestamp": 1617204130
+    },
+    {
+        "content": "<p>You can call plain <code>malloc</code> here as you already know that libc is available.</p>",
+        "id": 232617399,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617206577
+    }
+]

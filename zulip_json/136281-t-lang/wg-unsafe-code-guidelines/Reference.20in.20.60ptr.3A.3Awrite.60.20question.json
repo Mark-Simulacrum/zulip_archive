@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p>I've found quite a strange thing in <code>ptr::write</code> source: <a href=\"https://doc.rust-lang.org/src/core/ptr/mod.rs.html#875\">https://doc.rust-lang.org/src/core/ptr/mod.rs.html#875</a>. In particular, I'm curious about <code>&amp;mut *dst</code> part and how does it handle a pointer to uninitialized memory, so consider the following example:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">mem</span>::<span class=\"n\">MaybeUninit</span>::<span class=\"o\">&lt;</span><span class=\"kt\">u8</span><span class=\"o\">&gt;</span>::<span class=\"n\">uninit</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">as_mut_ptr</span><span class=\"p\">().</span><span class=\"n\">write</span><span class=\"p\">(</span><span class=\"mh\">0x12</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>As far as I know, ref must always reference a properly initialized object. And in the <code>ptr::write</code> the pointer for uninitialized memory is dereferenced passing a mutable ref. So the unsafe block should be similar to <code>let y = &amp;mut *x; intrinsics::move_val_init(y, 0x12);</code>. Does it mean that either <code>ptr::write</code> has an undefined behavior (due to <code>y</code> creation is invalid), or it just exploits some internal knowledge regarding rvalue ref behavior?</p>",
+        "id": 220858891,
+        "sender_full_name": "Kitsu",
+        "timestamp": 1608802003
+    },
+    {
+        "content": "<p>Two points:</p>\n<ul>\n<li><code>core::ptr::write</code> does not, conceptually, dereference it's argument. It's merely undefined behaviour if the pointer is not dereferenceable (in particular, it's never been a requirement that the pointer points to an initialized value). In fact, a pattern for initializing a MaybeUninit is to use <code>as_mut_ptr()</code> then write. </li>\n<li>Even if it did, &lt;<a href=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/77\">https://github.com/rust-lang/unsafe-code-guidelines/issues/77</a>&gt; implies that references do not need to refer to valid data, and this is only a safety invariant (unrelated safe code may assume that references refer to valid data).</li>\n</ul>",
+        "id": 220866350,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1608812353
+    },
+    {
+        "content": "<blockquote>\n<p>in particular, it's never been a requirement that the pointer points to an initialized value</p>\n</blockquote>\n<p>Is there any significant difference between \"dereferencable\" and \"readable\" for that context? If no, then e.g. <code>ptr::read</code> doc claims: «<code>src</code> must point to a properly initialized value of type <code>T</code>». And if yes, could you clarify that one?</p>\n<blockquote>\n<p>references do not need to refer to valid data</p>\n</blockquote>\n<p>Thus UB is accessing uninitialized memory by reference, but not creation that one, am I correct? That's a little unintuitive for me then. Besides, the issue isn't closed yet and it's quite a big to follow to be honest. Perhaps, maybe there's a summary of what has been resolved/discussed?</p>",
+        "id": 220867931,
+        "sender_full_name": "Kitsu",
+        "timestamp": 1608814071
+    },
+    {
+        "content": "<p><code>ptr::read</code> requires the pointer to point to a valid value of <code>T</code>, because it returns a <code>T</code> (and if it didn't point to a valid <code>T</code>, that would violate the validity invariant). <code>ptr::write</code> on the other hand does not produce a <code>T</code> (it consumes a <code>T</code>), and performs no operations on the source, other than what is effectively a raw byte copy (in particular, it does not <code>drop</code> the source).  </p>\n<blockquote>\n<p>Thus UB is accessing uninitialized memory by reference, but not creation that one, am I correct? That's a little unintuitive for me then</p>\n</blockquote>\n<p>The TL;DR of the current position in the issue, is that there are cases where having a reference to invalid data is desirable. I don't remember any of the examples off the top of my head, though I believe one was to do with Atomics and objects with padding.  <br>\nI'd point out the difference between \"initialized\" and \"valid\" is that uninitialized memory can be invalid for some types (notably, <code>MaybeUninit&lt;T&gt;</code>). It's undefined behaviour to produce an invalid value.</p>",
+        "id": 220868536,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1608814873
+    },
+    {
+        "content": "<p>Stdlib is special, in that it can abuse not-yet-exploited UB, since their code is tied to its specific compiler version, and so can positively know what is and isn't exploited UB. And having a Rust reference to uninitialized / invalid data is not exploited UB yet. But if a downstream user were to write that very same code, then it would technically be UB, since a future version of the compiler may choose to exploit that.</p>",
+        "id": 220870800,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1608817670
+    },
+    {
+        "content": "<p>Thanks for the explanation, that cleared things out for me</p>",
+        "id": 220872287,
+        "sender_full_name": "Kitsu",
+        "timestamp": 1608819476
+    },
+    {
+        "content": "<p>I am actually not sure why that code does that, because the intrinsic takes a raw pointer.</p>",
+        "id": 220872760,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1608820010
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116122\">simulacrum</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Reference.20in.20.60ptr.3A.3Awrite.60.20question/near/220872760\">said</a>:</p>\n<blockquote>\n<p>I am actually not sure why that code does that, because the intrinsic takes a raw pointer.</p>\n</blockquote>\n<p>Probably to trip optimizations/miri when it would be UB. Though that might be incorrect, as you can alias raw pointers, and write to both aliased raw pointers. If it's taking a <code>&amp;mut T</code>, that would be an incorrect optimization when raw pointers are fully tracked.</p>",
+        "id": 220873377,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1608820690
+    },
+    {
+        "content": "<blockquote>\n<p>Even if it did, &lt;<a href=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/77\">https://github.com/rust-lang/unsafe-code-guidelines/issues/77</a>&gt; implies that references do not need to refer to valid data, and this is only a safety invariant (unrelated safe code may assume that references refer to valid data).</p>\n</blockquote>\n<p>It implies no such thing... that's juts my current proposal. The proposal hasn't even been accepted by the UCG yet, let alone RFC'd and t-lang approved.</p>",
+        "id": 220925274,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1608909682
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116122\">simulacrum</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Reference.20in.20.60ptr.3A.3Awrite.60.20question/near/220872760\">said</a>:</p>\n<blockquote>\n<p>I am actually not sure why that code does that, because the intrinsic takes a raw pointer.</p>\n</blockquote>\n<p>my guess is, it's an oversight that we should fix.^^ but anyway my proposal is to <a href=\"https://github.com/rust-lang/rust/pull/80290\">get rid of the intrinsic entirely</a>.</p>",
+        "id": 220925314,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1608909723
+    }
+]

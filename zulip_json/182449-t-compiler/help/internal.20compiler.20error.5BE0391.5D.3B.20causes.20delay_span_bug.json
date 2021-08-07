@@ -1,0 +1,932 @@
+[
+    {
+        "content": "<p>In <a href=\"https://github.com/rust-lang/rust/pull/73566\">https://github.com/rust-lang/rust/pull/73566</a>, the following code causes an ICE in rustdoc:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">E</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">V</span><span class=\"p\">(</span><span class=\"n\">E</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<div class=\"codehilite\"><pre><span></span><code>error: internal compiler error[E0391]: cycle detected when computing `Sized` constraints for `E`\n --&gt; src/lib.rs:1:1\n  |\n1 | enum E {\n  | ^^^^^^\n  |\n  = note: ...which again requires computing `Sized` constraints for `E`, completing the cycle\n  = note: cycle used when evaluating trait selection obligation `E: std::convert::From&lt;E&gt;`\n\nerror: internal compiler error: TyKind::Error constructed but no error reported\n</code></pre></div>\n\n\n<p>I have two questions.</p>\n<ol>\n<li>Why is this an ICE instead of a normal error? When I use <code>cargo check</code> instead of <code>cargo doc</code> this instead gives <code>error[E0072]: recursive type 'E' has infinite size</code>, without the ICE.</li>\n<li>Why does this give a secondary delay_span_bug?</li>\n</ol>\n<p>I don't see how this is related to my changes :/ The only thing I can think of that's related is I removed a call to <code>tcx.analysis()</code>.</p>",
+        "id": 203573699,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594430291
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232545\">@Joshua Nelson</span> did you get query stacks for each of those?</p>",
+        "id": 203574368,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431470
+    },
+    {
+        "content": "<p>(i.e. <code>-Z treat-err-as-bug=0</code> and <code>-Z treat-err-as-bug=1</code>, separately. or maybe 1 and 2, I forget how we count that)</p>",
+        "id": 203574413,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431512
+    },
+    {
+        "content": "<p>I suspect it is because you're not running some parts of type-checking</p>",
+        "id": 203574416,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431524
+    },
+    {
+        "content": "<p>the cycle error is weird but may be due to one of the cycle-\"catching\" situations where it's only allowed through requiring that compilation does not succeed</p>",
+        "id": 203574425,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431557
+    },
+    {
+        "content": "<p>(since successful cycles can have their results depend on which query in the cycle was the first one queried, and is generally unsound, especially wrt incremental or parallel compilation)</p>",
+        "id": 203574484,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431647
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232545\">@Joshua Nelson</span> what I'm thinking about is that <code>rustc_typeck::check</code> calls a few things, and you want some, or even all, of them other than the \"item bodies\" one (the one calling <code>typeck_tables_of</code> on everything)</p>",
+        "id": 203574522,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431716
+    },
+    {
+        "content": "<p><code>-Z treat-err-as-bug</code> doesn't work - passing =1 panics on the call to delay_span bug, and passing =2 panics when the delay span bug is reported</p>",
+        "id": 203574567,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594431776
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>$ rustdoc +stage1 lib.rs -Z treat-err-as-bug\nerror: internal compiler error: TyKind::Error constructed but no error reported\n\nthread &#39;rustc&#39; panicked at &#39;aborting due to `-Z treat-err-as-bug=1`&#39;, src/librustc_errors/lib.rs:942:13\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n</code></pre></div>",
+        "id": 203574574,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594431792
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>rustdoc +stage1 lib.rs -Z treat-err-as-bug=2\nerror: internal compiler error[E0391]: cycle detected when computing `Sized` constraints for `E`\n --&gt; lib.rs:1:1\n  |\n1 | enum E {\n  | ^^^^^^\n  |\n  = note: ...which again requires computing `Sized` constraints for `E`, completing the cycle\n  = note: cycle used when evaluating trait selection obligation `E: std::convert::From&lt;E&gt;`\n\nerror: internal compiler error: TyKind::Error constructed but no error reported\n  |\n  = note: delayed at /home/joshua/src/rust/src/librustc_session/session.rs:436:9\n\nthread &#39;rustc&#39; panicked at &#39;aborting after 2 errors due to `-Z treat-err-as-bug=2`&#39;, src/librustc_errors/lib.rs:942:13\n</code></pre></div>",
+        "id": 203574577,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594431802
+    },
+    {
+        "content": "<blockquote>\n<p>what I'm thinking about is that rustc_typeck::check calls a few things, and you want some, or even all, of them other than the \"item bodies\" one (the one calling typeck_tables_of on everything)</p>\n</blockquote>\n<p>hmm, I can see if I can run everything except item-bodies checking</p>",
+        "id": 203574587,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594431842
+    },
+    {
+        "content": "<blockquote>\n<p>panics on the call to delay_span bug</p>\n</blockquote>\n<p>that's what you want, yes</p>",
+        "id": 203574627,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431878
+    },
+    {
+        "content": "<p>ideally of course it wouldn't matter which order queries are called in but I've spent enough time on this I just want it to work lol</p>",
+        "id": 203574628,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594431881
+    },
+    {
+        "content": "<p>ok, with =1 the query stack is</p>\n<div class=\"codehilite\"><pre><span></span><code>query stack during panic:\n#0 [adt_sized_constraint] computing `Sized` constraints for `E`\n#1 [evaluate_obligation] evaluating trait selection obligation `E: std::convert::From&lt;E&gt;`\nend of query stack\n</code></pre></div>",
+        "id": 203574639,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594431909
+    },
+    {
+        "content": "<p>that checks out</p>",
+        "id": 203574643,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431916
+    },
+    {
+        "content": "<p>so anything that could possibly end up checking if <code>E: Sized</code> will hit this</p>",
+        "id": 203574648,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431949
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"232545\">Joshua Nelson</span> <a href=\"#narrow/stream/182449-t-compiler.2Fhelp/topic/internal.20compiler.20error.5BE0391.5D.3B.20causes.20delay_span_bug/near/203574587\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>what I'm thinking about is that rustc_typeck::check calls a few things, and you want some, or even all, of them other than the \"item bodies\" one (the one calling typeck_tables_of on everything)</p>\n</blockquote>\n<p>hmm, I can see if I can run everything except item-bodies checking</p>\n</blockquote>\n<p>oh wait I already figured out how to do this nonintrusively</p>",
+        "id": 203574695,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431975
+    },
+    {
+        "content": "<p>you just ended up removing <code>tcx.analysis()</code> instead</p>",
+        "id": 203574701,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594431998
+    },
+    {
+        "content": "<p>so you didn't need the other thing</p>",
+        "id": 203574704,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432024
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232545\">@Joshua Nelson</span> okay so you can do to <code>typeck_item_bodies</code> the same thing you did to <code>lint_mod</code></p>",
+        "id": 203574709,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432040
+    },
+    {
+        "content": "<p>meaning it becomes a noop</p>",
+        "id": 203574712,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432052
+    },
+    {
+        "content": "<p>ok, and all other checks will still run</p>",
+        "id": 203574714,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594432062
+    },
+    {
+        "content": "<p>and then you can call <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_typeck/lib.rs#L321\">https://github.com/rust-lang/rust/blob/master/src/librustc_typeck/lib.rs#L321</a></p>",
+        "id": 203574719,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432076
+    },
+    {
+        "content": "<p>why am I calling <code>check_crate()</code> instead of <code>analysis()</code>?</p>",
+        "id": 203574760,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594432105
+    },
+    {
+        "content": "<p>doesn't <code>analysis</code> include lints?</p>",
+        "id": 203574762,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432114
+    },
+    {
+        "content": "<p>I mean you could, but there's a risk you might need another full crater run :P</p>",
+        "id": 203574771,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432151
+    },
+    {
+        "content": "<p>ugh</p>",
+        "id": 203574772,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594432161
+    },
+    {
+        "content": "<p>ok let me rephrase - why does check_crate do less work than analysis?</p>",
+        "id": 203574775,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594432181
+    },
+    {
+        "content": "<p>because it's this line <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_interface/passes.rs#L857\">https://github.com/rust-lang/rust/blob/master/src/librustc_interface/passes.rs#L857</a></p>",
+        "id": 203574780,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432194
+    },
+    {
+        "content": "<p>got it</p>",
+        "id": 203574823,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594432208
+    },
+    {
+        "content": "<p>of a 123-line function :P</p>",
+        "id": 203574824,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432208
+    },
+    {
+        "content": "<p>oh it'd also try to do MIR borrowck and other fun stuff, lol</p>",
+        "id": 203574829,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432232
+    },
+    {
+        "content": "<p>even generating MIR at all would result in type-checking the body</p>",
+        "id": 203574835,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432251
+    },
+    {
+        "content": "<p>yay that worked <span aria-label=\"tada\" class=\"emoji emoji-1f389\" role=\"img\" title=\"tada\">:tada:</span></p>",
+        "id": 203575233,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594432975
+    },
+    {
+        "content": "<p>sweet!</p>",
+        "id": 203575240,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594432987
+    },
+    {
+        "content": "<p>let me make sure it still doesn't look at function bodies</p>",
+        "id": 203575241,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594432995
+    },
+    {
+        "content": "<p>ugh</p>\n<div class=\"codehilite\"><pre><span></span><code>error[E0433]: failed to resolve: could not resolve path `content::should::be::irrelevant`\n  --&gt; /home/joshua/src/rust/src/test/rustdoc/doc-cfg.rs:23:9\n   |\n23 |         content::should::be::irrelevant();\n   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ could not resolve path `content::should::be::irrelevant`\n   |\n   = note: this error was originally ignored because you are running `rustdoc`\n   = note: try running again with `rustc` or `cargo check` and you may get a more detailed error\n</code></pre></div>",
+        "id": 203575324,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594433137
+    },
+    {
+        "content": "<p>oh wait I forgot to override typeck_item_bodies lol</p>",
+        "id": 203575374,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594433182
+    },
+    {
+        "content": "<p>nope, still gives errors</p>",
+        "id": 203575443,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594433306
+    },
+    {
+        "content": "<p>I guess I can do this the hard way and make the <code>evaluate_obligation</code> query call typeck first?</p>",
+        "id": 203575596,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594433585
+    },
+    {
+        "content": "<p>not even sure if that would do what I want</p>",
+        "id": 203575599,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594433599
+    },
+    {
+        "content": "<p>uhhhh</p>",
+        "id": 203579346,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440364
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232545\">@Joshua Nelson</span> what's happening?</p>",
+        "id": 203579348,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440369
+    },
+    {
+        "content": "<p>when I ran typeck again it looked at function bodies :(</p>",
+        "id": 203579350,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594440395
+    },
+    {
+        "content": "<p>if you overrode <code>typeck_item_bodies</code> you shouldn't have problems I don't think. but you can always use <code>-Z treat-err-as-bug</code> to see what queried typeck</p>",
+        "id": 203579355,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440413
+    },
+    {
+        "content": "<p>I don't think you can assume anything before checking that, who knows what it might be</p>",
+        "id": 203579361,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440443
+    },
+    {
+        "content": "<p>ok, let me check</p>",
+        "id": 203579365,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594440474
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>query stack during panic:\n#0 [typeck_tables_of] type-checking `unix_only::unix_only_function`\n#1 [used_trait_imports] used_trait_imports `unix_only::unix_only_function`\nend of query stack\n</code></pre></div>",
+        "id": 203579411,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594440540
+    },
+    {
+        "content": "<p>hehehe, nice</p>",
+        "id": 203579414,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440555
+    },
+    {
+        "content": "<p>so it looks like it's running lints even though I told it not to?</p>",
+        "id": 203579416,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594440569
+    },
+    {
+        "content": "<p>doubtful</p>",
+        "id": 203579417,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440582
+    },
+    {
+        "content": "<p>it's <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_typeck/check_unused.rs\">https://github.com/rust-lang/rust/blob/master/src/librustc_typeck/check_unused.rs</a></p>",
+        "id": 203579458,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440616
+    },
+    {
+        "content": "<p>you have two options</p>",
+        "id": 203579467,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440674
+    },
+    {
+        "content": "<p>you either override <code>used_trait_imports</code> to return an empty set and hope the lint does nothing</p>",
+        "id": 203579471,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440694
+    },
+    {
+        "content": "<p>or you querify <code>check_unused</code></p>",
+        "id": 203579476,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440715
+    },
+    {
+        "content": "<p>wait, it's not currently a query?</p>",
+        "id": 203579514,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594440741
+    },
+    {
+        "content": "<p>I mean this <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_typeck/lib.rs#L367\">https://github.com/rust-lang/rust/blob/master/src/librustc_typeck/lib.rs#L367</a></p>",
+        "id": 203579516,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440749
+    },
+    {
+        "content": "<p>I'd call it <code>check_unused_post_typeck</code></p>",
+        "id": 203579517,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440777
+    },
+    {
+        "content": "<p>or <code>check_unused_traits_and_crates</code></p>",
+        "id": 203579519,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440783
+    },
+    {
+        "content": "<p>(for the lint name)</p>",
+        "id": 203579522,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440791
+    },
+    {
+        "content": "<p>not actually sure it's worth it tbh</p>",
+        "id": 203579525,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440806
+    },
+    {
+        "content": "<p>it might be easier to just try overriding <code>used_trait_imports</code> to return <code>Default::default()</code> or w/e</p>",
+        "id": 203579527,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440828
+    },
+    {
+        "content": "<p>let me try the empty set thing first, yeah</p>",
+        "id": 203579528,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594440834
+    },
+    {
+        "content": "<p>I feel like I keep shaving more yaks :/</p>",
+        "id": 203579567,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594440861
+    },
+    {
+        "content": "<p>lol <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_typeck/check/mod.rs#L843-L845\">https://github.com/rust-lang/rust/blob/master/src/librustc_typeck/check/mod.rs#L843-L845</a></p>",
+        "id": 203579568,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440879
+    },
+    {
+        "content": "<p>uhhhhhh</p>",
+        "id": 203579608,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440962
+    },
+    {
+        "content": "<p>someone did a clever thing that actually makes this worse</p>",
+        "id": 203579624,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594440975
+    },
+    {
+        "content": "<p>oh noes it's not actually possible to allocate it globally</p>",
+        "id": 203579633,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441050
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232545\">@Joshua Nelson</span> so you'll uhh need a <code>lazy_static!</code> that uses <code>Box::leak</code> to create a <code>&amp;'static FxHashSet&lt;LocalDefId&gt;</code></p>",
+        "id": 203579691,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441127
+    },
+    {
+        "content": "<p>it's not that bad just weird</p>",
+        "id": 203579692,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441131
+    },
+    {
+        "content": "<p>why can't I use <code>static map: HashMap</code>?</p>",
+        "id": 203579697,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441155
+    },
+    {
+        "content": "<p>oh ugh default() isn't a const fn</p>",
+        "id": 203579723,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441192
+    },
+    {
+        "content": "<p>do you know why <code>new()</code> isn't being found?</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"n\">error</span><span class=\"p\">[</span><span class=\"n\">E0599</span><span class=\"p\">]</span>: <span class=\"nc\">no</span><span class=\"w\"> </span><span class=\"n\">function</span><span class=\"w\"> </span><span class=\"n\">or</span><span class=\"w\"> </span><span class=\"n\">associated</span><span class=\"w\"> </span><span class=\"n\">item</span><span class=\"w\"> </span><span class=\"n\">named</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">new</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"n\">found</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"k\">struct</span> <span class=\"err\">`</span><span class=\"n\">std</span>::<span class=\"n\">collections</span>::<span class=\"n\">HashSet</span><span class=\"o\">&lt;</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">hash</span>::<span class=\"n\">BuildHasherDefault</span><span class=\"o\">&lt;</span><span class=\"n\">rustc_data_structures</span>::<span class=\"n\">fx</span>::<span class=\"n\">FxHasher</span><span class=\"o\">&gt;&gt;</span><span class=\"err\">`</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"n\">the</span><span class=\"w\"> </span><span class=\"n\">current</span><span class=\"w\"> </span><span class=\"n\">scope</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"o\">-</span>-&gt; <span class=\"nc\">src</span><span class=\"o\">/</span><span class=\"n\">librustdoc</span><span class=\"o\">/</span><span class=\"n\">core</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">367</span>:<span class=\"mi\">52</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\"></span>\n<span class=\"mi\">367</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"w\">     </span><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">map</span>: <span class=\"nc\">FxHashSet</span><span class=\"o\">&lt;</span><span class=\"n\">LocalDefId</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">FxHashSet</span>::<span class=\"n\">new</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">|</span><span class=\"w\">                                                    </span><span class=\"o\">^^^</span><span class=\"w\"> </span><span class=\"n\">function</span><span class=\"w\"> </span><span class=\"n\">or</span><span class=\"w\"> </span><span class=\"n\">associated</span><span class=\"w\"> </span><span class=\"n\">item</span><span class=\"w\"> </span><span class=\"n\">not</span><span class=\"w\"> </span><span class=\"n\">found</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"err\">`</span><span class=\"n\">std</span>::<span class=\"n\">collections</span>::<span class=\"n\">HashSet</span><span class=\"o\">&lt;</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">hash</span>::<span class=\"n\">BuildHasherDefault</span><span class=\"o\">&lt;</span><span class=\"n\">rustc_data_structures</span>::<span class=\"n\">fx</span>::<span class=\"n\">FxHasher</span><span class=\"o\">&gt;&gt;</span><span class=\"err\">`</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 203579784,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441270
+    },
+    {
+        "content": "<p>oh ugh _every_ method in std is only implemented for <code>RandomState</code> hashers</p>",
+        "id": 203579792,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441322
+    },
+    {
+        "content": "<p>whyy</p>",
+        "id": 203579829,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441325
+    },
+    {
+        "content": "<p>rustdoc doesn't even have a lazy static dependency yet</p>",
+        "id": 203579838,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441363
+    },
+    {
+        "content": "<p>I didn't need the Box::leak though</p>",
+        "id": 203579921,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441489
+    },
+    {
+        "content": "<p>ok, that finally did it</p>",
+        "id": 203579987,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441596
+    },
+    {
+        "content": "<p>it's not <code>new</code>, it's <code>default</code></p>",
+        "id": 203579988,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441598
+    },
+    {
+        "content": "<p>default goes through the trait</p>",
+        "id": 203579989,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441604
+    },
+    {
+        "content": "<p>what did you write?</p>",
+        "id": 203579992,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441606
+    },
+    {
+        "content": "<p>so you can't use it in <code>static</code></p>",
+        "id": 203579993,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441608
+    },
+    {
+        "content": "<p>surely you can't allocate <em>a hash table</em> in a <code>static</code>??</p>",
+        "id": 203579994,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441621
+    },
+    {
+        "content": "<p>I don't see why you can't allocate an empty one</p>",
+        "id": 203580001,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441632
+    },
+    {
+        "content": "<p>but in any case I ended up with</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"w\">    </span><span class=\"n\">lazy_static</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"k\">ref</span><span class=\"w\"> </span><span class=\"n\">EMPTY_MAP</span>: <span class=\"nc\">FxHashSet</span><span class=\"o\">&lt;</span><span class=\"n\">LocalDefId</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">FxHashSet</span>::<span class=\"n\">default</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 203580005,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441645
+    },
+    {
+        "content": "<p>oh did we make them free to do so? but then....</p>",
+        "id": 203580006,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441647
+    },
+    {
+        "content": "<p>yeah that's what I'd expect</p>",
+        "id": 203580011,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441659
+    },
+    {
+        "content": "<p>but that's not <code>&amp;'static</code></p>",
+        "id": 203580012,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441663
+    },
+    {
+        "content": "<p>... isn't it?</p>",
+        "id": 203580013,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441670
+    },
+    {
+        "content": "<p>this compiled at least</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"w\">            </span><span class=\"n\">local_providers</span><span class=\"p\">.</span><span class=\"n\">used_trait_imports</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">EMPTY_MAP</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 203580050,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441685
+    },
+    {
+        "content": "<p>I mean... hmm</p>",
+        "id": 203580051,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441686
+    },
+    {
+        "content": "<p>that's kind of weird</p>",
+        "id": 203580057,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441698
+    },
+    {
+        "content": "<p>(based on how <code>lazy-static</code> works, I mean)</p>",
+        "id": 203580058,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441707
+    },
+    {
+        "content": "<p>I guess <code>&amp;EMPTY_MAP</code> is <code>&amp;'static TheLazyStaticWrapper</code> before getting deref-coerced huh</p>",
+        "id": 203580066,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441739
+    },
+    {
+        "content": "<p>that's a new trick for me I guess</p>",
+        "id": 203580071,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594441771
+    },
+    {
+        "content": "<p>ok I <em>think</em> this should have fixed these issues <a href=\"https://github.com/rust-lang/rust/pull/73566/commits/a0086bee32de2b5c56a4e335a6e77323779fc83b\">https://github.com/rust-lang/rust/pull/73566/commits/a0086bee32de2b5c56a4e335a6e77323779fc83b</a></p>",
+        "id": 203580189,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441944
+    },
+    {
+        "content": "<p>oh oops I forgot to commit comments</p>",
+        "id": 203580197,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441980
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/pull/73566/commits/8008607fdce30d4cdd96e7871b65cb1c432a5fcb\">https://github.com/rust-lang/rust/pull/73566/commits/8008607fdce30d4cdd96e7871b65cb1c432a5fcb</a></p>",
+        "id": 203580202,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594441991
+    },
+    {
+        "content": "<blockquote>\n<p>Some queries are buggy and require that they only run on valid types:</p>\n</blockquote>\n<p>this doesn't sound right?</p>",
+        "id": 203580257,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442093
+    },
+    {
+        "content": "<p>well, maybe buggy is the wrong word</p>",
+        "id": 203580266,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442120
+    },
+    {
+        "content": "<p>there's nothing buggy about the query, you're just not emitting errors</p>",
+        "id": 203580267,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442121
+    },
+    {
+        "content": "<blockquote>\n<p>you're just not emitting errors</p>\n</blockquote>\n<p>I don't think that's related? This happened in code without resolution errors</p>",
+        "id": 203580269,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442141
+    },
+    {
+        "content": "<p>there's a lot of code in rustc that uses <code>delay_span_bug</code> and expecting something else produced an error</p>",
+        "id": 203580270,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442144
+    },
+    {
+        "content": "<p>resolution errors are just the case that you're injecting directly by ignoring them in <code>rustc_resolve</code></p>",
+        "id": 203580272,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442162
+    },
+    {
+        "content": "<p>there's a lot more stuff using <code>delay_span_bug</code></p>",
+        "id": 203580309,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442173
+    },
+    {
+        "content": "<p>I don't think I touched the other stuff though ...</p>",
+        "id": 203580313,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442192
+    },
+    {
+        "content": "<p>you did by not running any typeck</p>",
+        "id": 203580316,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442200
+    },
+    {
+        "content": "<p>like, when you removed <code>tcx.analysis()</code>, that prevented critical checks from running</p>",
+        "id": 203580322,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442227
+    },
+    {
+        "content": "<p>which other parts of the compiler safeguard against missing errors with <code>delay_span_bug</code></p>",
+        "id": 203580325,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442246
+    },
+    {
+        "content": "<p>maybe I should explain this less abstractly</p>",
+        "id": 203580329,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442272
+    },
+    {
+        "content": "<p>the reason I'm calling this buggy is because the other query should have called <code>typeck::check_crate</code> if it depends on that being run</p>",
+        "id": 203580369,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442290
+    },
+    {
+        "content": "<p>it doesn't depend on it in a stateful sense</p>",
+        "id": 203580372,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442310
+    },
+    {
+        "content": "<p>or in a dataflow sense</p>",
+        "id": 203580373,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442320
+    },
+    {
+        "content": "<p>it depends on it in a contracts sense</p>",
+        "id": 203580374,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442324
+    },
+    {
+        "content": "<p>\"this query can only be called on types that are valid\"</p>",
+        "id": 203580375,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442333
+    },
+    {
+        "content": "<p>there's a lot of stuff like this:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">impossible_state</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">delay_span_bug</span><span class=\"p\">(</span><span class=\"s\">&quot;uh oh we didn&#39;t catch some error somewhere else&quot;</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 203580376,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442338
+    },
+    {
+        "content": "<p>hmm</p>",
+        "id": 203580379,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442354
+    },
+    {
+        "content": "<p>it may not even know what would be supposed to emit the error or what error</p>",
+        "id": 203580380,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442356
+    },
+    {
+        "content": "<p>just that it saw something that should never happen <em>unless</em> there is an error <em>somewhere</em></p>",
+        "id": 203580381,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442369
+    },
+    {
+        "content": "<p>and it's not like depending on <code>tcx.analysis()</code> or a subset of it would even make sense: it would trivially lead to cycle errors</p>",
+        "id": 203580384,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442389
+    },
+    {
+        "content": "<p>and analysis always runs so it doesn't even make sense</p>",
+        "id": 203580423,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442404
+    },
+    {
+        "content": "<blockquote>\n<p>analysis always runs</p>\n</blockquote>\n<p>ah this is the bit I was missing</p>",
+        "id": 203580428,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442418
+    },
+    {
+        "content": "<p>I mean, you literally had to take it out of <code>rustdoc</code>?</p>",
+        "id": 203580433,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442432
+    },
+    {
+        "content": "<p>normally it's always there</p>",
+        "id": 203580436,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442440
+    },
+    {
+        "content": "<p>right, I didn't realize it was an invariant that it runs</p>",
+        "id": 203580438,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442453
+    },
+    {
+        "content": "<p>anyway, the \"delay\" in <code>delay_span_bug</code> refers to the fact that it handles the error being emitted in the future of the detection</p>",
+        "id": 203580439,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442454
+    },
+    {
+        "content": "<p>I don't follow, sorry</p>",
+        "id": 203580454,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442498
+    },
+    {
+        "content": "<p>it \"poisons\" the current compilation session in a sense</p>",
+        "id": 203580455,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442499
+    },
+    {
+        "content": "<p>my understanding was that it's like a drop bomb, if you continue without saying \"no I checked this is valid\" then it panics</p>",
+        "id": 203580495,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442528
+    },
+    {
+        "content": "<p>ah no it's not in the same sense</p>",
+        "id": 203580496,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442545
+    },
+    {
+        "content": "<p>the only requirement for <code>delay_span_bug</code> to not cause an ICE is <em>any</em> error to be emitted <em>by anything</em></p>",
+        "id": 203580499,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442558
+    },
+    {
+        "content": "<p>at <em>any point</em> in time</p>",
+        "id": 203580500,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442563
+    },
+    {
+        "content": "<p>during the same compilation session</p>",
+        "id": 203580501,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442567
+    },
+    {
+        "content": "<p>ahhh</p>",
+        "id": 203580503,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442573
+    },
+    {
+        "content": "<p>this is why it was so important that my error test cases be in separate files</p>",
+        "id": 203580508,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442582
+    },
+    {
+        "content": "<p>okay yeah sorry for not explaining this properly before</p>",
+        "id": 203580513,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442591
+    },
+    {
+        "content": "<p>the name could maybe use some workshopping lol</p>",
+        "id": 203580517,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442600
+    },
+    {
+        "content": "<p>I thought it was per-error, not per-session</p>",
+        "id": 203580518,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442607
+    },
+    {
+        "content": "<p>since I doubt it has changed since it was added and it was probably added as a hack</p>",
+        "id": 203580521,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442613
+    },
+    {
+        "content": "<p>ah no, there doesn't have to be any correlation for it to be silenced, just any error at all</p>",
+        "id": 203580524,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442629
+    },
+    {
+        "content": "<p>this allows us to use it aggressively as a safeguard against broken invariants</p>",
+        "id": 203580561,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442650
+    },
+    {
+        "content": "<p>and it's free if any error has already been emitted, since it's eagerly ignored, and not buffered at all (which is arguably not useful to optimize for)</p>",
+        "id": 203580566,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442682
+    },
+    {
+        "content": "<p>I see, so any time you call delay_span_bug() you're saying \"there's a broken invariant here\" and compilation can't continue much further</p>",
+        "id": 203580574,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442706
+    },
+    {
+        "content": "<p>so for example <span class=\"user-mention\" data-user-id=\"198054\">@mark-i-m</span> put a lot of effort into switching our <code>Ty::Error</code> case to trigger a <code>delay_span_bug</code>, making it a strong indicator of \"this compilation will fail\"</p>",
+        "id": 203580583,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442733
+    },
+    {
+        "content": "<p>ok this makes sense why the query expected the type to be valid</p>",
+        "id": 203580587,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442750
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232545\">@Joshua Nelson</span> it can continue pretty far, just not exit successfully :P</p>",
+        "id": 203580589,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442752
+    },
+    {
+        "content": "<p>and presumably not emit link artifacts</p>",
+        "id": 203580631,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442782
+    },
+    {
+        "content": "<p>(since they might contain UB etc.)</p>",
+        "id": 203580634,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594442802
+    },
+    {
+        "content": "<p>I'm a little concerned by how fragile this makes rustdoc</p>",
+        "id": 203580696,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442952
+    },
+    {
+        "content": "<p>unrelated changes in other parts of the compiler could now cause tests to fail</p>",
+        "id": 203580698,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442963
+    },
+    {
+        "content": "<p>e.g. if a new lint adds typechecking</p>",
+        "id": 203580701,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1594442972
+    },
+    {
+        "content": "<p>eeeeeh</p>",
+        "id": 203581857,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594445399
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232545\">@Joshua Nelson</span> btw I was able to get the non-cached version to optimize :P</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">ret</span> <span class=\"nv\">%&quot;rustc_middle::ty::TyS&quot;</span><span class=\"p\">*</span> <span class=\"p\">(</span><span class=\"k\">i64</span><span class=\"p\">*,</span> <span class=\"k\">i32</span><span class=\"p\">,</span> <span class=\"k\">i32</span><span class=\"p\">)*</span> <span class=\"vg\">@_ZN12rustc_typeck7collect7type_of7type_of17h576de94756ddadc8E</span>\n</code></pre></div>",
+        "id": 203623079,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594519397
+    },
+    {
+        "content": "<p>it's still calling <code>Providers::default()</code> because I forgot to make that <code>#[inline(always)]</code> as well =))</p>",
+        "id": 203623083,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594519427
+    },
+    {
+        "content": "<p>oh oops I made a topic for that</p>",
+        "id": 203623425,
+        "sender_full_name": "eddyb",
+        "timestamp": 1594520051
+    }
+]

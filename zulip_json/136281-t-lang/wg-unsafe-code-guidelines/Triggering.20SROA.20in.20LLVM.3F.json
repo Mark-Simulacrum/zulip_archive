@@ -1,0 +1,398 @@
+[
+    {
+        "content": "<p>Does someone know a good way to trigger SROA in LLVM? I am trying to demonstrate concretely that in LLVM, padding can turn into <code>undef</code> any time, but I don't know how to write that example.^^</p>",
+        "id": 168067834,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560447915
+    },
+    {
+        "content": "<p>ah I think I <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=404f1fd4e8d779d916d659923851ca02\" target=\"_blank\" title=\"https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=404f1fd4e8d779d916d659923851ca02\">got it</a></p>",
+        "id": 168068006,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560448032
+    },
+    {
+        "content": "<p>I don’t think expansion in arguments is SROA at all.</p>",
+        "id": 168069764,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560449050
+    },
+    {
+        "content": "<p>well what I wanted to see is LLVM copying fields separately instead of doing a big <code>memcpy</code></p>",
+        "id": 168069978,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560449194
+    },
+    {
+        "content": "<p>I thought that's SROA?</p>",
+        "id": 168069983,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560449198
+    },
+    {
+        "content": "<p>Look at the debug LLVM IR, rustc already emits it as per-field copies.</p>",
+        "id": 168070043,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1560449244
+    },
+    {
+        "content": "<p>it was trivial to show that padding was undef before miri, but now that we have our constants be byte arrays, that is harder</p>",
+        "id": 168070359,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560449463
+    },
+    {
+        "content": "<p>before a plain <code>static A = (0u32, 0u64);</code> ended up generating something like <code>{u32, u32, u64} = {0, undef, 0}</code></p>",
+        "id": 168070411,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560449494
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> how are you expecting to show that padding is undef with SROA?</p>",
+        "id": 168070590,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560449606
+    },
+    {
+        "content": "<blockquote>\n<p>Look at the debug LLVM IR, rustc already emits it as per-field copies.</p>\n</blockquote>\n<p>d'oh.^^<br>\nWell, ultimately the argument was about padding in Rust, not LLVM, so good enough^^</p>",
+        "id": 168070673,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560449645
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> The trickier (and more relevant to <a href=\"https://github.com/crossbeam-rs/crossbeam/issues/315\" target=\"_blank\" title=\"https://github.com/crossbeam-rs/crossbeam/issues/315\">https://github.com/crossbeam-rs/crossbeam/issues/315</a>) aspect is: after you fully initialized all the <code>size_of::&lt;T&gt;()</code> bytes of a location, and then resume treating it as a <code>T</code> with padding, when (if ever) do the padding bytes get reset to undef?</p>",
+        "id": 168070752,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1560449707
+    },
+    {
+        "content": "<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> how are you expecting to show that padding is undef with SROA?</p>\n</blockquote>\n<p>well like in the example above:</p>\n<div class=\"codehilite\"><pre><span></span>  %y = alloca { i32, i64 }, align 8\n  %0 = bitcast { i32, i64 }* %y to i8*\n  %1 = getelementptr inbounds { i32, i64 }, { i32, i64 }* %y, i64 0, i32 0\n  store i32 %x.0, i32* %1, align 8\n  %2 = getelementptr inbounds { i32, i64 }, { i32, i64 }* %y, i64 0, i32 1\n  store i64 %x.1, i64* %2, align 8\n  call void %f({ i32, i64 }* noalias nonnull readonly align 8 dereferenceable(16) %y)\n</pre></div>\n\n\n<p>clearly when <code>f</code> gets  called the padding in <code>%y</code> is still <code>undef</code> because it has never been written to</p>",
+        "id": 168070756,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560449712
+    },
+    {
+        "content": "<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"123586\">nagisa</span> The trickier (and more relevant to <a href=\"https://github.com/crossbeam-rs/crossbeam/issues/315\" target=\"_blank\" title=\"https://github.com/crossbeam-rs/crossbeam/issues/315\">https://github.com/crossbeam-rs/crossbeam/issues/315</a>) aspect is: after you fully initialized all the <code>size_of::&lt;T&gt;()</code> bytes of a location, and then resume treating it as a <code>T</code> with padding, when (if ever) do the padding bytes get reset to undef?</p>\n</blockquote>\n<p>actually, having any undef in padding is enough for that -- with <code>get_mut</code> we dont get a guarantee that whatever gets written was ever fully initialized</p>",
+        "id": 168070913,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560449807
+    },
+    {
+        "content": "<p>I just realized that making it <code>Copy</code> if <code>T: Copy</code> would also break this because copying the <code>Atomic&lt;T&gt;</code> will reset to undef^^</p>",
+        "id": 168070960,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560449845
+    },
+    {
+        "content": "<p>If that's enough then even initalizers like <code>let pair = (0u16, 0u32);</code> should demonstrate undef.</p>",
+        "id": 168071057,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1560449883
+    },
+    {
+        "content": "<p>A trivial way to show that is <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=69d8bed54286c5eba34132b2ce36bab4\" target=\"_blank\" title=\"https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=69d8bed54286c5eba34132b2ce36bab4\">https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=69d8bed54286c5eba34132b2ce36bab4</a> probably</p>",
+        "id": 168071097,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560449908
+    },
+    {
+        "content": "<p>rather than trying to use SROA</p>",
+        "id": 168071113,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560449915
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> not sure what that gets us? sure unsafe code can do weird stuff^^</p>",
+        "id": 168071162,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560449951
+    },
+    {
+        "content": "<p>or do you mean because this can optimize to return <code>undef</code>? hm</p>",
+        "id": 168071200,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560449983
+    },
+    {
+        "content": "<p>You see <code>undef</code> in optimised LLVM IR which is a nice way to show that \"hey, padding bytes are indeed undef\"</p>",
+        "id": 168071202,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560449985
+    },
+    {
+        "content": "<p>and not, say, zeros.</p>",
+        "id": 168071272,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560450005
+    },
+    {
+        "content": "<p>yeah true</p>",
+        "id": 168071276,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560450006
+    },
+    {
+        "content": "<p>now extra points if we can do this with any incoming <code>X</code>, not just a locally initialized one.</p>",
+        "id": 168071291,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560450021
+    },
+    {
+        "content": "<p>I doubt LLVM has enough information about padding for that.</p>",
+        "id": 168071321,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1560450035
+    },
+    {
+        "content": "<p>Well that was easy: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=ae1e2eae63468d5a9eb80f3f140fb3b9\" target=\"_blank\" title=\"https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=ae1e2eae63468d5a9eb80f3f140fb3b9\">https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=ae1e2eae63468d5a9eb80f3f140fb3b9</a></p>",
+        "id": 168071334,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560450045
+    },
+    {
+        "content": "<p>Oh, chaining it with the move-resets-padding</p>",
+        "id": 168071362,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1560450065
+    },
+    {
+        "content": "<p>you can just remove the local <code>let x</code></p>",
+        "id": 168071382,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560450085
+    },
+    {
+        "content": "<p>but if you pass in <code>x</code> as a reference argument, it is no longer undef.</p>",
+        "id": 168071401,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560450099
+    },
+    {
+        "content": "<p>(see <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=91ade64c05ea5ca31f7ba3e970fefa92\" target=\"_blank\" title=\"https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=91ade64c05ea5ca31f7ba3e970fefa92\">https://play.rust-lang.org/?version=stable&amp;mode=release&amp;edition=2018&amp;gist=91ade64c05ea5ca31f7ba3e970fefa92</a>)</p>",
+        "id": 168071425,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560450116
+    },
+    {
+        "content": "<p>Yes, the key is that passing the argument by value already resets any padding (because those bytes aren't even passed)</p>",
+        "id": 168071524,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1560450162
+    },
+    {
+        "content": "<p>well or they are passed but gets reset</p>",
+        "id": 168071704,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560450259
+    },
+    {
+        "content": "<p>the detail is in the wording, doesnt really matter though</p>",
+        "id": 168071717,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560450266
+    },
+    {
+        "content": "<blockquote>\n<p>Yes, the key is that passing the argument by value already resets any padding (because those bytes aren't even passed)</p>\n</blockquote>\n<p>That matches what I would expect. We only memcpy fields on move/copy, so the answer to:</p>\n<blockquote>\n<p>after you fully initialized all the size_of::&lt;T&gt;() bytes of a location, and then resume treating it as a T with padding, when (if ever) do the padding bytes get reset to undef?</p>\n</blockquote>\n<p>is probably something like \"On every copy/undef padding fields (might) be reset to <code>undef</code>.\" Since one cannot really reason about when copy/moves happen (this changes with the optimization level, and the compiler is allowed to do any of these \"whenever\"), then it feels simpler for me to just tell people that even if you fully initialize all bytes of an allocation, the moment you start treating it as a <code>T</code>, the padding bytes are always <code>undef</code>.  I don't know how would one implement <code>AtomicCell</code> under this constraints (can it use an <code>[u8; 16]</code> internally?).</p>",
+        "id": 168382229,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560848998
+    },
+    {
+        "content": "<p>It cannot use <code>[u8; 16]</code> internally if you expect to be able to compare_xchg the whole struct – it would still compare padding bytes. Basically the only thing you can compare_xchg are contiguous data (data for which all bytes have non-padding purpose).</p>",
+        "id": 168390674,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560856966
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> what I had in mind is that it would take <code>T</code>, <code>transmute</code> it to <code>[u8; 16]</code> which we should specify as a <code>nop</code>, <code>freeze</code> the <code>[u8; 16]</code> which should also be a <code>nop</code>, and then do a <code>compare_xchg</code> on the result of the freeze</p>",
+        "id": 168404603,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560867139
+    },
+    {
+        "content": "<p>I assume you mean \"NOP on the hardware\", because it's clearly not a NOP in Rust or else why would you even do it</p>",
+        "id": 168404650,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560867178
+    },
+    {
+        "content": "<p>The [u8; 16] stored in the atomiccell and your transmuted [u8; 16] will still have junk in their padding unless you explicitly keep it some particular value.</p>",
+        "id": 168404683,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560867204
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> the <code>freeze</code> should give the <code>undef</code> some particular indeterminate value</p>",
+        "id": 168404709,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560867231
+    },
+    {
+        "content": "<p>It gives undef an arbitrary value for that particular undef. Since compare_exchange works on two distinct values, freeze does not help you there whatsoever – you’ll just be comparing two indeterminate values with a nonsensical outcome.</p>",
+        "id": 168404829,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560867304
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> there was a proposed algorithm that worked around that</p>",
+        "id": 168404857,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560867322
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span>  see: <a href=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/71#issuecomment-460097424\" target=\"_blank\" title=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/71#issuecomment-460097424\">https://github.com/rust-lang/unsafe-code-guidelines/issues/71#issuecomment-460097424</a></p>",
+        "id": 168404988,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560867386
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> <code>AtomicCell</code> already runs this in a loop to handle that problem</p>",
+        "id": 168405089,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560867472
+    },
+    {
+        "content": "<p>but the main issue we still have is that there might be <code>undef</code> bytes in the <em>memory</em></p>",
+        "id": 168405142,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560867488
+    },
+    {
+        "content": "<p>so we'd need a way to \"freeze\" them that does not introduce a read-write race...</p>",
+        "id": 168405152,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560867499
+    },
+    {
+        "content": "<p>yeah, you cannot freeze memory and I was already writing that the linked algorithm is, therefore, nonsense.</p>",
+        "id": 168405174,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560867518
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> yes <code>nop</code> was a poor choice</p>",
+        "id": 168405210,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560867540
+    },
+    {
+        "content": "<p>well maybe you can freeze memory^^ also the loop is needed for other stuff (like <code>PartialEq::eq</code> and byte-wise equality not agreeing)</p>",
+        "id": 168405281,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560867591
+    },
+    {
+        "content": "<blockquote>\n<p>like PartialEq::eq and byte-wise equality not agreeing</p>\n</blockquote>\n<p>If we’re going <em>there</em> then byte-wise equality does not imply semantic equality either.</p>",
+        "id": 168405403,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560867654
+    },
+    {
+        "content": "<p>well that's what I said</p>",
+        "id": 168405425,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560867668
+    },
+    {
+        "content": "<p>anyway, my strong opinion that, with what LLVM semantics are around compare_exchange and padding bytes, this is not currently salvageable for any \"loop\"</p>",
+        "id": 168405740,
+        "sender_full_name": "nagisa",
+        "timestamp": 1560867859
+    },
+    {
+        "content": "<p>maybe we need a different intrinsic</p>",
+        "id": 168406157,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560868150
+    },
+    {
+        "content": "<p>we might need that anyways, e.g., if creating an invalid <code>usize</code> is instant UB</p>",
+        "id": 168406421,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560868305
+    },
+    {
+        "content": "<p>even with direct access to the abstract machine I don't know how to define a compare_exchange on data involving undef that makes sense and is actually implementable...</p>",
+        "id": 168406513,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560868346
+    },
+    {
+        "content": "<p>not without huge drawbacks</p>",
+        "id": 168406579,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560868406
+    },
+    {
+        "content": "<p>I mean we could say \"compare frozen versions of the data\" (both src and what is in memory). but then (a) there's still no guarantee to converge and (b) this rules out replacing CAS by simple comparison if the compiler can prove that the code is sequential.</p>",
+        "id": 168406581,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560868406
+    },
+    {
+        "content": "<p>a wild and bad idea would be to say that moves/copys do not touch padding</p>",
+        "id": 168406617,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560868431
+    },
+    {
+        "content": "<p>so if you have a <code>[u8; 16]</code> and you zero it, and then you move a <code>T</code> on top of it, you know the padding is zero</p>",
+        "id": 168406680,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560868457
+    },
+    {
+        "content": "<p>but this would mean that moving a struct isn't as simple as a <code>memcpy</code> over the whole struct</p>",
+        "id": 168406709,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560868484
+    },
+    {
+        "content": "<p>which would be generally bad for perf</p>",
+        "id": 168406714,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560868490
+    },
+    {
+        "content": "<p>Instead, a less bad idea might be to add a finer grained intrinsic that only moves/copies non-padding bytes</p>",
+        "id": 168406739,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560868512
+    },
+    {
+        "content": "<p>So that you can do:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">value</span>: <span class=\"nc\">T</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">storage</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">0_</span><span class=\"k\">usize</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">ptr</span>::<span class=\"n\">write_fields</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">storage</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">value</span><span class=\"p\">);</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>You would still be working with <code>storage: usize</code>, but padding bytes wouldn't be <code>undef</code>.</p>",
+        "id": 168407320,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560868888
+    },
+    {
+        "content": "<p>how would that help <code>AtomicCell</code> though?  It can still be moved like normal variables can...</p>",
+        "id": 168412240,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1560871748
+    },
+    {
+        "content": "<p>It would help the implementation of the <code>AtomicCell::compare_exchange</code> algorithm.</p>",
+        "id": 168412722,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560872049
+    },
+    {
+        "content": "<p>Right now the problem is that some of the bytes in the <code>usize</code> that's used internally for the CAS are <code>undef</code>, so a <code>compare_and_exchange</code> of an <code>usize</code> with <code>undef</code> bytes does \"whatever\"</p>",
+        "id": 168412824,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560872142
+    },
+    {
+        "content": "<p><code>AtomicCell&lt;T&gt;</code> could use <code>ptr::write_fields</code> to ensure that the padding bytes of the <code>T</code> stored inside it is always zero (or some other value), and use <code>ptr::write_fields</code> in <code>AtomicCell::compare_and_exchange</code> argument to set its padding bytes to the same value</p>",
+        "id": 168412987,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560872223
+    },
+    {
+        "content": "<p>That is, the CAS would only fail if the non-padding bytes of <code>T</code> differ, which is better than \"if any bytes differs\"</p>",
+        "id": 168413074,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1560872282
+    }
+]

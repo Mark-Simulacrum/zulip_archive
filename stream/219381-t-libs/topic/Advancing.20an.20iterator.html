@@ -1,0 +1,228 @@
+<html>
+<head><meta charset="utf-8"><title>Advancing an iterator · t-libs · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/index.html">t-libs</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html">Advancing an iterator</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="210477599"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210477599" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210477599">(Sep 18 2020 at 04:17)</a>:</h4>
+<p>I've been wanting to add a better version of <code>Iterator::nth</code> for a while: <a href="https://github.com/rust-lang/rust/issues/60395">https://github.com/rust-lang/rust/issues/60395</a></p>
+<p>In summary:<br>
+Code like <code>(0..1_000_000).chain(0..1_000_000).step_by(12345)</code> is currently much slower than you might expect because we can't efficiently implement <code>nth</code> for <code>iter::Chain</code> in terms of <code>nth</code> on the inner iterators, because if the first <code>nth</code> call returns <code>None</code> we don't know which item in the second iterator we need (the first <code>nth</code> call threw away this information). This is not just a problem for <code>Chain</code> but also applies to other chain-like iterators such as <code>FlatMap</code>/<code>Flatten</code>, <code>Cycle</code>, and (when reversed) <code>Peekable</code>.</p>
+<p>In that GH issue I proposed a <code>try_nth</code> method that returns <code>Result&lt;Self::Item, usize&gt;</code> which certainly solves this issue, but it inherits another flaw of <code>nth</code> which is that it can be somewhat awkward and error-prone to implement — <code>nth</code> takes an index which means <code>nth(n)</code> advances the iterator by <code>n + 1</code> items, which makes many computations more cumbersome than necessary. And the extra return value of <code>try_nth</code> only makes this worse.</p>
+<p>I propose that instead we add a method <code>fn advance_by(&amp;mut self, n: usize) -&gt; usize</code> that advances the iterator by <code>n</code> items and returns the number of items left to skip if the iterator was exhausted along the way (essentially <code>n - iter.len()</code>). So a non-zero return value means the iterator was exhausted. Eventually this would be the method to implement for efficiently skipping <code>n</code> elements rather than <code>nth</code> because <code>nth</code> can trivially forward to this using</p>
+<div class="codehilite"><pre><span></span><code><span class="k">fn</span> <span class="nf">nth</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">n</span>: <span class="kt">usize</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Option</span><span class="o">&lt;</span><span class="bp">Self</span>::<span class="n">Item</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">advance_by</span><span class="p">(</span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">next</span><span class="p">()</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nb">None</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+<p>and vice versa is not possible.</p>
+<p>I have implemented <code>advance_by</code> and (<code>advance_back_by</code>) for a couple iterators and I've found it to generally be simpler to implement than <code>nth</code> (unsurprisingly, as <code>nth</code> is basically <code>advance_by</code> + <code>next</code>).</p>
+<p>I'm curious if anyone has considered such a method before and if there are any downsides I'm overlooking. I'm also unsure whether this needs an RFC or not.</p>
+
+
+
+<a name="210479370"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210479370" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210479370">(Sep 18 2020 at 05:06)</a>:</h4>
+<p>What would you provide as the default implementation of <code>advance_by</code>?</p>
+
+
+
+<a name="210479446"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210479446" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210479446">(Sep 18 2020 at 05:08)</a>:</h4>
+<p>I think that if the default implementation is good enough for all potential uses of <code>advance_by</code> then I don't see any objections to adding it as an unstable method on <code>Iterator</code>.</p>
+
+
+
+<a name="210479943"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210479943" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210479943">(Sep 18 2020 at 05:23)</a>:</h4>
+<p>I'm not entirely sure what you mean by that? <code>advance_by</code>'s default implementation can't do any better than a loop, similar to <code>nth</code>— I've been using</p>
+<div class="codehilite"><pre><span></span><code><span class="k">fn</span> <span class="nf">advance_by</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">n</span>: <span class="kt">usize</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">usize</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="bp">self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">n</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">n</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+<p>But there are several variations one could come up with.</p>
+
+
+
+<a name="210480087"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210480087" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210480087">(Sep 18 2020 at 05:26)</a>:</h4>
+<p>I think the bar for adding it as an unstable method should be a bit higher than for any other method since we'd also be adding a bunch of overrides (all the types that already override <code>nth</code> plus a few more) <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="210480332"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210480332" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210480332">(Sep 18 2020 at 05:33)</a>:</h4>
+<p>Also what are the interactions with fusing? The default implementation looks like it will "skip" the <code>None</code> fuse if you try to reuse the iterator afterwards.</p>
+
+
+
+<a name="210480378"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210480378" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210480378">(Sep 18 2020 at 05:34)</a>:</h4>
+<p>Hmm actually <code>nth</code> has the same issue and it's documented, so shouldn't be a problem.</p>
+
+
+
+<a name="210480463"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210480463" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210480463">(Sep 18 2020 at 05:36)</a>:</h4>
+<p>Where do you plan on actually using <code>advance_by</code>? If you are changing calls to <code>nth</code> to use <code>advance_by</code> instead then it could cause regression for user-defined iterator types which only implement <code>nth</code>.</p>
+
+
+
+<a name="210481129"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210481129" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210481129">(Sep 18 2020 at 05:53)</a>:</h4>
+<p>Yeah, very valid point, iterators that currently override <code>nth</code> in terms of a wrapped iterator definitely need to keep that implementation for the foreseeable future. But they can also override <code>advance_by</code> alongside <code>nth</code> to take advantage of when the inner iterator overrides <code>advance_by</code>. Other iterators that don't wrap any iterator, like <code>Range</code>, <code>slice::Iter</code>, <code>Chunks</code>, etc. would not need <code>nth</code> anymore after implementing <code>advance_by</code>, though we probably want to keep their <code>nth</code> overrides at least until <code>advance_by</code> stabilizes.</p>
+<p>In the case of <code>Chain</code> we can have <code>Chain::nth</code> call <code>advance_by</code> on the first iterator and <code>nth</code> on the second, which will be faster if the left iterator overrides <code>advance_by</code> and just as slow if it doesn't. And <code>Chain::advance_by</code> needs to call <code>advance_by</code> on both.</p>
+
+
+
+<a name="210481311"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210481311" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210481311">(Sep 18 2020 at 05:57)</a>:</h4>
+<p>Also a good point regarding exhaustiveness, a nonzero return value should be treated as getting <code>None</code> from <code>next</code>/<code>nth</code> or <code>Ok(...)</code> from <code>try_for_each</code>/<code>try_fold</code>, i.e. the iterator is exhausted and should not be used anymore (unless fused).</p>
+
+
+
+<a name="210496126"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210496126" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210496126">(Sep 18 2020 at 09:24)</a>:</h4>
+<p>Regarding the return value I think it would make more sense to return the opposite: the actual number of items that were skipped. This matches the <code>read</code> function in I/O which returns the number of bytes read which may be less than the number of bytes requested.</p>
+
+
+
+<a name="210513804"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210513804" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210513804">(Sep 18 2020 at 12:56)</a>:</h4>
+<p>That is definitely an option, and certainly makes it easier to document <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span> Though I fear that that change would make it a lot harder to work with. A nice property of the current behavior is that you can pass the return value of an <code>advance_by</code> call to another <code>advance_by</code> call and it will do the right thing. e.g. my <code>Cycle::advance_by</code> implementation contains this loop:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">while</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">iter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">orig</span><span class="p">.</span><span class="n">clone</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">n</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">iter</span><span class="p">.</span><span class="n">advance_by</span><span class="p">(</span><span class="n">n</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+<p>Having <code>advance_by</code> return the number of processed items makes this less straight-forward, I think.</p>
+
+
+
+<a name="210514076"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210514076" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210514076">(Sep 18 2020 at 12:58)</a>:</h4>
+<p>Or maybe it's just a matter of replacing the <code>n =</code> by <code>n -=</code>?</p>
+
+
+
+<a name="210514400"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210514400" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> HeroicKatora <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210514400">(Sep 18 2020 at 13:01)</a>:</h4>
+<p>Isn't this basically <code>iter.by_ref().take(n).count()</code>?</p>
+
+
+
+<a name="210514740"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210514740" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210514740">(Sep 18 2020 at 13:04)</a>:</h4>
+<p><span class="user-mention" data-user-id="229913">@HeroicKatora</span> That would indeed return the same value, but the purpose of <code>advance_by</code> would be that individual iterators can override it for efficiently advancing by more than 1 item at once (where they currently override <code>nth</code>).</p>
+
+
+
+<a name="210515264"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210515264" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210515264">(Sep 18 2020 at 13:09)</a>:</h4>
+<p><span class="user-mention" data-user-id="143274">@Amanieu</span> Yeah this might not be so bad after all, I'll give it a try. Is the main reason you suggested it that it makes it easier to explain what the return value represents, or did you have other advantages in mind?</p>
+
+
+
+<a name="210515807"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210515807" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> HeroicKatora <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210515807">(Sep 18 2020 at 13:13)</a>:</h4>
+<p>I was thinking about a readable default impl for this method, as comprehending the variation above is quite sublte.</p>
+
+
+
+<a name="210529662"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210529662" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210529662">(Sep 18 2020 at 14:51)</a>:</h4>
+<p><span class="user-mention" data-user-id="220645">@Tim Vermeulen</span> Yes it's just easier to explain. There's no other advantage.</p>
+
+
+
+<a name="210587661"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210587661" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210587661">(Sep 19 2020 at 00:13)</a>:</h4>
+<p>Maybe it could be <code>-&gt; Result&lt;(), usize&gt;</code> instead?  So if it advances as far as you asked for, you don't have a number to worry about.  But if it needs to stop early, it tells you how many it actually advanced by.</p>
+<p>That would also let <code>.advance_by().unwrap()</code> an option for eager-skip-or-fail...</p>
+
+
+
+<a name="210592578"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210592578" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210592578">(Sep 19 2020 at 02:17)</a>:</h4>
+<p><code>-&gt; Result&lt;(), usize&gt;</code> is what I started out with when the <code>usize</code> still represented the number of items left to skip, which meant it was always nonzero, so I eventually dismissed it. With the <code>usize</code> meaning the number of items skipped, this seems a lot more feasible!</p>
+
+
+
+<a name="210597123"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210597123" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210597123">(Sep 19 2020 at 04:35)</a>:</h4>
+<p>This definitely added some <code>if k == n { Ok(()) } else { Err(k) }</code> boilerplate, but still easily worth not having a magic return value.</p>
+
+
+
+<a name="210607887"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210607887" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210607887">(Sep 19 2020 at 10:13)</a>:</h4>
+<p>That "always nonzero" point is interesting -- <code>Result&lt;(), NonZeroUsize&gt;</code> is in some ways a usize that you can unwrap.  That type's might be getting a bit overkill, though :P</p>
+
+
+
+<a name="210609624"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210609624" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210609624">(Sep 19 2020 at 11:02)</a>:</h4>
+<p>Yeah, that did seem like overkill, it could have been worth considering if it'd work out really nicely with <code>?</code>, but it doesn't seem like it would <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span> And I'm very happy with the return value being the amount of elements iterated, way easier to understand and surprisingly not more complicated to work with.</p>
+
+
+
+<a name="210634148"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210634148" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210634148">(Sep 19 2020 at 20:37)</a>:</h4>
+<p>I'm liking this more and more as I think more about it <span aria-label="+1" class="emoji emoji-1f44d" role="img" title="+1">:+1:</span></p>
+<p>In addition to the things I put in the PR:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">fn</span> <span class="nf">count</span><span class="p">(</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">usize</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="cp">#[cold]</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">i_doubt_it</span><span class="p">(</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">usize</span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">so_far</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span>::<span class="n">MAX</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="k">loop</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">match</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">advance_by</span><span class="p">(</span><span class="kt">usize</span>::<span class="n">MAX</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="nb">Ok</span><span class="p">(())</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">so_far</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Add</span>::<span class="n">add</span><span class="p">(</span><span class="n">so_far</span><span class="p">,</span><span class="w"> </span><span class="kt">usize</span>::<span class="n">MAX</span><span class="p">),</span><span class="w"></span>
+<span class="w">                </span><span class="nb">Err</span><span class="p">(</span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">Add</span>::<span class="n">add</span><span class="p">(</span><span class="n">so_far</span><span class="p">,</span><span class="w"> </span><span class="n">n</span><span class="p">),</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Err</span><span class="p">(</span><span class="n">n</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">advance_by</span><span class="p">(</span><span class="kt">usize</span>::<span class="n">MAX</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">n</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">i_doubt_it</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="210653876"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210653876" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tim Vermeulen <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210653876">(Sep 20 2020 at 07:23)</a>:</h4>
+<p>Oh yeah, I hadn't realized <code>count</code> could use it, that's pretty great. But using it in <code>Skip</code> would be a regression whenever the underlying type implements <code>nth</code> but not yet <code>advance_by</code>, no? I don't really know what a reasonable time frame would be after stabilization for when people can be expected to have updated their iterator types, if any.</p>
+
+
+
+<a name="210685998"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Advancing%20an%20iterator/near/210685998" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Advancing.20an.20iterator.html#210685998">(Sep 20 2020 at 21:21)</a>:</h4>
+<p>This is more and more making me want the language support for "this default implementation from the trait only applies if they've implemented that other method themself" -- at least then we could do a specialization trick like "if you're ExactSize, then we'll do <code>advance_by</code> by <code>nth</code>+<code>len</code>, which would probably get a ton of those cases.</p>
+<p>(And would enable a bunch more otherwise-circular things too, like <code>self.try_for_each(ControlFlow::Break).break_value()</code> for <code>next</code>.)</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

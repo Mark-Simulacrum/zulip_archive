@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>Hi, I've started work on disambiguation of identifiers as generic arguments between regular type generics and const generics. <span class=\"user-mention\" data-user-id=\"121053\">@varkor</span>  you wrote a comment <a href=\"https://github.com/rust-lang/rust/issues/60804#issuecomment-492011332\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/60804#issuecomment-492011332\">here</a> where you outlined a rough approach to this. I've now completed most of the work in libsyntax, but in HIR lowering I don't know what addition information I might have there that allows disambiguating at that stage. Could you give me some pointers?</p>",
+        "id": 177663600,
+        "sender_full_name": "jplatte",
+        "timestamp": 1570572131
+    },
+    {
+        "content": "<p>What I've done so far is at up at <a href=\"https://github.com/jplatte/rust/tree/generic-arg-disambiguation\" target=\"_blank\" title=\"https://github.com/jplatte/rust/tree/generic-arg-disambiguation\">https://github.com/jplatte/rust/tree/generic-arg-disambiguation</a>, in case anyone wants to look at it.</p>",
+        "id": 177663671,
+        "sender_full_name": "jplatte",
+        "timestamp": 1570572235
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"198047\">@jplatte</span> <br>\nAST changes are unnecessary, see the later comment - <a href=\"https://github.com/rust-lang/rust/issues/60804#issuecomment-516769465\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/60804#issuecomment-516769465\">https://github.com/rust-lang/rust/issues/60804#issuecomment-516769465</a></p>",
+        "id": 177689023,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1570606263
+    },
+    {
+        "content": "<p>Everything can be done in resolve (visit_generic_arg) and AST -&gt; HIR lowering (lower_generic_arg).</p>",
+        "id": 177689113,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1570606390
+    },
+    {
+        "content": "<p>Does it make sense to do it that way though? The type variant can represent a bunch of stuff beyond just identifiers that aren't allowed for const generics. Filtering those out from the value resolution fallback seems more error-prone than distinguishing those cases when parsing.</p>",
+        "id": 177829718,
+        "sender_full_name": "jplatte",
+        "timestamp": 1570726429
+    },
+    {
+        "content": "<p>AST preserves all the data necessary to discern between an <code>ident</code> and an arbitrary path, it's <code>segments.len() == 1 &amp;&amp; segments[0].arg.is_none()</code>, not too error prone.<br>\nThe alternative is to make two variants that are supposed to behave identically almost everywhere - keeping them synchronized does seem more error prone (and taking more code).</p>",
+        "id": 177834514,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1570729547
+    },
+    {
+        "content": "<p><code>Pat::Ident</code> is separate from <code>Path::Path</code> because it also covers things like <code>ident @ PAT</code> or <code>mut ident</code>, otherwise it would also make sense to merge them.</p>",
+        "id": 177834608,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1570729607
+    },
+    {
+        "content": "<blockquote>\n<p>it's segments.len() == 1 &amp;&amp; segments[0].arg.is_none(), not too error prone.</p>\n</blockquote>\n<p><span class=\"user-mention\" data-user-id=\"123856\">@Vadim Petrochenkov</span> maybe abstract this tho? probably used in other places</p>",
+        "id": 177834867,
+        "sender_full_name": "centril",
+        "timestamp": 1570729793
+    },
+    {
+        "content": "<p>If it's used multiple times, then sure, why not.</p>",
+        "id": 177835401,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1570730079
+    },
+    {
+        "content": "<p>But <code>segments.len() == 1 &amp;&amp; segments[0].arg.is_none()</code> would be pretty restrictive, no? Why should e.g. (associated) paths to constants not be disambiguated too?</p>",
+        "id": 177845320,
+        "sender_full_name": "jplatte",
+        "timestamp": 1570735792
+    },
+    {
+        "content": "<p>We need to disambiguate in favor of types (for backward compatibility), and for multi-segment paths type-based resolutions are unavailable if we are disambiguating before/during lowering to HIR.<br>\nSo it may happen that the path resolves to a value but not a type during early resolution, but resolves to a type during type-based resolution.</p>",
+        "id": 177847619,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1570737389
+    },
+    {
+        "content": "<p>If the disambiguation is delayed until the last moment (generic argument substitution), then we can disambiguate multi-segment paths.</p>",
+        "id": 177847818,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1570737516
+    },
+    {
+        "content": "<p>Hm, the <code>arg.is_none()</code> condition should be unnecessary though.</p>",
+        "id": 177848002,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1570737615
+    },
+    {
+        "content": "<p>Okay, so that means disambiguation has to (partially?) happen later, right? But I don't need to introduce new <code>GenericArg</code> variants for that? Just some changes to resolve and lowering in libsyntax and some other things later? I can try making that work :)</p>",
+        "id": 177862491,
+        "sender_full_name": "jplatte",
+        "timestamp": 1570748944
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123856\">@Vadim Petrochenkov</span> I am trying to pick this up from <span class=\"user-mention\" data-user-id=\"198047\">@jplatte</span> and I just want to make sure I am understanding what you were suggesting. If I am reading everything correctly, you are suggesting passing a path through <code>ast::GenericArgs</code> that could either be a type or a constexpr. Once we hit AST -&gt; HIR we check for <code>segments.len() == 1 &amp;&amp; segments[0].arg.is_none()</code> to check if it is an <code>ident</code>, and from there check if it is a type or const argument, in that order. Is that all correct or am I completely off in the weeds?</p>",
+        "id": 178604925,
+        "sender_full_name": "yodal",
+        "timestamp": 1571597059
+    },
+    {
+        "content": "<p>I think the idea is that a const parameter would initially be a <code>GenericArg::Type</code> with a single segment and no arguments — when we try to resolve the path in the type namespace, if it doesn't exist, then we also try in the value namespace — and if that succeeds, we lower to a const argument instead</p>",
+        "id": 178614732,
+        "sender_full_name": "varkor",
+        "timestamp": 1571613223
+    },
+    {
+        "content": "<p>which I think is what you're describing</p>",
+        "id": 178614779,
+        "sender_full_name": "varkor",
+        "timestamp": 1571613254
+    },
+    {
+        "content": "<p>ok, that's more or less what I was thinking, though coming at it from a slightly different direction</p>",
+        "id": 178618378,
+        "sender_full_name": "yodal",
+        "timestamp": 1571620298
+    }
+]

@@ -1,0 +1,188 @@
+[
+    {
+        "content": "<p>So... with <a href=\"https://github.com/rust-lang/rust/pull/80418\">https://github.com/rust-lang/rust/pull/80418</a> and <a href=\"https://github.com/rust-lang/rust/pull/78578\">https://github.com/rust-lang/rust/pull/78578</a> we are now analyzing which \"locals\" have no <code>StorageDead</code>. We should <em>at least</em> also analyze that there is exactly one <code>StorageLive</code>, but any of that feels too much like \"if it quacks like a non-local local it is a non-local local\". Instead it would be great if we had a more robust way to identify those locals. There are various things that come to mind:</p>\n<ol>\n<li>add a \"list of escaping locals\" to <code>mir::Body</code> of the locals for which we want this to apply.</li>\n<li>We already have <em>one</em> such local, it is <code>_0</code>. how about we make the first <code>return_values</code> locals behave like the return value local <code>_0</code> and only start with the arguments after those locals?</li>\n<li>we need a way to figure out these locals during MIR building. I have currently no idea how to do that, but somewhere in THIR we must be special casing the final expression in a block and figuring out that it has no scope that would <code>StorageDead</code> the locals in it, so maybe we need to preprocess that block to allocate its locals and then fill them in once we actually lower the expression to THIR. Or we mark those locals during THIR lowering and move them around afterwards? Or we have a MIR pass that runs right after MIR building that rewrites the MIR for 2. or computes the list for 1.?</li>\n</ol>",
+        "id": 221475088,
+        "sender_full_name": "oli",
+        "timestamp": 1609713748
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/issues/53819\">https://github.com/rust-lang/rust/issues/53819</a> has the history of discussion on this issue</p>",
+        "id": 221475106,
+        "sender_full_name": "oli",
+        "timestamp": 1609713799
+    },
+    {
+        "content": "<blockquote>\n<p>We already have one such local, it is _0. how about we make the first return_values locals behave like the return value local _0 and only start with the arguments after those locals?</p>\n</blockquote>\n<p>Not really, that's just an optimization... conceptually, the content of <code>_0</code> is copied to the caller-allocated return place on <code>return</code>, and then <code>_0</code> is deallocated like all the other locals.</p>",
+        "id": 221529737,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609770937
+    },
+    {
+        "content": "<p>right... which works just as well for us</p>",
+        "id": 221530339,
+        "sender_full_name": "oli",
+        "timestamp": 1609771229
+    },
+    {
+        "content": "<p>oh wait, no, we reference things</p>",
+        "id": 221530347,
+        "sender_full_name": "oli",
+        "timestamp": 1609771241
+    },
+    {
+        "content": "<p>but... we were talking about NRVO for a while, and that always sounded to me like we'd end up allowing you to write/reference the return place</p>",
+        "id": 221530424,
+        "sender_full_name": "oli",
+        "timestamp": 1609771286
+    },
+    {
+        "content": "<p>I'm not up-to-date with that discussion and its operational foundation</p>",
+        "id": 221542462,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609776502
+    },
+    {
+        "content": "<p>ok, so I guess let's scrap <code>2.</code>, due to unclear motivation and implications</p>",
+        "id": 221545755,
+        "sender_full_name": "oli",
+        "timestamp": 1609777838
+    },
+    {
+        "content": "<p>to me this sounds like a classical program analysis task: \"can this local be referenced by the final value of the constant?\"</p>",
+        "id": 221555597,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609782122
+    },
+    {
+        "content": "<p>and we want an analysis that answers \"no\" or \"maybe\" (so it's conservative by erring on the side of \"maybe\")</p>",
+        "id": 221555722,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609782179
+    },
+    {
+        "content": "<p>deallocated locals certainly cannot be referenced and that's why I bought your current scheme</p>",
+        "id": 221555771,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609782215
+    },
+    {
+        "content": "<p>though the check is a bit sketchy from a program analysis perspective, it relies on some syntactic invariants</p>",
+        "id": 221555858,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609782245
+    },
+    {
+        "content": "<p>The earlier version of my PR had a dataflow analysis that properly analyzed this, but it's still analyzing for this information after the fact. During MIR building we know for sure which \"locals\" outlive the current MIR body's execution. Any analysis that comes later is bound to make assumptions. For example: I can construct you a MIR that has locals which have neither <code>StorageLive</code> nor <code>StorageDead</code>, but that's not a local we consider actually outliving the current body's execution. It may just be one of the odd locals created during MIR building. I guess we could call these bugs, but any bug of this kind will cause such an analysis to fall on its face.</p>",
+        "id": 221559582,
+        "sender_full_name": "oli",
+        "timestamp": 1609784080
+    },
+    {
+        "content": "<blockquote>\n<p>I can construct you a MIR that has locals which have neither StorageLive nor StorageDead, but that's not a local we consider actually outliving the current body's execution</p>\n</blockquote>\n<p>wait I thought we are checking for <code>StorageDead</code>?</p>",
+        "id": 221565176,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609786745
+    },
+    {
+        "content": "<p>so if it has neither, it has no <code>StorageDead</code> and thus would be considered outliving?</p>",
+        "id": 221565230,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609786776
+    },
+    {
+        "content": "<p>jup</p>",
+        "id": 221565265,
+        "sender_full_name": "oli",
+        "timestamp": 1609786789
+    },
+    {
+        "content": "<p>... oh, in which case we emit the error</p>",
+        "id": 221565290,
+        "sender_full_name": "oli",
+        "timestamp": 1609786800
+    },
+    {
+        "content": "<p>haha</p>",
+        "id": 221565320,
+        "sender_full_name": "oli",
+        "timestamp": 1609786802
+    },
+    {
+        "content": "<p>so we err on the safe side</p>",
+        "id": 221565347,
+        "sender_full_name": "oli",
+        "timestamp": 1609786808
+    },
+    {
+        "content": "<p>yeah, that's why I said \"no\"/\"maybe\" above</p>",
+        "id": 221565403,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609786834
+    },
+    {
+        "content": "<p>the bad case is something like</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">_4</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">_3</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">if</span><span class=\"w\"> </span><span class=\"kc\">false</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">StorageDead</span><span class=\"p\">(</span><span class=\"n\">_3</span><span class=\"p\">);</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"n\">_0</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">_4</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 221565456,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609786861
+    },
+    {
+        "content": "<p>which... the <code>StorageDead</code> check does, but it's not a proper dataflow analysis</p>",
+        "id": 221565487,
+        "sender_full_name": "oli",
+        "timestamp": 1609786877
+    },
+    {
+        "content": "<p>yea</p>",
+        "id": 221565491,
+        "sender_full_name": "oli",
+        "timestamp": 1609786880
+    },
+    {
+        "content": "<p>which is not MIR that we ever generate, but it makes the analysis fragile by depending on some syntactic invariants</p>",
+        "id": 221565493,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609786881
+    },
+    {
+        "content": "<p>so... how about I add a MIR validation check that ensures that if a local has a <code>StorageDead</code>, it has one on all execution paths that reach a <code>return</code> terminator?</p>",
+        "id": 221565644,
+        "sender_full_name": "oli",
+        "timestamp": 1609786940
+    },
+    {
+        "content": "<p>instead of hardening <del>promotion</del> const checking, we make this assumption an invariant of MIR</p>",
+        "id": 221565695,
+        "sender_full_name": "oli",
+        "timestamp": 1609786969
+    },
+    {
+        "content": "<p>promotion? <em>confused</em></p>",
+        "id": 221565898,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609787072
+    },
+    {
+        "content": "<p>argml</p>",
+        "id": 221566070,
+        "sender_full_name": "oli",
+        "timestamp": 1609787169
+    },
+    {
+        "content": "<p>const checking</p>",
+        "id": 221566074,
+        "sender_full_name": "oli",
+        "timestamp": 1609787173
+    },
+    {
+        "content": "<p>this all used to be one thing, and my brain keeps munging them together</p>",
+        "id": 221566101,
+        "sender_full_name": "oli",
+        "timestamp": 1609787184
+    },
+    {
+        "content": "<p>yeah... however, that makes the invariant less local, so more fragile</p>",
+        "id": 221566610,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1609787434
+    }
+]

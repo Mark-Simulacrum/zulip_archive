@@ -1,0 +1,548 @@
+<html>
+<head><meta charset="utf-8"><title>The least incorrect init code :) · t-lang/wg-unsafe-code-guidelines · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/index.html">t-lang/wg-unsafe-code-guidelines</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html">The least incorrect init code :)</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="217684120"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217684120" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> skoe <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217684120">(Nov 23 2020 at 21:20)</a>:</h4>
+<p>Hopefully that's the right place to ask - let me know if there's a better one. When I experimented with low level stuff on embedded systems, I created a minimal project which does things similar to <a href="https://github.com/rust-embedded/cortex-m-rt/blob/master/src/lib.rs">https://github.com/rust-embedded/cortex-m-rt/blob/master/src/lib.rs</a> and <a href="https://github.com/rust-embedded/r0/blob/master/src/lib.rs">https://github.com/rust-embedded/r0/blob/master/src/lib.rs</a>. I found that my project did not result in the code it should. Unfortunately  got code that overwrote the rest of the memory in an endless loop. Slight, unrelated changes changed the compiler output of this loop. I boiled it down to this: <a href="https://github.com/rust-embedded/embedonomicon/issues/69">https://github.com/rust-embedded/embedonomicon/issues/69</a></p>
+<p>The symbols exported from the linker are declared as </p>
+<div class="codehilite"><pre><span></span><code>extern &quot;C&quot; {
+        static mut _sdata: u32;
+        static mut _edata: u32;
+        ...
+</code></pre></div>
+<p>This is cast to raw pointers:</p>
+<div class="codehilite"><pre><span></span><code>    let mut sdata = &amp;mut _sdata as *mut u32;
+    let edata = &amp;mut _edata as *mut u32;
+    let mut sidata = &amp;_sidata as *const u32;
+</code></pre></div>
+<div class="codehilite"><pre><span></span><code>    while sdata &lt; edata {
+        ptr::write(sdata, ptr::read(sidata));
+        sdata = sdata.offset(1);
+        sidata = sidata.offset(1);
+</code></pre></div>
+<p>While discussing this issue we found two bad things that are UB: a) The two pointers sdata and edata may be considered to be from two different allocations and b) if there is more than one u32 word on these segments it is out of bounds. Additionally there is c) potential aliasing, more about this later.</p>
+<p>I tried to find a clean solution which is described here: <a href="https://gist.github.com/skoe/dbd3add2fc3baa600e9ebc995ddf0302">https://gist.github.com/skoe/dbd3add2fc3baa600e9ebc995ddf0302</a> It uses a pointer + length concept like I saw it at some FFI examples.</p>
+<p>From what I understand it solves a) and b) - but I'm not sure. There is still c) - potential aliasing which I think it's acceptable in this special case:</p>
+<p>The init code is the first code executed _before_ main(). It sets BSS to 0 and copies DATA from ROM (Flash) to RAM. Which means that it writes to all space where all global/static variables will be placed. But after this initialization, when entering main, it will not touch this memory anymore. This means that the memory is written first (but not read) and after that the usual Rust rules apply. The only way not to do this may be to write the start-up code in Assembly. This would be a pity - I got used to write it in C and hope there's a good way to write it in Rust too :)</p>
+<p>The questions are (numbered for easy reference):</p>
+<p>1) Are my/our assumption about the reason for the initial problems correct?<br>
+2) Do you think the new version is correct (except for the aliasing story)<br>
+3) Is the aliasing issue a real issue or acceptable in this special use case?<br>
+4) Is there an easy way to find out what the compiler "thinks" about a certain value/pointer to understand why it optimizes something?<br>
+5) Does this make a difference (UnsafeCell) or does it have the same potential issues like the original code? <a href="https://github.com/rust-embedded/rust-raspberrypi-OS-tutorials/blob/master/02_runtime_init/src/bsp/raspberrypi/memory.rs">https://github.com/rust-embedded/rust-raspberrypi-OS-tutorials/blob/master/02_runtime_init/src/bsp/raspberrypi/memory.rs</a></p>
+<p>Sorry for the long text, but there are so many details to tell... :D</p>
+
+
+
+<a name="217740472"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217740472" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217740472">(Nov 24 2020 at 11:22)</a>:</h4>
+<p><code>*mut</code> (raw pointers) don't have stringent aliasing requirements that references have, do they? As long as you're able to say that your static is a pointer and not a <code>u32</code> you should be fine. So even something like <code>extern "C" { static _sdata: *mut _; static _edata: *mut _; }</code> would be fine.</p>
+
+
+
+<a name="217740667"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217740667" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217740667">(Nov 24 2020 at 11:25)</a>:</h4>
+<p>Aliasing of these memory regions with all the other things is, I guess, somewhat problematic. It would be valid for LLVM to reorder reads of global variables in your program to before your loop copying memory populates data for these statics. As thus at the very least you need to add a barrier or two somewhere after your intiialization code (which is a good idea nevertheless, esp. if you're initializing a multi-core mcu)</p>
+
+
+
+<a name="217740695"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217740695" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217740695">(Nov 24 2020 at 11:25)</a>:</h4>
+<p>The <code>_sdata</code> and <code>_edata</code> symbols directly point to the start and end of the <code>.data</code> section. They do not point to a global that contains a pointer.</p>
+
+
+
+<a name="217740719"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217740719" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217740719">(Nov 24 2020 at 11:26)</a>:</h4>
+<p>Right, but at the language level they are statics of type u32 (as specified)</p>
+
+
+
+<a name="217740771"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217740771" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217740771">(Nov 24 2020 at 11:26)</a>:</h4>
+<p>There are ways to get linker to put address of those symbols into another place that you can then refer to as <code>*mut _</code>.</p>
+
+
+
+<a name="217740811"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217740811" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217740811">(Nov 24 2020 at 11:27)</a>:</h4>
+<p>(At least I'd be surprised if  there wasn’t – I did something of the sort, although it was with IAR's linker, not GNU's)</p>
+
+
+
+<a name="217740820"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217740820" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217740820">(Nov 24 2020 at 11:27)</a>:</h4>
+<p>You can use something like <code>#[linkage = "external"] static _sdata: *mut u8;</code> I think.</p>
+
+
+
+<a name="217740950"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217740950" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217740950">(Nov 24 2020 at 11:28)</a>:</h4>
+<p>That will make rustc create an anonymous data object where that contains a relocation for <code>_sdata</code>. All uses of <code>_sdata</code> from the rust code will then use that anonymous data object.</p>
+
+
+
+<a name="217793265"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217793265" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217793265">(Nov 24 2020 at 18:17)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="123586">nagisa</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/217740667):</p>
+<blockquote>
+<p>Aliasing of these memory regions with all the other things is, I guess, somewhat problematic. It would be valid for LLVM to reorder reads of global variables in your program to before your loop copying memory populates data for these statics. As thus at the very least you need to add a barrier or two somewhere after your intiialization code (which is a good idea nevertheless, esp. if you're initializing a multi-core mcu)</p>
+</blockquote>
+<p>This would still be UB even with barriers though, right?</p>
+
+
+
+<a name="217808710"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217808710" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> skoe <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217808710">(Nov 24 2020 at 20:23)</a>:</h4>
+<p>Yes, the reordering of read accesses to before the copy loop sounds problematic, although it appears to be quite unlikely. Well, even then it's no perfect solution. <br>
+Is the compiler aware of such barriers? Aren't they just for the machine level?</p>
+
+
+
+<a name="217810825"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217810825" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217810825">(Nov 24 2020 at 20:42)</a>:</h4>
+<p>they're mostly for the compiler, even</p>
+
+
+
+<a name="217810841"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217810841" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217810841">(Nov 24 2020 at 20:43)</a>:</h4>
+<p>we have a fence <em>only</em> for the compiler: <a href="https://doc.rust-lang.org/core/sync/atomic/fn.compiler_fence.html">https://doc.rust-lang.org/core/sync/atomic/fn.compiler_fence.html</a></p>
+
+
+
+<a name="217810863"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217810863" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217810863">(Nov 24 2020 at 20:43)</a>:</h4>
+<p>well, in theory. in practice it can generate fence instructions.</p>
+
+
+
+<a name="217823031"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217823031" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thom Chiovoloni <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217823031">(Nov 24 2020 at 22:36)</a>:</h4>
+<p>It can? Is there an issue on file for this or is it intentional (if it's intentional, can it be documented?)</p>
+
+
+
+<a name="217823130"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217823130" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217823130">(Nov 24 2020 at 22:37)</a>:</h4>
+<p>yeah: <a href="https://github.com/rust-lang/rust/issues/62256">https://github.com/rust-lang/rust/issues/62256</a></p>
+
+
+
+<a name="217870942"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217870942" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217870942">(Nov 25 2020 at 11:09)</a>:</h4>
+<p>Hmm, this code is miscompiled into an infinite loop, but I don't immediately see the UB. Can someone spot it?</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">init</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">extern</span><span class="w"> </span><span class="s">"C"</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">static</span><span class="w"> </span><span class="n">_sdata</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u32</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="k">static</span><span class="w"> </span><span class="n">_edata</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u32</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="k">static</span><span class="w"> </span><span class="n">_sidata</span>: <span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u32</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Copy DATA</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">sdata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_sdata</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">edata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_edata</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">sidata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">_sidata</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="n">sdata</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">edata</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">ptr</span>::<span class="n">write</span><span class="p">(</span><span class="n">sdata</span><span class="p">,</span><span class="w"> </span><span class="n">ptr</span>::<span class="n">read</span><span class="p">(</span><span class="n">sidata</span><span class="p">));</span><span class="w"></span>
+<span class="w">        </span><span class="n">sdata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sdata</span><span class="p">.</span><span class="n">offset</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">sidata</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sidata</span><span class="p">.</span><span class="n">offset</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="217872370"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217872370" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217872370">(Nov 25 2020 at 11:23)</a>:</h4>
+<p>Could you give a godbolt link? I can't replicate the miscompile</p>
+
+
+
+<a name="217872455"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217872455" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217872455">(Nov 25 2020 at 11:24)</a>:</h4>
+<p><a href="https://godbolt.org/z/6x1Mrx">https://godbolt.org/z/6x1Mrx</a></p>
+
+
+
+<a name="217872499"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217872499" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217872499">(Nov 25 2020 at 11:24)</a>:</h4>
+<p>the loop turns into an infinite loop</p>
+
+
+
+<a name="217872624"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217872624" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217872624">(Nov 25 2020 at 11:26)</a>:</h4>
+<p>oh, nevermind, it's because of the infinite loop getting miscompiled (as usual)</p>
+
+
+
+<a name="217873306"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217873306" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217873306">(Nov 25 2020 at 11:34)</a>:</h4>
+<p>I am pretty sure you need to use</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">extern</span><span class="w"> </span><span class="s">"C"</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="cp">#[linkage = </span><span class="s">"external"</span><span class="cp">]</span><span class="w"></span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="n">_sdata</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u32</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="cp">#[linkage = </span><span class="s">"external"</span><span class="cp">]</span><span class="w"></span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="n">_edata</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u32</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="cp">#[linkage = </span><span class="s">"external"</span><span class="cp">]</span><span class="w"></span>
+<span class="w">    </span><span class="k">static</span><span class="w"> </span><span class="n">_sidata</span>: <span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u32</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="217873567"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217873567" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217873567">(Nov 25 2020 at 11:38)</a>:</h4>
+<p>It looks like that just removes the indirection that was added</p>
+
+
+
+<a name="217873580"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217873580" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217873580">(Nov 25 2020 at 11:38)</a>:</h4>
+<p>Correct</p>
+
+
+
+<a name="217873592"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217873592" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217873592">(Nov 25 2020 at 11:38)</a>:</h4>
+<p>What's the default linkage?</p>
+
+
+
+<a name="217873788"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217873788" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217873788">(Nov 25 2020 at 11:40)</a>:</h4>
+<p>The very existence of <code>#[linkage]</code> forces the static to contain a pointer to the symbol with the name of the static instead of referring directly to the symbol as it it is a regular static.</p>
+
+
+
+<a name="217873889"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217873889" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217873889">(Nov 25 2020 at 11:42)</a>:</h4>
+<p>Oh, this is a bug <a href="https://github.com/rust-lang/rust/issues/31508">https://github.com/rust-lang/rust/issues/31508</a></p>
+
+
+
+<a name="217873957"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217873957" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217873957">(Nov 25 2020 at 11:42)</a>:</h4>
+<p>Without <code>#[linkage]</code> you are saying that <code>_sdata</code> is a pointer sized symbol that points to a <code>*mut u32</code>, while with <code>#[linkage]</code> you are saying that the <code>_sdata</code> static contains a pointer to the <code>_sdata</code> symbol, which may be of arbitrary size.</p>
+
+
+
+<a name="217874005"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217874005" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217874005">(Nov 25 2020 at 11:43)</a>:</h4>
+<p>I wouldn't call it a bug. It is useful for cases like this where the indirection must not happen.</p>
+
+
+
+<a name="217874131"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217874131" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217874131">(Nov 25 2020 at 11:45)</a>:</h4>
+<p>I don't currently mind having to put the start/end addresses behind a pointer, that's solvable with linker script changes</p>
+
+
+
+<a name="217874175"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217874175" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217874175">(Nov 25 2020 at 11:45)</a>:</h4>
+<p>The biggest remaining question is whether this sort of initialization is an aliasing violation</p>
+
+
+
+<a name="217884888"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217884888" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217884888">(Nov 25 2020 at 13:39)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="211727">Jonas Schievink</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/217874175):</p>
+<blockquote>
+<p>The biggest remaining question is whether this sort of initialization is an aliasing violation</p>
+</blockquote>
+<p>With <span class="user-mention" data-user-id="133247">@bjorn3</span> 's suggestion, it shouldn't be, since at that point only out-of-thin-air raw pointers are involved: the compiler cannot assume anything about them, except at each <code>ptr::write() / ptr::read()</code> call, where and when it may assume they point to, resp. at least one writeable / readable and well aligned <code>u32</code>.</p>
+
+
+
+<a name="217885005"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217885005" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217885005">(Nov 25 2020 at 13:40)</a>:</h4>
+<p>But is it not necessary to ensure that those accesses don't alias any memory used by <code>static</code>s?</p>
+
+
+
+<a name="217885166"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217885166" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217885166">(Nov 25 2020 at 13:41)</a>:</h4>
+<p>Like, you can't use an out-of-thin-air pointer to write to local variables that have live references either, right?</p>
+
+
+
+<a name="217885206"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217885206" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217885206">(Nov 25 2020 at 13:42)</a>:</h4>
+<p>And if statics are considered always live, then this might cause issues?</p>
+
+
+
+<a name="217885543"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217885543" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217885543">(Nov 25 2020 at 13:44)</a>:</h4>
+<p>Are you sure your example is not "just" an infinite loop because <code>main</code> gets inlined into the call location and LLVM optimises out everything else?</p>
+
+
+
+<a name="217885581"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217885581" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217885581">(Nov 25 2020 at 13:44)</a>:</h4>
+<p>No, that was it:</p>
+<p><span class="user-mention silent" data-user-id="211727">Jonas Schievink</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/217872624):</p>
+<blockquote>
+<p>oh, nevermind, it's because of the infinite loop getting miscompiled (as usual)</p>
+</blockquote>
+
+
+
+<a name="217885642"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217885642" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217885642">(Nov 25 2020 at 13:45)</a>:</h4>
+<p>Whether <code>linkage</code> is external or some other kind doesn't matter for that example in particular, because LLVM doesn't really have insight into what these statics really is.</p>
+
+
+
+<a name="217885758"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217885758" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217885758">(Nov 25 2020 at 13:46)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="211727">Jonas Schievink</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/217885581):</p>
+<blockquote>
+<p>No, that was it:</p>
+<p><span class="user-mention silent" data-user-id="211727">Jonas Schievink</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/217872624):</p>
+<blockquote>
+<p>oh, nevermind, it's because of the infinite loop getting miscompiled (as usual)<br>
+</p>
+</blockquote>
+</blockquote>
+<p>Ah yeah, nightly has it "fixed" (due to trivial loops getting side_effect in them) and it compiles the right thing.</p>
+
+
+
+<a name="217885764"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217885764" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217885764">(Nov 25 2020 at 13:46)</a>:</h4>
+<p>I just picked <code>external</code> linkage at random. It is the presence of an <code>#[linkage]</code> attribute that is important in this case.</p>
+
+
+
+<a name="217886609"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217886609" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217886609">(Nov 25 2020 at 13:53)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="211727">Jonas Schievink</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/217885166):</p>
+<blockquote>
+<p>Like, you can't use an out-of-thin-air pointer to write to local variables that have live references either, right?</p>
+</blockquote>
+<p>I don't know if it is possible to reliably forge an out-of-thin-air pointer that points to a local variable, but if it were possible (maybe doing a volatile read or smth like that), I think that a usage of such pointer would break the aliasing guarantees of the Rust references that are still alive.</p>
+<p>When using these <code>#[linkage]</code> statics, there are no Rust references to the actual static data anywhere, so such an issue cannot happen. In a way, this is like doing <code>let _sdata = malloc(…); let _sidata = ffi_fun(…);</code>.</p>
+<p>There is <em>one</em> point which could be problematic, though, and I don't know enough about it: the <code>sdata &lt; edata</code> comparison. I'd like to think that given the out-of-thin-air nature of these pointers, the addresses should be comparable, but pointer comparison seems to be a tricky subject too <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span></p>
+
+
+
+<a name="217886690"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217886690" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217886690">(Nov 25 2020 at 13:54)</a>:</h4>
+<p>You can put references to statics into other statics</p>
+
+
+
+<a name="217887060"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217887060" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217887060">(Nov 25 2020 at 13:57)</a>:</h4>
+<p>Oh yes, if you do that, then IIUC, you could get into trouble. More precisely, if you create a <code>extern { static VAR_NAME: &lt;impl Freeze&gt;; }</code> (or "worse", <code>static VAR_NAME: &lt;impl Freeze&gt; = &lt;const value&gt;;</code>) that happens to be in the region that is overwritten by <code>_sdata</code>, then, I <em>believe</em> that would be UB. To avoid that, you should only use <code>static mut</code>s or <code>static</code> with a <code>RacyCell</code> type for statics that may end in that region.</p>
+
+
+
+<a name="217887509"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217887509" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217887509">(Nov 25 2020 at 14:01)</a>:</h4>
+<p>Well, the big problem here is that <strong>ALL</strong> statics with mutable interior end up in that region, so the initialization code has to soundly handle any static you can create in safe Rust.</p>
+
+
+
+<a name="217888119"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217888119" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217888119">(Nov 25 2020 at 14:04)</a>:</h4>
+<p>If they are <code>impl !Freeze</code> or <code>static mut</code>s, then I'd <em>think</em> it should be fine, but I do see your concern. This seems like something that warrants an associated issue, at least to clarify the situation, if it doesn't have one yet (cc <span class="user-mention" data-user-id="120791">@RalfJ</span>)</p>
+
+
+
+<a name="217893677"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217893677" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217893677">(Nov 25 2020 at 14:49)</a>:</h4>
+<p>I think I'm trying to do something related. I'm trying to move beyond the bounds of a reference to a static. To do so I launder the pointer via external linkage: <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=dd792d19b90bf9e89ca992fa77f6aece">playground link</a>.  Is this actually safe to do? I know mutable statics would be trickier.</p>
+
+
+
+<a name="217944332"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217944332" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> skoe <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217944332">(Nov 25 2020 at 22:00)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="123586">nagisa</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/217885543):</p>
+<blockquote>
+<p>Are you sure your example is not "just" an infinite loop because <code>main</code> gets inlined into the call location and LLVM optimizes out everything else?</p>
+</blockquote>
+<p>The point is that the generated code is not just an infinite loop... actually it's not infinite at all: It overwrites the rest of the memory until it hits a hole and crashes - well, the it ends :) With the fix of <a href="https://github.com/rust-lang/rust/issues/28728">https://github.com/rust-lang/rust/issues/28728</a> it works (tested on nightly). </p>
+<p>I updated the Gist with the latest insights: <a href="https://gist.github.com/skoe/dbd3add2fc3baa600e9ebc995ddf0302/revisions">https://gist.github.com/skoe/dbd3add2fc3baa600e9ebc995ddf0302/revisions</a><br>
+Let me know if you think it's worse than before and what you think about the assumptions.</p>
+<p>Still the discussion about the rest of the code. I'm aware that our use case is at the edge of what "normal code" does. That's why I'm interested whether there is UB and why (and how bad it is :D ) and if there is a way to solve it w/o dropping into assembly. Maybe it's a bit academic, because 10 lines of assembly don't hurt, but it may be useful for future questions and similar issues like bank switching, page handling or whatever.</p>
+<p>One of the questions: Unfortunately the feature  #[linkage = "external"] is in nightly only. </p>
+<div class="codehilite"><pre><span></span><code>    #[linkage = &quot;external&quot;]
+    static _sdata: *mut u32;
+    #[linkage = &quot;external&quot;]
+    static _edata: *mut u32;
+</code></pre></div>
+<p>With this, one could access the pointers without the indirection I use currently and without saying they are two u32 values (and going beyond their bounds) like in the old code.</p>
+<p>The compiler must neither assume they are from different allocations nor that they are from the same allocation. It doesn't know anything about them. So _edata.offset_from(_s_data) and creating a slice from them should just work and be no UB, is this correct? (Ignoring the aliasing topic for now, just concentrate on the pointers :D ).</p>
+
+
+
+<a name="217952915"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217952915" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217952915">(Nov 26 2020 at 00:00)</a>:</h4>
+<blockquote>
+<p>The point is that the generated code is not just an infinite loop... actually it's not infinite at all: It overwrites the rest of the memory until it hits a hole and crashes - well, the it ends <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+</blockquote>
+<p>since <code>loop {}</code> was ultimately generated as <code>unreachable</code> (a typical "this is UB" indication) LLVM was free to assume that the loop writing memory would never terminate, hence it just going on to write the rest of the memory. So in your original example <code>loop {}</code> itself was the most problematic (well, not by Rust rules, by a bug) of everything in the snippets I've seen.</p>
+
+
+
+<a name="217952932"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217952932" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217952932">(Nov 26 2020 at 00:00)</a>:</h4>
+<p>I would suggest for whatever further exploration to utilize nightly, where this bug is fixed for <code>loop {}</code> in particular. Or make <code>main</code> something that's not just a plain <code>loop {}</code> (by e.g. adding volatile memory ops to it, or a <code>WFI</code>).</p>
+
+
+
+<a name="217952999"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217952999" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217952999">(Nov 26 2020 at 00:01)</a>:</h4>
+<p>FWIW your producing a structure with pointers like you did in your original example is quite equivalent to <code>#[linkage="external"]</code> and other such similar proposals AFAICT.</p>
+
+
+
+<a name="217962952"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217962952" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217962952">(Nov 26 2020 at 03:43)</a>:</h4>
+<blockquote>
+<p>since loop {} was ultimately generated as unreachable (a typical "this is UB" indication)</p>
+</blockquote>
+<p>Wait, what? I assume this is a remnant of C's ridiculous "all loops are finite" rule, but I thought LLVM had the vocabulary to be able to distinguish C-style UB infinite loops from actual infinite loops</p>
+
+
+
+<a name="217966812"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/217966812" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Quy Nguyen <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#217966812">(Nov 26 2020 at 05:19)</a>:</h4>
+<p>They do not, and that's why Rust gets miscompiled :/ there's a patch for it stuck in llvm review hell iirc.</p>
+
+
+
+<a name="218117757"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218117757" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218117757">(Nov 27 2020 at 18:11)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/217962952):</p>
+<blockquote>
+<blockquote>
+<p>since loop {} was ultimately generated as unreachable (a typical "this is UB" indication)</p>
+</blockquote>
+<p>Wait, what? I assume this is a remnant of C's ridiculous "all loops are finite" rule, but I thought LLVM had the vocabulary to be able to distinguish C-style UB infinite loops from actual infinite loops</p>
+</blockquote>
+<p>Correction: C++'s rule</p>
+
+
+
+<a name="218117834"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218117834" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218117834">(Nov 27 2020 at 18:12)</a>:</h4>
+<p>C says you may only do this if the loop condition is not a constant. But LLVM/clang doesn't implement C correctly, unfortunately.</p>
+
+
+
+<a name="218117887"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218117887" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218117887">(Nov 27 2020 at 18:13)</a>:</h4>
+<p>and no LLVM doesn't really have that vocabulary, or only since very recently.<br>
+See <a href="https://github.com/rust-lang/rust/issues/28728">https://github.com/rust-lang/rust/issues/28728</a> for all the details.</p>
+
+
+
+<a name="218118160"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218118160" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218118160">(Nov 27 2020 at 18:16)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="232018">Daniel Henry-Mantilla</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/217888119):</p>
+<blockquote>
+<p>If they are <code>impl !Freeze</code> or <code>static mut</code>s, then I'd <em>think</em> it should be fine, but I do see your concern. This seems like something that warrants an associated issue, at least to clarify the situation, if it doesn't have one yet (cc <span class="user-mention silent" data-user-id="120791">RalfJ</span>)</p>
+</blockquote>
+<p>I haven't seen an issue for this, no.<br>
+This question is indeed well outside the usual abstract machine model, so I find it hard to say much. It quite clearly violates the aliasing rules, but also in some sense it happens before the abstract machine is even initialized and the aliasing rules start making sense. A compiler barrier is strongly advised, is unfortunately all I can say -- sorry.<br>
+Once we have all of "normal" Rust on solid footing, I'm happy to get back to the edge cases, but right this this is just scifi and way beyond anything I can make definite statements about.^^<br>
+IOW, the theorist has nothing to say and is happy to defer to the practioners. ;)</p>
+
+
+
+<a name="218118227"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218118227" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218118227">(Nov 27 2020 at 18:17)</a>:</h4>
+<p>Thanks for the feedback!</p>
+
+
+
+<a name="218118912"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218118912" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218118912">(Nov 27 2020 at 18:28)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/218117887):</p>
+<blockquote>
+<p>and no LLVM doesn't really have that vocabulary, or only since very recently.<br>
+See <a href="https://github.com/rust-lang/rust/issues/28728">https://github.com/rust-lang/rust/issues/28728</a> for all the details.</p>
+</blockquote>
+<p><a href="https://godbolt.org/z/svdhn9">https://godbolt.org/z/svdhn9</a><br>
+<a href="https://godbolt.org/z/x8fdnc">https://godbolt.org/z/x8fdnc</a><br>
+Seems to have been fixed since llvm-10, so there is hope for rust in the future. (Though note that this only tests the <code>loop{}</code> case, and not anything more complex).</p>
+
+
+
+<a name="218120032"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218120032" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218120032">(Nov 27 2020 at 18:46)</a>:</h4>
+<p>Yeah, some improvements happened recently, finally.</p>
+
+
+
+<a name="218120054"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218120054" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218120054">(Nov 27 2020 at 18:46)</a>:</h4>
+<p>But AFAIK the fundamental problem remains open, it's just less likely now that people run into it. (Which is great! But not good enough.)</p>
+
+
+
+<a name="218128610"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218128610" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> skoe <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218128610">(Nov 27 2020 at 20:56)</a>:</h4>
+<p>Thanks for looking into it. So I get the message that the proposed solution is definitely not in the defined zone of Rust but there are no (other) serious concerns about using it as long as it works <span aria-label="grinning face with smiling eyes" class="emoji emoji-1f601" role="img" title="grinning face with smiling eyes">:grinning_face_with_smiling_eyes:</span> </p>
+<blockquote>
+<p>but right this this is just scifi and way beyond anything I can make definite statements about.</p>
+</blockquote>
+<p>Has some parallels with time traveling, yes.</p>
+
+
+
+<a name="218135839"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218135839" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jacob Lifshay <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218135839">(Nov 27 2020 at 23:17)</a>:</h4>
+<p>you could use an empty inline asm before the fill-memory loop where the pointers of where to write are passed through the inline asm as inputs/outputs, then the fill loop runs, then there's another inline asm that Rust thinks can write to all visible memory, then you can run main.</p>
+
+
+
+<a name="218135931"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218135931" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jacob Lifshay <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218135931">(Nov 27 2020 at 23:20)</a>:</h4>
+<p>that should make the pointers be disconnected (in terms of aliasing/memory model) from the variables you took the addresses of, since inline asm is opaque to the compiler. you don't actually have to have any instructions in the inline asm, it just has to be there.</p>
+
+
+
+<a name="218137272"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218137272" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218137272">(Nov 27 2020 at 23:55)</a>:</h4>
+<p>asm with a memory clobber is quite similar, if not equivalent, to a compiler barrier.</p>
+
+
+
+<a name="218137333"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218137333" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thom Chiovoloni <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218137333">(Nov 27 2020 at 23:56)</a>:</h4>
+<p>i think asm with memory clobber is stronger than compiler barriers usually, although it's certainly preferable to actually emitting an honest-to-god fence instruction</p>
+
+
+
+<a name="218144934"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218144934" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218144934">(Nov 28 2020 at 03:27)</a>:</h4>
+<p>It still can't write to read-only memory (either static !Freeze, or behind a &amp;T somewhere T: !Freeze), though can it?</p>
+
+
+
+<a name="218156863"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The%20least%20incorrect%20init%20code%20%3A%29/near/218156863" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A).html#218156863">(Nov 28 2020 at 09:47)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="257758">Connor Horman</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A">said</a>/near/218144934):</p>
+<blockquote>
+<p>It still can't write to read-only memory (either static !Freeze, or behind a &amp;T somewhere T: !Freeze), though can it?</p>
+</blockquote>
+<p>my view of this is that that memory is not read-only yet. after all, something has to put these values there, so this memory is only read-only "for the duration of the normal program execution", but this code here happens before that -- it's basically part of setting up the initial state.</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

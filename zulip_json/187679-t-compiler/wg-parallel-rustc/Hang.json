@@ -1,0 +1,314 @@
+[
+    {
+        "content": "<p>I haven't managed to reproduce it yet, but I just had rustc hang completely while doing a parallel build. I was testing with increasing numbers of threads, so I could plot threads vs user time and see the growth rate. And while doing an 88-way build, rustc just completely hung. I was doing builds of syn, and it hung with two crate builds in progress. One is hung on <code>read</code> of the pipe. The other is hung on a futex.</p>",
+        "id": 183823059,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576741453
+    },
+    {
+        "content": "<p>Looking further, some threads are hung in <code>jobserver::imp::Client::acquire</code> (by way of rayon, <code>rustc_rayon_core::registry::Registry::acquire_thread</code> called from <code>rustc_rayon_core::sleep::Sleep::no_work_found</code>), and others are hung in <code>futex_wait_cancelable</code> via <code>std::sync::condvar::Condvar::wait</code> via <code>rustc_rayon_core::sleep::Sleep::no_work_found</code>.</p>",
+        "id": 183823317,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576741769
+    },
+    {
+        "content": "<p>Some backtraces would be useful, but 88 threads would probably make things a bit confusing.</p>",
+        "id": 183823382,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576741830
+    },
+    {
+        "content": "<p>Happy to provide them; my message above was based on looking through backtraces.</p>",
+        "id": 183823405,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576741896
+    },
+    {
+        "content": "<p>This might help:</p>\n<div class=\"codehilite\"><pre><span></span>$ grep &#39;#1\\&gt;&#39; bt | sed &#39;s/buf=0x[^,]*/buf=(omitted)/&#39; | sort | uniq -c\n     86 #1  __GI___libc_read (fd=4, buf=(omitted), nbytes=1) at ../sysdeps/unix/sysv/linux/read.c:24\n      3 #1  __pthread_cond_wait_common (abstime=0x0, mutex=0x563a85f2ced0, cond=0x563a85f2cf00) at pthread_cond_wait.c:502\n</pre></div>",
+        "id": 183823714,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742318
+    },
+    {
+        "content": "<p>(the sed was to handle all the different buffer addresses)</p>",
+        "id": 183823721,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742340
+    },
+    {
+        "content": "<p>In this 88-way build, that rustc process has 89 rustc threads, of which 86 are blocked in read on the pipe and the other 3 are blocked on <code>pthread_cond_wait</code>.</p>",
+        "id": 183823745,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742396
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span>     86 #6  0x00007efe03bb8019 in jobserver::Client::acquire_raw (self=&lt;optimized out&gt;) at /home/josh/.cargo/registry/src/github.com-1ecc6299db9ec823/jobserver-0.1.16/src/lib.rs:363\n      3 #6  rustc_rayon_core::sleep::Sleep::sleep (self=&lt;optimized out&gt;, worker_index=&lt;optimized out&gt;, registry=0x563a85f2cf80) at /home/josh/.cargo/registry/src/github.com-1ecc6299db9ec823/rustc-rayon-core-0.3.0/src/sleep/mod.rs:335\n</pre></div>",
+        "id": 183823837,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742459
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span> The hung build is still around; what other information can I gather?</p>",
+        "id": 183823874,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742493
+    },
+    {
+        "content": "<p>Are the cond vars all in Rayon?</p>",
+        "id": 183823901,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576742515
+    },
+    {
+        "content": "<p>Maybe just do that command for the 1-7 slots for both processes?</p>",
+        "id": 183824001,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576742603
+    },
+    {
+        "content": "<p>In that process, yes, all the cond vars are in rayon.</p>",
+        "id": 183824062,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742658
+    },
+    {
+        "content": "<p>I just grabbed a backtrace for the other process; checking it now.</p>",
+        "id": 183824064,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742670
+    },
+    {
+        "content": "<p>...the other process is a lot more interesting.</p>",
+        "id": 183824069,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742693
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span>      2 #1  0x00007fdc02953089 in parking_lot_core::thread_parker::imp::ThreadParker::futex_wait (self=&lt;optimized out&gt;, ts=...) at /home/josh/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/thread_parker/linux.rs:111\n     72 #1  0x00007fdc029536b9 in parking_lot_core::thread_parker::imp::ThreadParker::futex_wait (self=&lt;optimized out&gt;, ts=...) at /home/josh/.cargo/registry/src/github.com-1ecc6299db9ec823/parking_lot_core-0.6.2/src/thread_parker/linux.rs:111\n      1 #1  0x00007fdc0295a5a5 in jobserver::imp::Client::acquire (self=0x7fdbf4000b90) at /home/josh/.cargo/registry/src/github.com-1ecc6299db9ec823/jobserver-0.1.16/src/lib.rs:548\n     13 #1  __GI___libc_read (fd=4, buf=(omitted), nbytes=1) at ../sysdeps/unix/sysv/linux/read.c:24\n      1 #1  __pthread_cond_wait_common (abstime=0x0, mutex=0x560d777f9e80, cond=0x560d777f9eb0) at pthread_cond_wait.c:502\n</pre></div>",
+        "id": 183824087,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742761
+    },
+    {
+        "content": "<p>Why don't I send you the backtraces of both processes?</p>",
+        "id": 183824239,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576742963
+    },
+    {
+        "content": "<p><a href=\"/user_uploads/4715/DAVpS_Zm3JaL8FQRZGE8c_jL/bt1.gz\" target=\"_blank\" title=\"bt1.gz\">bt1.gz</a></p>",
+        "id": 183824309,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576743025
+    },
+    {
+        "content": "<p><a href=\"/user_uploads/4715/xJPLH8w5SRG0Sq82ybffNiPD/bt2.gz\" target=\"_blank\" title=\"bt2.gz\">bt2.gz</a></p>",
+        "id": 183824313,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576743032
+    },
+    {
+        "content": "<p>Can you filter backtraces to only show symbols so we could get only the unique backtraces?</p>",
+        "id": 183824342,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576743065
+    },
+    {
+        "content": "<p>(both obtained by attaching with gdb and running <code>thread apply all bt full</code>)</p>",
+        "id": 183824347,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576743070
+    },
+    {
+        "content": "<p>What do you mean by \"only show symbols\"? Not addresses?</p>",
+        "id": 183824351,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576743084
+    },
+    {
+        "content": "<p>Or not parameters?</p>",
+        "id": 183824355,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576743090
+    },
+    {
+        "content": "<p>Not parameters, those could vary</p>",
+        "id": 183824434,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576743170
+    },
+    {
+        "content": "<p>I don't know how to hide those in gdb, but I can sed them away easily enough.</p>",
+        "id": 183824651,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576743371
+    },
+    {
+        "content": "<p>One moment...</p>",
+        "id": 183824940,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576743729
+    },
+    {
+        "content": "<p>OK, I managed to get the <em>unique</em> backtraces.</p>",
+        "id": 183825130,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576743979
+    },
+    {
+        "content": "<p>In the less interesting process, there are only two unique backtraces, both as you'd expect.</p>",
+        "id": 183825294,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576744183
+    },
+    {
+        "content": "<p><a href=\"/user_uploads/4715/9yN7JNlznpjIl8ZEJgJN-EvR/bt1-uniq\" target=\"_blank\" title=\"bt1-uniq\">bt1-uniq</a></p>",
+        "id": 183825375,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576744250
+    },
+    {
+        "content": "<p>The more interesting process has no two backtraces identical.</p>",
+        "id": 183825474,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576744363
+    },
+    {
+        "content": "<p>It kind of looks like the first processes is waiting for a jobserver token. Maybe the other process grabbed all 88 tokens? Or some tokens are leaking somehow</p>",
+        "id": 183825732,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576744659
+    },
+    {
+        "content": "<p>It would be nice if you could reliable recreate it, so we could see if it would happen with no jobserver used</p>",
+        "id": 183825793,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576744695
+    },
+    {
+        "content": "<p>I tried many times and didn't recreate it. That's why I'm keeping it around.</p>",
+        "id": 183825824,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576744760
+    },
+    {
+        "content": "<p>It does look like the other process is in the midst of all the work.</p>",
+        "id": 183825835,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576744780
+    },
+    {
+        "content": "<p>I managed to common them up a bit more.</p>",
+        "id": 183825924,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576744918
+    },
+    {
+        "content": "<p>Well thread 89 looks interesting already since it's in monomorphization and not Rayon</p>",
+        "id": 183826292,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576745278
+    },
+    {
+        "content": "<p>So it's probably some deadlock there</p>",
+        "id": 183826394,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576745380
+    },
+    {
+        "content": "<p>(Well, it is in Rayon, but it's doing actual parallel work, and then taking a lock.)</p>",
+        "id": 183826515,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576745480
+    },
+    {
+        "content": "<p>Everything is in Rayon thread, but the lock it's stuck on is not a Rayon lock</p>",
+        "id": 183826618,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576745596
+    },
+    {
+        "content": "<p><a href=\"/user_uploads/4715/QoDGulin5WZnKzz_RlSgowrg/bt2-uniq\" target=\"_blank\" title=\"bt2-uniq\">bt2-uniq</a></p>",
+        "id": 183826626,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576745608
+    },
+    {
+        "content": "<p>That's the unique backtraces in the second process, for frames 0-13.</p>",
+        "id": 183826640,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576745633
+    },
+    {
+        "content": "<p>That shows which ones are in monomorphization without getting into the non-unique frames.</p>",
+        "id": 183826692,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576745658
+    },
+    {
+        "content": "<p>I need to go to bed. I'll leave the processes running until tomorrow morning. If you think of any other information you want from them, let me know.</p>",
+        "id": 183826808,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576745798
+    },
+    {
+        "content": "<p>Oh, it's only 72? I was expecting more</p>",
+        "id": 183826814,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576745805
+    },
+    {
+        "content": "<p>I think this should suffice to track it down, unless there's multiple bugs</p>",
+        "id": 183826829,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576745834
+    },
+    {
+        "content": "<p>This was run with <code>-Zthreads=88</code>.</p>",
+        "id": 183826924,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576745961
+    },
+    {
+        "content": "<p>Note that since I only have 72 cores, perhaps only 72 were getting to run?</p>",
+        "id": 183826988,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576746005
+    },
+    {
+        "content": "<p>Thanks for digging into this!</p>",
+        "id": 183827000,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576746018
+    },
+    {
+        "content": "<p>I guess cargo would limit to 72, unless you did -j88 too?</p>",
+        "id": 183827456,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576746467
+    },
+    {
+        "content": "<p>72 would make sense then</p>",
+        "id": 183827463,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576746479
+    },
+    {
+        "content": "<p>The problem is that <code>record_accesses</code> calls <code>is_inlining_candidate</code> inside the iterator, which is enumerated inside the lock. That should instead be called when appending the item to <code>neighbors</code> in <code>collect_items_rec</code>.</p>",
+        "id": 183830356,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1576749021
+    },
+    {
+        "content": "<p>That makes sense.</p>",
+        "id": 183855958,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576769661
+    },
+    {
+        "content": "<p>Nice catch!</p>",
+        "id": 183855966,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576769668
+    }
+]

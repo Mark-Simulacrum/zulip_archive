@@ -1,0 +1,146 @@
+[
+    {
+        "content": "<p>In <a href=\"https://github.com/rust-analyzer/rust-analyzer/issues/8434\">https://github.com/rust-analyzer/rust-analyzer/issues/8434</a>, I describe that we have to remove some attributes from custom derive input before calling the proc macro with it. The same applies to attribute macros, for example:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[inline]</span><span class=\"w\"></span>\n<span class=\"cp\">#[proc_macro]</span><span class=\"w\"></span>\n<span class=\"cp\">#[cold]</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">f</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Then <code>proc_macro</code>'s input consists of <code>#[inline] #[cold] fn f() {}</code>, and the attribute macro was removed. This is important because otherwise many proc macros will result in infinite expansion if it's left in place.</p>\n<p>I tried to implement this in <a href=\"https://github.com/rust-analyzer/rust-analyzer/pull/8443\">https://github.com/rust-analyzer/rust-analyzer/pull/8443</a> but later realized that <code>hir_def</code> needs a better way to tell <code>hir_expand</code> which attributes to remove. Specifically, <code>hir_def</code>'s <code>Attr</code> abstraction turns doc comments into attributes, but <code>hir_expand</code> doesn't know that. The solution I'd propose here is:</p>\n<ul>\n<li>move parts of <code>attr.rs</code> from <code>hir_def</code> to <code>hir_expand</code></li>\n<li>move <code>intern.rs</code> to <code>hir_expand</code>, since it's required by <code>attr.rs</code></li>\n<li>use the same abstraction to derive attribute indices and to obtain and remove the corresponding syntax</li>\n</ul>\n<p>Another alternative would be to do attribute stripping entirely in <code>hir_def</code>, but I feel like that shouldn't be its responsibility.</p>\n<p>Any opinions on this?</p>",
+        "id": 237179615,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1620055491
+    },
+    {
+        "content": "<p>IIRC, seem like move parts of <code>attr.rs</code> should be simpler option here</p>",
+        "id": 237180270,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1620055742
+    },
+    {
+        "content": "<p>Hm, why does <code>hir_def</code> handling of doc comments affect macros?</p>\n<p>I think these might be two different things? Macros want to covert <code>///</code> to <code>#[]</code> token trees during lowering. Hir wants to convert <code>///</code> to attributues during analysis. </p>\n<p>I don't think <code>hir</code> necessary needs  to go via <code>#[]</code>, it can convert commets directly to hir::Attrs</p>",
+        "id": 237189886,
+        "sender_full_name": "matklad",
+        "timestamp": 1620059811
+    },
+    {
+        "content": "<p>It makes it hard to find the right AST node to remove, because now \"attribute index 4\" also counts doc comments</p>",
+        "id": 237190368,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1620060054
+    },
+    {
+        "content": "<p>If we want to replicate that logic in <code>hir_expand</code>, copying the relevant parts of <code>attr.rs</code> there seems like the right solution</p>",
+        "id": 237190418,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1620060085
+    },
+    {
+        "content": "<p>Hm, can we pass the right index to <code>hir_expand</code>?</p>",
+        "id": 237194452,
+        "sender_full_name": "matklad",
+        "timestamp": 1620061814
+    },
+    {
+        "content": "<p>or rather, can we avoid indicis alltogether, and pass whole SyntaxNodes?</p>",
+        "id": 237194501,
+        "sender_full_name": "matklad",
+        "timestamp": 1620061836
+    },
+    {
+        "content": "<p>So you'd have something like <code>to_tt(node: ast::Struct, attrs_to_skip: HashSet&lt;ast::Attr&gt;) -&gt; tt::TokenTree</code> ?</p>",
+        "id": 237194565,
+        "sender_full_name": "matklad",
+        "timestamp": 1620061874
+    },
+    {
+        "content": "<p>that would work, but <code>hir_expand</code> computes the macro input, so we'd have to restructure how the queries work</p>",
+        "id": 237196513,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1620062758
+    },
+    {
+        "content": "<p>ouch, right. So we'd need to embedd that into <code>MacroCallId</code>, and that needs ids...</p>",
+        "id": 237197677,
+        "sender_full_name": "matklad",
+        "timestamp": 1620063162
+    },
+    {
+        "content": "<p>I guess, my gut feeling is that it makes sense to keep Attrs in the <code>def</code>, and adjust expand's interface such that it is natural for the expand (so, use ids to refer to syntactic attributes, rather than <code>hir_def::Attr</code> attributes), but I am also not that much familiar with the code here.</p>",
+        "id": 237198323,
+        "sender_full_name": "matklad",
+        "timestamp": 1620063365
+    },
+    {
+        "content": "<p>I suppose we could do that, yeah. Perhaps by making <code>AttrId</code> store whether it's a doc comment or an attribute or something...</p>",
+        "id": 237199087,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1620063651
+    },
+    {
+        "content": "<p>I guess we can avoid <code>AttrId</code>s altogether for this purpose? Like, can we move <code>AttrId</code> to <code>hir_def</code>, and use just <code>ast_attr_position: usize</code> in expand?</p>",
+        "id": 237201117,
+        "sender_full_name": "matklad",
+        "timestamp": 1620064424
+    },
+    {
+        "content": "<p>We don't need to use the same type for two</p>",
+        "id": 237201136,
+        "sender_full_name": "matklad",
+        "timestamp": 1620064432
+    },
+    {
+        "content": "<p>One thing I'm not sure about here is how to derive the AST attribute index from <code>AttrId</code> in the first place (since we are already dealing with semantic <code>Attrs</code> when we need to know the attribute to remove). Doing that also goes back-and-forth between the representations a bit much for my taste.</p>",
+        "id": 238144654,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1620654495
+    },
+    {
+        "content": "<p>I think the easiest way to do this is to encode <code>AttrId</code> as <code>(kind: DocCommentOrRealAttr, syntactic_index: u32)</code>, that makes it trivial</p>",
+        "id": 238149433,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1620656320
+    },
+    {
+        "content": "<p>Only it probably doesn't work right with out-of-line modules, but I'm pretty sure hir_def normally doesn't respect inner attributes in any case</p>",
+        "id": 238149516,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1620656365
+    },
+    {
+        "content": "<p><span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span> my general rule of thumb is that back&amp;forth is generally worth it to keep layering sane (rust-analyzer has a lot of that, lsp_types -&gt; ide::* -&gt; hir::* -&gt; hir_def::*, I think it pays off).</p>\n<p>On the other hand, its not like we worry about layering a lot at <em>this</em> layer , so if you feel like that's too much layering, feel free to poke a hole in lasagna !</p>",
+        "id": 238151438,
+        "sender_full_name": "matklad",
+        "timestamp": 1620657055
+    },
+    {
+        "content": "<p>that layering has benefits though, I don't really see them for <code>AttrId</code> conversion</p>",
+        "id": 238151921,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1620657234
+    },
+    {
+        "content": "<p>this turned out not to work so well because inner attributes require special handling that's done in <code>attr.rs</code></p>",
+        "id": 239651966,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1621541454
+    },
+    {
+        "content": "<p>should we maybe move a version of <code>hir_def::attr::collect_attrs</code> into libsyntax? seems like an adequate place to answer \"which syntactical attributes are on this item?\"</p>",
+        "id": 239681273,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1621558324
+    },
+    {
+        "content": "<p>uhu</p>",
+        "id": 239710597,
+        "sender_full_name": "matklad",
+        "timestamp": 1621583670
+    },
+    {
+        "content": "<p>I think <code>AttrsOwner</code> API should be extended, so it has methonds like</p>\n<div class=\"codehilite\"><pre><span></span><code>\n</code></pre></div>",
+        "id": 239710629,
+        "sender_full_name": "matklad",
+        "timestamp": 1621583692
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>fn inner_attrs_and_doc_comments()\nfn outer_attrs_and_doc_comments()\nfn attrs_and_doc_coments()\n</code></pre></div>",
+        "id": 239710739,
+        "sender_full_name": "matklad",
+        "timestamp": 1621583759
+    }
+]

@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>Hey all! As part of learning about how to actually use the APIs we currently have I'm experimenting with changing <code>bumpalo</code> to use the <code>alloc_wg</code> crate. I think I've been able to figure out how to use some things, so I'll have lots of questions to check that my understanding is right soon. :)</p>",
+        "id": 179644886,
+        "sender_full_name": "Erich Gubler",
+        "timestamp": 1572628439
+    },
+    {
+        "content": "<p>I've been adding the necessary fallible APIs for <code>bumpalo</code>'s forked definitions of <code>String</code> and <code>Vec</code>, but I'm worried I may be reinventing the wheel. Has that already been done?</p>",
+        "id": 179644992,
+        "sender_full_name": "Erich Gubler",
+        "timestamp": 1572628506
+    },
+    {
+        "content": "<p>Currently I have only implemented <code>Box</code> and <code>RawVec</code>. <code>Vec</code> and <code>String</code> would be the logical next step (in this order). Feel free to make PRs to the <code>alloc-wg</code> crate :)</p>",
+        "id": 179646255,
+        "sender_full_name": "Tim Diekmann",
+        "timestamp": 1572629431
+    },
+    {
+        "content": "<p>Regarding the fallible API: I introduced a new Never-type for stable-compatibility (this will be replaced with <code>!</code> asap). As soon as an allocator uses this as the error type, the infallible methods on <code>Box</code> and <code>RawVec</code> can be used. <code>AbortAlloc</code> wraps any <code>BuildAlloc</code> and <code>AllocRef</code> and makes them infallible.</p>",
+        "id": 179646564,
+        "sender_full_name": "Tim Diekmann",
+        "timestamp": 1572629656
+    },
+    {
+        "content": "<p>What's the reason for a separate <code>Never</code> type when <code>core::convert::Infallible</code> is available? Does it predate that, maybe?</p>",
+        "id": 179650724,
+        "sender_full_name": "Erich Gubler",
+        "timestamp": 1572632387
+    },
+    {
+        "content": "<p>It's actually <a href=\"https://timdiekmann.github.io/alloc-wg/alloc_wg/type.Never.html\" target=\"_blank\" title=\"https://timdiekmann.github.io/alloc-wg/alloc_wg/type.Never.html\">an alias</a> ;)</p>",
+        "id": 179665816,
+        "sender_full_name": "Tim Diekmann",
+        "timestamp": 1572642443
+    },
+    {
+        "content": "<p>Okay, one hitch I'm not immediately sure how to resolve, so I'll shelf this for a bit in favor of developing the summary I've talked about: the only part of the pre-allocators API that doesn't seem to match now is actually the interface of <code>Clone</code>. Right now, the only way to get a <code>&lt;B as BuildAlloc&gt;::Ref</code> from a <code>RawVec</code> (the <code>Vec::buf</code> field, in this case) is with the <code>RawVec::alloc_ref()</code> method, but...that takes <code>&amp;mut self</code>. Which obviously can't happen in an implementation of <code>Clone</code> without some form of synchronization.</p>",
+        "id": 179723855,
+        "sender_full_name": "Erich Gubler",
+        "timestamp": 1572738344
+    },
+    {
+        "content": "<p><code>alloc_ref</code> takes a <code>&amp;mut self</code> as <code>build_alloc_ref</code> requires <code>&amp;mut self</code>. This was discussed in the issue about <code>BuildAlloc</code> as well (Can't remember if it was in the issue directly or in the old issue on /rust-lang/rust). </p>\n<p>I have not implemented <code>Clone</code> on <code>RawVec</code> but I think it's very similar to the <code>Box</code>. I implemented <code>Clone</code> on <code>Box</code> in two steps: First I introduced a more generic trait <code>CloneIn</code>. Currently this was only for structuring the code better:</p>\n<div class=\"codehilite\"><pre><span></span>impl&lt;T: Clone, A: AllocRef, B: BuildAllocRef&gt; CloneIn&lt;A&gt; for Box&lt;T, B&gt;\nwhere\n    B::Ref: AllocRef,\n{\n    type Cloned = Box&lt;T, A::BuildAlloc&gt;;\n\n    fn clone_in(&amp;self, a: A) -&gt; Self::Cloned\n    where\n        A: AllocRef&lt;Error = crate::Never&gt;,\n    {\n        Box::new_in(self.as_ref().clone(), a)\n    }\n\n    fn try_clone_in(&amp;self, a: A) -&gt; Result&lt;Self::Cloned, A::Error&gt; {\n        Box::try_new_in(self.as_ref().clone(), a)\n    }\n}\n</pre></div>\n\n\n<p>This provides an interface of creating a clone of the current object in an arbitrary allocator. Keep in mind, that <code>Box</code> (and <code>RawVec</code>) holds the ref-builder, not the <code>Ref</code> itself. An <code>AllocRef</code> (or <code>B::Ref</code>) is typically a ZST, a handle, or a reference, which can be cloned cheaply. With this, <code>Clone</code> is pretty straight forward to implement:</p>\n<div class=\"codehilite\"><pre><span></span>impl&lt;T: Clone, B: BuildAllocRef + Clone&gt; Clone for Box&lt;T, B&gt;\nwhere\n    B::Ref: AllocRef&lt;Error = crate::Never&gt;,\n{\n    fn clone(&amp;self) -&gt; Self {\n        // Clone the builder, this has to be done anyway\n        // Now we don&#39;t have to care about `&amp;mut self` anymore\n        let mut b = self.build_alloc().clone();\n        let old_ptr = self.ptr.cast();\n        let old_layout = NonZeroLayout::for_value(self.as_ref());\n\n        unsafe {\n            // create a new `B::Ref`\n            let a = b.build_alloc_ref(old_ptr, old_layout);\n            // clone it\n            self.clone_in(a)\n        }\n    }\n}\n</pre></div>\n\n\n<p>It's basically reusing the stored builder.</p>\n<p>Does this helps you understanding my thoughts?</p>",
+        "id": 179728952,
+        "sender_full_name": "Tim Diekmann",
+        "timestamp": 1572749454
+    },
+    {
+        "content": "<p>So, you're saying I should implement this for RawVec first?</p>",
+        "id": 179730838,
+        "sender_full_name": "Erich Gubler",
+        "timestamp": 1572753292
+    },
+    {
+        "content": "<p>I meant <code>Vec</code>, sorry, it's late ;)<br>\nOn RawVec it doesn't make much sense as it's not aware of the underlying content.</p>",
+        "id": 179730946,
+        "sender_full_name": "Tim Diekmann",
+        "timestamp": 1572753534
+    },
+    {
+        "content": "<p>Hi..<br>\nI was also trying to use alloc-wg in bumpalo.<br>\nIt may be very silly but I am stuck with implementing the <code>BuildAllocRef</code> and <code>AllocRef</code> (and friends) traits. What do you implement them on? directly on <code>Bump</code> or <code>&amp;mut Bump</code>?</p>\n<div class=\"codehilite\"><pre><span></span>impl BuildAllocRef for Bump {\n    type Ref = &amp;&#39;a mut Bump;  // ??\n\n    unsafe fn build_alloc_ref(\n        &amp;mut self,\n        ptr: NonNull&lt;u8&gt;,\n        layout: Option&lt;NonZeroLayout&gt;,\n    ) -&gt; Self::Ref {\n        self\n    }\n}\n</pre></div>\n\n\n<p>We can't clone <code>Bump</code> around.</p>\n<p>Also, if I do:</p>\n<div class=\"codehilite\"><pre><span></span>impl&lt;&#39;a&gt; BuildAllocRef for &amp;&#39;a mut Bump {\n    type Ref = Self;\n\n    unsafe fn build_alloc_ref(\n        &amp;mut self,\n        ptr: NonNull&lt;u8&gt;,\n        layout: Option&lt;NonZeroLayout&gt;,\n    ) -&gt; Self::Ref {\n        self\n    }\n}\n</pre></div>\n\n\n<p>That also don't work, because returned reference can't outlive the function's borrowed lifetime.</p>",
+        "id": 179742359,
+        "sender_full_name": "Gurwinder Singh",
+        "timestamp": 1572778011
+    },
+    {
+        "content": "<p>I looked around and GAT seems to be the solution. Is it possible to implement this without GATs?</p>",
+        "id": 179742521,
+        "sender_full_name": "Gurwinder Singh",
+        "timestamp": 1572778392
+    },
+    {
+        "content": "<p>They're supposed to be on references/handles to <code>Bump</code>. With the current API, we'll have to use a mutable reference, but I think we need to add another API for synchronized allocator access too.</p>",
+        "id": 180044389,
+        "sender_full_name": "Erich Gubler",
+        "timestamp": 1573054817
+    },
+    {
+        "content": "<p>Right..  I tried with Bump but cant get it to work</p>",
+        "id": 180052556,
+        "sender_full_name": "Gurwinder Singh",
+        "timestamp": 1573059301
+    },
+    {
+        "content": "<p>Global/System ones were simple as they are empty structs that forward calls to global alloc</p>",
+        "id": 180052658,
+        "sender_full_name": "Gurwinder Singh",
+        "timestamp": 1573059356
+    },
+    {
+        "content": "<p>For local allocators, borrow checkers gets in thw way</p>",
+        "id": 180052725,
+        "sender_full_name": "Gurwinder Singh",
+        "timestamp": 1573059391
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"219283\">@Scott J Maddox</span> If I remembered correctly you had an Idea here when proposing the <code>BuildAlloc</code> approach regarding a bump allocator?</p>",
+        "id": 180052763,
+        "sender_full_name": "Tim Diekmann",
+        "timestamp": 1573059418
+    },
+    {
+        "content": "<p>I feel like we might want to discuss having a <code>&amp;self</code> variant for allocators that have synchronization. Using <code>&amp;mut self</code> will be nice when we want unsynchronized access to allocator state, but I think many (if not most) allocators will have a synchronization mechanism of some sort to be thread-safe.</p>",
+        "id": 180053857,
+        "sender_full_name": "Erich Gubler",
+        "timestamp": 1573059983
+    }
+]

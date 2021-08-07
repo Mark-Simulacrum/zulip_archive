@@ -1,0 +1,498 @@
+<html>
+<head><meta charset="utf-8"><title>FFI structs ending in variable sized arrays. · t-lang/wg-unsafe-code-guidelines · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/index.html">t-lang/wg-unsafe-code-guidelines</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html">FFI structs ending in variable sized arrays.</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="197185629"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197185629" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197185629">(May 11 2020 at 18:28)</a>:</h4>
+<p>Suppose I have a struct defined like so:</p>
+<div class="codehilite"><pre><span></span><code><span class="cp">#[repr(C)]</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Foo</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">length</span>: <span class="kt">u32</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">data</span>: <span class="p">[</span><span class="kt">u8</span><span class="p">;</span><span class="w"> </span><span class="mi">1</span><span class="p">],</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+<p>I now allocate some memory and pass it to a function which fills it in or maybe it allocates some memory for me and returns a raw pointer that I return to another function later to free.<br>
+Either way I now have a <code>foo: *mut Foo</code> where the length of <code>foo.data</code> is determined by <code>foo.length</code>. However I feel like doing <code>slice::from_raw_parts(foo.data.as_ptr(), foo.length as usize)</code> is not sound as I'm using a pointer to a smaller data to access a larger chunk of data. Is this sound, and if not what is the correct way to get a slice to the full data?</p>
+
+
+
+<a name="197190955"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197190955" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197190955">(May 11 2020 at 19:12)</a>:</h4>
+<p>Yep doing that is probably unsound.<br>
+Why not do this:?</p>
+<div class="codehilite"><pre><span></span><code>#[repr(C)] struct Foo {
+    length: u32,
+    data: *const u8,
+}
+</code></pre></div>
+
+
+
+<a name="197191414"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197191414" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197191414">(May 11 2020 at 19:16)</a>:</h4>
+<p>FWIW bindgen generates the following:</p>
+<div class="codehilite"><pre><span></span><code>#[repr(C)]
+pub struct __IncompleteArrayField&lt;T&gt;(PhantomData&lt;T&gt;, [T; 0]);
+#[repr(C)]
+pub struct my_struct {
+    pub size: size_t,
+    pub data: __IncompleteArrayField&lt;u8&gt;,
+}
+
+with this impl:
+impl&lt;T&gt; __IncompleteArrayField&lt;T&gt; {
+    #[inline]
+    pub const fn new() -&gt; Self {
+        __IncompleteArrayField(PhantomData, [])
+    }
+    #[inline]
+    pub fn as_ptr(&amp;self) -&gt; *const T {
+        self as *const _ as *const T
+    }
+    #[inline]
+    pub fn as_mut_ptr(&amp;mut self) -&gt; *mut T {
+        self as *mut _ as *mut T
+    }
+    #[inline]
+    pub unsafe fn as_slice(&amp;self, len: usize) -&gt; &amp;[T] {
+        slice::from_raw_parts(self.as_ptr(), len)
+    }
+    #[inline]
+    pub unsafe fn as_mut_slice(&amp;mut self, len: usize) -&gt; &amp;mut [T] {
+        slice::from_raw_parts_mut(self.as_mut_ptr(), len)
+    }
+}
+</code></pre></div>
+
+
+<p>Which I'm also not sure is actually sound</p>
+<p>EDIT: Miri seems to <em>not</em> be fine with this <a href="https://play.rust-lang.org/?edition=2018&amp;gist=b420b8310c3b108d8e6c1ecd64930fdd">https://play.rust-lang.org/?edition=2018&amp;gist=b420b8310c3b108d8e6c1ecd64930fdd</a></p>
+
+
+
+<a name="197193705"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197193705" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197193705">(May 11 2020 at 19:34)</a>:</h4>
+<p>Afaik it is fine to access the complete allocation of a pointer even if it is outside of <code>ptr..(ptr + size_of)</code>. Aliasing rules still apply though</p>
+
+
+
+<a name="197194297"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197194297" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197194297">(May 11 2020 at 19:39)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="216206">lcnr</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/197193705">said</a>:</p>
+<blockquote>
+<p>Afaik it is fine to access the complete allocation of a pointer even if it is outside of <code>ptr..(ptr + size_of)</code>. Aliasing rules still apply though</p>
+</blockquote>
+<p>I really remember a rule saying that <code>(&amp;arr[0] as *const _) != (&amp;arr as * const _)</code><br>
+See miri output here: <a href="https://play.rust-lang.org/?edition=2018&amp;gist=8e76b0abf50dcb6aeca5a662fa310d4c">https://play.rust-lang.org/?edition=2018&amp;gist=8e76b0abf50dcb6aeca5a662fa310d4c</a></p>
+
+
+
+<a name="197195175"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197195175" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197195175">(May 11 2020 at 19:46)</a>:</h4>
+<p>Miri is also not fine with the first example:<br>
+<a href="https://play.rust-lang.org/?gist=fc85ea4dc06a472c1ba8092c0765dcdf">https://play.rust-lang.org/?gist=fc85ea4dc06a472c1ba8092c0765dcdf</a></p>
+
+
+
+<a name="197195472"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197195472" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197195472">(May 11 2020 at 19:48)</a>:</h4>
+<p><span aria-label="thinking" class="emoji emoji-1f914" role="img" title="thinking">:thinking:</span></p>
+<p>cc <span class="user-mention" data-user-id="120791">@RalfJ</span>, who knows more about this stuff.</p>
+
+
+
+<a name="197202424"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197202424" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197202424">(May 11 2020 at 20:45)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="249222">Elichai Turkel</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/197190955">said</a>:</p>
+<blockquote>
+<p>Yep doing that is probably unsound.<br>
+Why not do this:?</p>
+<div class="codehilite"><pre><span></span><code>#[repr(C)] struct Foo {
+    length: u32,
+    data: *const u8,
+}
+</code></pre></div>
+
+
+</blockquote>
+<p>I cannot change the layout of <code>Foo</code> as I am working with system APIs.</p>
+
+
+
+<a name="197203306"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197203306" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197203306">(May 11 2020 at 20:53)</a>:</h4>
+<p>Could you point at the exact API? I assumed it's a C API of the following:</p>
+<div class="codehilite"><pre><span></span><code>struct my_struct {
+   unsigned long size;
+   unsigned char data[];
+};
+</code></pre></div>
+
+
+
+<a name="197203472"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197203472" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197203472">(May 11 2020 at 20:54)</a>:</h4>
+<p>There's a bajillion structs in winapi that end in variable sized arrays like for example:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">STRUCT</span><span class="o">!</span><span class="p">{</span><span class="k">struct</span> <span class="nc">USB_NODE_CONNECTION_DRIVERKEY_NAME</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">ConnectionIndex</span>: <span class="nc">ULONG</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">ActualLength</span>: <span class="nc">ULONG</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">DriverKeyName</span>: <span class="p">[</span><span class="n">WCHAR</span><span class="p">;</span><span class="w"> </span><span class="mi">1</span><span class="p">],</span><span class="w"></span>
+<span class="p">}}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="197203937"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197203937" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197203937">(May 11 2020 at 20:58)</a>:</h4>
+<p>I just need some sort of reasonably ergonomic solution that can get an official stamp of approval.</p>
+
+
+
+<a name="197204052"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197204052" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197204052">(May 11 2020 at 20:59)</a>:</h4>
+<p>Let's wait for <span class="user-mention" data-user-id="120791">@RalfJ</span> he'll have the best answers :)</p>
+
+
+
+<a name="197204472"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197204472" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake Goulding <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197204472">(May 11 2020 at 21:03)</a>:</h4>
+<p>FWIW, I've heard this called "flexible array member", not "variable sized array"</p>
+
+
+
+<a name="197204633"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197204633" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake Goulding <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197204633">(May 11 2020 at 21:04)</a>:</h4>
+<p>See also <a href="https://doc.rust-lang.org/nightly/unstable-book/language-features/unsized-locals.html?highlight=unsized#variable-length-arrays">https://doc.rust-lang.org/nightly/unstable-book/language-features/unsized-locals.html?highlight=unsized#variable-length-arrays</a></p>
+
+
+
+<a name="197204886"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197204886" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197204886">(May 11 2020 at 21:07)</a>:</h4>
+<p>I'm finding it a little hard to believe that you couldn't have a struct like this and then go from <code>&amp;T</code> to <code>&amp;T_slice_data</code> just because the slice data isn't all "in" the memory span of the T. After all, the data of a Vec's slice isn't "in" the memory span of the Vec itself.</p>
+
+
+
+<a name="197210753"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197210753" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197210753">(May 11 2020 at 22:07)</a>:</h4>
+<p>I created this alternative which seems to pass miri. <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=34c4e0107736b167d99bee081e468682">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=34c4e0107736b167d99bee081e468682</a></p>
+
+
+
+<a name="197242003"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197242003" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197242003">(May 12 2020 at 07:42)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="224471">Lokathor</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/197204886">said</a>:</p>
+<blockquote>
+<p>I'm finding it a little hard to believe that you couldn't have a struct like this and then go from <code>&amp;T</code> to <code>&amp;T_slice_data</code> just because the slice data isn't all "in" the memory span of the T. After all, the data of a Vec's slice isn't "in" the memory span of the Vec itself.</p>
+</blockquote>
+<p>The problem is taking a reference to an array, the moment you do that that reference is only valid for that array, and not for out of bounds, this is generalized also for single elements in the arrays.<br>
+in Vec we never use a array/slice to generate pointers, we keep a raw pointer from the allocator that is valid for the whole allocation.</p>
+
+
+
+<a name="197242290"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197242290" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197242290">(May 12 2020 at 07:46)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125267">Peter Rabbit</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/197210753">said</a>:</p>
+<blockquote>
+<p>I created this alternative which seems to pass miri. <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=34c4e0107736b167d99bee081e468682">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=34c4e0107736b167d99bee081e468682</a></p>
+</blockquote>
+<p>That's because you actually created a <code>base_ptr</code> that points to the full array</p>
+
+
+
+<a name="197242863"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197242863" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197242863">(May 12 2020 at 07:53)</a>:</h4>
+<p>Ah, yeah, i should have posted a follow up to that. Yandros explained in Discord that references are to blame. If you were to do this purely with pointers it would work fine.</p>
+
+
+
+<a name="197243013"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197243013" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197243013">(May 12 2020 at 07:55)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="224471">Lokathor</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/197242863">said</a>:</p>
+<blockquote>
+<p>Ah, yeah, i should have posted a follow up to that. Yandros explained in Discord that references are to blame. If you were to do this purely with pointers it would work fine.</p>
+</blockquote>
+<p>Yep, that's why I suggested to replace <code>data: [u8; 1]</code> with <code>data: *const u8</code></p>
+
+
+
+<a name="197311874"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197311874" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197311874">(May 12 2020 at 17:42)</a>:</h4>
+<p>Wouldn't that require a C level api change as well?</p>
+
+
+
+<a name="197314843"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197314843" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197314843">(May 12 2020 at 18:03)</a>:</h4>
+<p>So I modified my example that passes miri so that it does the original naive from_raw_parts directly with the array pointer and none of the offset manipulation, and it still passes miri?!</p>
+<p><a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=4524cb616cf9c4d57689693e372b256e">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=4524cb616cf9c4d57689693e372b256e</a></p>
+
+
+
+<a name="197324200"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197324200" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197324200">(May 12 2020 at 19:13)</a>:</h4>
+<p><span class="user-mention" data-user-id="257758">@Connor Horman</span> yes, and in this case that's not an allowed solution because the struct is defined in the windows SDK. All we get to do is decide how best to interact with it on the rust side.</p>
+
+
+
+<a name="197329136"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197329136" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197329136">(May 12 2020 at 19:51)</a>:</h4>
+<p>Indeed when you have a <em>reference</em> it and all its "descendants" may only be used to access <code>size_of_val(r)</code> many bytes (Cc <a href="https://github.com/rust-lang/unsafe-code-guidelines/issues/134">https://github.com/rust-lang/unsafe-code-guidelines/issues/134</a>)</p>
+
+
+
+<a name="197329293"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197329293" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197329293">(May 12 2020 at 19:52)</a>:</h4>
+<p>so for the original question <span class="user-mention" data-user-id="125267">@Peter Rabbit</span> , you'd want to go from a <code>*mut Foo</code> to a <code>*mut u8</code> (to the <code>data</code> field) without intermediate references. the best but unstable way to do that is <code>&amp;raw</code>; the only table way I think is manual offset computations.</p>
+
+
+
+<a name="197329372"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197329372" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197329372">(May 12 2020 at 19:53)</a>:</h4>
+<p>your other variant is probably passing in Miri because Miri is currently not trying to tell multiple raw ptrs to the same data apart -- but that is a Miri deficiency, we'll likely have to "close that hole" if we want to actually match what LLVM does</p>
+
+
+
+<a name="197337696"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197337696" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197337696">(May 12 2020 at 20:52)</a>:</h4>
+<p><span class="user-mention" data-user-id="120791">@RalfJ</span> So just to clarify and be absolutely certain...</p>
+<p>This is sound? <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a0faca71829d3af39da4910ac9a11e30">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a0faca71829d3af39da4910ac9a11e30</a></p>
+<p>And this is unsound? <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=4524cb616cf9c4d57689693e372b256e">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=4524cb616cf9c4d57689693e372b256e</a></p>
+
+
+
+<a name="197340269"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197340269" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197340269">(May 12 2020 at 21:13)</a>:</h4>
+<p>ahahahaha, this even gets hit in the backtrace crate!<br>
+<a href="https://github.com/rust-lang/backtrace-rs/blob/16682c76eb25df517e2cc220e56baf4f8a616f72/src/symbolize/dbghelp.rs#L165">https://github.com/rust-lang/backtrace-rs/blob/16682c76eb25df517e2cc220e56baf4f8a616f72/src/symbolize/dbghelp.rs#L165</a></p>
+
+
+
+<a name="197382721"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197382721" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197382721">(May 13 2020 at 08:40)</a>:</h4>
+<blockquote>
+<p>This is sound? <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a0faca71829d3af39da4910ac9a11e30">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a0faca71829d3af39da4910ac9a11e30</a></p>
+</blockquote>
+<p>the shared reference version looks good but the mutable reference version is suspicious... I am actually surprised Miri doesn't complain there. You are creating an <code>&amp;mut [T]</code> return value which overlaps with the <code>&amp;mut self</code>... oh, <code>Self</code> is a ZST, hence no overlap! Okay this is subtle.<br>
+So yes this seems right but please add a comment saying it relies on <code>FlexibleArray</code> being a ZST.</p>
+
+
+
+<a name="197382756"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197382756" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197382756">(May 13 2020 at 08:40)</a>:</h4>
+<blockquote>
+<p>And this is unsound? <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=4524cb616cf9c4d57689693e372b256e">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=4524cb616cf9c4d57689693e372b256e</a></p>
+</blockquote>
+<p>Yes, for <a href="https://github.com/rust-lang/unsafe-code-guidelines/issues/134">this reason</a>.</p>
+
+
+
+<a name="197382773"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197382773" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197382773">(May 13 2020 at 08:41)</a>:</h4>
+<p><span class="user-mention" data-user-id="125267">@Peter Rabbit</span> I should add the usual disclaimer that Stacked Borrows is an experiment and not RFC'd in any way.</p>
+
+
+
+<a name="197382796"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197382796" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197382796">(May 13 2020 at 08:41)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125267">Peter Rabbit</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/197340269">said</a>:</p>
+<blockquote>
+<p>ahahahaha, this even gets hit in the backtrace crate!<br>
+<a href="https://github.com/rust-lang/backtrace-rs/blob/16682c76eb25df517e2cc220e56baf4f8a616f72/src/symbolize/dbghelp.rs#L165">https://github.com/rust-lang/backtrace-rs/blob/16682c76eb25df517e2cc220e56baf4f8a616f72/src/symbolize/dbghelp.rs#L165</a></p>
+</blockquote>
+<p>nice catch!</p>
+
+
+
+<a name="197508407"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197508407" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197508407">(May 14 2020 at 05:54)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116155">Jake Goulding</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/197204472">said</a>:</p>
+<blockquote>
+<p>FWIW, I've heard this called "flexible array member", not "variable sized array"</p>
+</blockquote>
+<p>Windows calls them variable sized arrays. To quote an official header.</p>
+<div class="codehilite"><pre><span></span><code><span class="c1">// For variable size fields we use byte array, defined with zero length in structure template. Length of the field is stored as a separate field.</span>
+<span class="c1">// No more than one variable size field is allowed in one structure and it is always placed last.</span>
+</code></pre></div>
+
+
+
+<a name="197590677"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197590677" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rpjohnst <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197590677">(May 14 2020 at 17:34)</a>:</h4>
+<p>That comment says "variable size field," though I think what jake was getting at is that the C standard has something entirely unrelated called "variable length arrays" that people like to avoid confusion with, by using the C standard term "flexible array members"</p>
+<p>(flexible array member is different from what the windows headers are doing, though, so even that is not 100% accurate)</p>
+
+
+
+<a name="197600320"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197600320" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake Goulding <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197600320">(May 14 2020 at 18:45)</a>:</h4>
+<p>Yeah, the Windows API predates FAMs, which are expressed as <code>[]</code> instead of Windows' <code>[1]</code>. From my understanding they are the same though.</p>
+
+
+
+<a name="197785158"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/197785158" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#197785158">(May 16 2020 at 08:53)</a>:</h4>
+<p>So if Windows uses <code>[1]</code> then  the <code>&amp;mut</code> version of what <span class="user-mention" data-user-id="125267">@Peter Rabbit</span> posted above likely doesn't work -- that example code used <code>[0]</code> though</p>
+
+
+
+<a name="199543594"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/199543594" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#199543594">(Jun 02 2020 at 19:49)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/197785158">said</a>:</p>
+<blockquote>
+<p>So if Windows uses <code>[1]</code> then  the <code>&amp;mut</code> version of what <span class="user-mention silent" data-user-id="125267">Peter Rabbit</span> posted above likely doesn't work -- that example code used <code>[0]</code> though</p>
+</blockquote>
+<p>Uhhhh, according to <a href="https://docs.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdigetdeviceinterfacedetailw">one MSDN article</a></p>
+<blockquote>
+<p>If this parameter is specified, the caller must set DeviceInterfaceDetailData.cbSize to sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA) before calling this function. The cbSize member always contains the size of the fixed part of the data structure, not a size reflecting the variable-length string at the end.</p>
+</blockquote>
+<p>So this means that if the array uses <code>[T; 0]</code> instead of <code>[T; 1]</code>, it changes the result of <code>size_of()</code> which in turn breaks usage of Windows API functions that require setting the <code>cbSize</code> member in this manner. What is your recommendation?</p>
+
+
+
+<a name="199550445"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/199550445" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#199550445">(Jun 02 2020 at 20:41)</a>:</h4>
+<p>For what it's worth, I've been using a new type struct that wraps a <code>*mut u8</code>. I use the "real" Win32 struct only to calculate the right offsets. The Win32 struct <a href="https://gist.github.com/ChrisDenton/b7105ce946fe4388298cd144b4d06d00">looks something like this</a>. I cleaned up the types a bit so as not to scare off non-Windows users.</p>
+
+
+
+<a name="199560045"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/199560045" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#199560045">(Jun 02 2020 at 22:07)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="260325">Chris Denton</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/199550445">said</a>:</p>
+<blockquote>
+<p>For what it's worth, I've been using a new type struct that wraps a <code>*mut u8</code>. I use the "real" Win32 struct only to calculate the right offsets. The Win32 struct <a href="https://gist.github.com/ChrisDenton/b7105ce946fe4388298cd144b4d06d00">looks something like this</a>. I cleaned up the types a bit so as not to scare off non-Windows users.</p>
+</blockquote>
+<p>That is horrifying and also impractical on a large scale.</p>
+
+
+
+<a name="199560804"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/199560804" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#199560804">(Jun 02 2020 at 22:18)</a>:</h4>
+<p>Tell me about it! I could use the Win32 struct for the other fields but, as far as I understand, the last one has to come from an actual pointer and that pointer can't come via a slice at any point. I mean, unless I only wanted one character...</p>
+
+
+
+<a name="200514991"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/200514991" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#200514991">(Jun 11 2020 at 08:01)</a>:</h4>
+<p><span class="user-mention" data-user-id="125267">@Peter Rabbit</span> I don't know about how <code>size_of</code> is relevant here. My recommendation is to not create mutable references unless you actually want to express uniqueness.</p>
+
+
+
+<a name="200515289"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/200515289" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Peter Rabbit <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#200515289">(Jun 11 2020 at 08:05)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/200514991">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="125267">Peter Rabbit</span> I don't know about how <code>size_of</code> is relevant here. My recommendation is to not create mutable references unless you actually want to express uniqueness.</p>
+</blockquote>
+<p>I need the variable sized array to have a size of 1 so that doing <code>size_of</code> on the struct gives the size that Windows expects. This makes my previous <code>FlexibleArray</code> solution not work in the mutable case, because you said it was only not UB because it was a ZST and didn't overlap with the mutable slice it returned.</p>
+
+
+
+<a name="200515391"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/200515391" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#200515391">(Jun 11 2020 at 08:06)</a>:</h4>
+<p>for ZST you convinced me the code is right, for non-ZST I am not sure. Miri doesn't complain but... I really need to implement the more careful tracking of raw ptrs at some point.</p>
+
+
+
+<a name="200515449"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/200515449" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#200515449">(Jun 11 2020 at 08:07)</a>:</h4>
+<p>So what should definitely work is to avoid the <code>&amp;mut self</code>:</p>
+<div class="codehilite"><pre><span></span><code><span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span> <span class="nf">as_slice_mut</span><span class="o">&lt;</span><span class="n">U</span><span class="o">&gt;</span><span class="p">(</span><span class="n">foo_ptr</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Foo</span><span class="p">,</span><span class="w"> </span><span class="n">base_ptr</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">U</span><span class="p">,</span><span class="w"> </span><span class="n">length</span>: <span class="kt">usize</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="n">T</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">foo_ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">isize</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">base_ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">isize</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">array_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">base_ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">).</span><span class="n">offset</span><span class="p">(</span><span class="n">offset</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">T</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="n">slice</span>::<span class="n">from_raw_parts_mut</span><span class="p">(</span><span class="n">array_ptr</span><span class="p">,</span><span class="w"> </span><span class="n">length</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="200515557"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/200515557" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#200515557">(Jun 11 2020 at 08:08)</a>:</h4>
+<p>now, if we had <code>raw_ref</code>, you could get that <code>foo_ptr</code> without creating an intermediate mutable reference and all would be good, but that's still unstable unfortunately... however, since <code>foo_ptr</code> is not used after <code>slice::from_raw_parts_mut</code>, I think calling this like this is actually okay:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">raw_memory</span>: <span class="p">[</span><span class="kt">u32</span><span class="p">;</span><span class="w"> </span><span class="mi">8</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="mi">6</span><span class="p">,</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">99</span><span class="p">];</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">foo</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Foo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">raw_memory</span><span class="p">.</span><span class="n">as_mut_ptr</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Foo</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">slice_mut</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Foo</span>::<span class="n">as_slice_mut</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">foo</span><span class="p">).</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">foo</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">foo</span><span class="p">).</span><span class="n">length</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">slice_mut</span><span class="p">[</span><span class="mi">5</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">200</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">slice</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">foo</span><span class="p">).</span><span class="n">data</span><span class="p">.</span><span class="n">as_slice</span><span class="p">(</span><span class="n">foo</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">foo</span><span class="p">).</span><span class="n">length</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">slice</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="200515586"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/200515586" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#200515586">(Jun 11 2020 at 08:09)</a>:</h4>
+<p>but the order of operations is crucial here</p>
+
+
+
+<a name="200515612"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/200515612" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#200515612">(Jun 11 2020 at 08:09)</a>:</h4>
+<p>the moment you use <code>foo</code> aka <code>base_ptr</code> again, which is an ancestor of <code>foo_ptr</code> with an intermediate mutable reference, you should stop using <code>foo_ptr</code></p>
+
+
+
+<a name="200515683"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/200515683" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#200515683">(Jun 11 2020 at 08:10)</a>:</h4>
+<p>"use" here fortunately does not include address arithmetic though :) but it does include deref <code>*</code> (including <code>&amp;*x</code>)</p>
+
+
+
+<a name="239813269"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/239813269" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> riking <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#239813269">(May 21 2021 at 21:09)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="249222">Elichai Turkel</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E/near/197190955">said</a>:</p>
+<blockquote>
+<p>Yep doing that is probably unsound.<br>
+Why not do this:?</p>
+<p><div class="codehilite"><pre><span></span><code>#[repr(C)] struct Foo {
+    length: u32,
+    data: *const u8,
+}
+</code></pre></div><br>
+</p>
+</blockquote>
+<p>That's definitely a wrong Rust representation of the type, the C type is affirmatively unsized and does <em>not</em> contain a pointer in that position. You need something like this:</p>
+<div class="codehilite"><pre><span></span><code>#[repr(C)] struct Foo {
+  length: u32,
+  data: [u8]
+}
+</code></pre></div>
+
+
+
+<a name="239825430"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/239825430" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thom Chiovoloni <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#239825430">(May 21 2021 at 23:26)</a>:</h4>
+<p>yah this is basically exactly what i was talking about with <a href="https://github.com/rust-lang/unsafe-code-guidelines/issues/256">https://github.com/rust-lang/unsafe-code-guidelines/issues/256</a></p>
+
+
+
+<a name="239833220"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/239833220" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> riking <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#239833220">(May 22 2021 at 01:29)</a>:</h4>
+<p>and "single DST at the end" seems like it's enough for _most_ of what C programmers are used to, the exception being allocator headers</p>
+
+
+
+<a name="239833388"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/239833388" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> riking <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#239833388">(May 22 2021 at 01:31)</a>:</h4>
+<p>though (1) i hope we all know by now that allocator headers are a disaster for any attempt at post-compromise memory <del>safety</del> mitigations and (2) a Rust allocator, which always gets sized frees, could use a suffix data structure</p>
+
+
+
+<a name="239870756"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI%20structs%20ending%20in%20variable%20sized%20arrays./near/239870756" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/FFI.20structs.20ending.20in.20variable.20sized.20arrays.2E.html#239870756">(May 22 2021 at 12:47)</a>:</h4>
+<p>FWIW, I wrote a a while ago a detailed post about the different approaches to tackle this pattern (based on whether one wants inline/stack allocations or a heap allocation): <a href="https://users.rust-lang.org/t/rust-wrapper-around-c-flexible-array/52605/2?u=yandros">https://users.rust-lang.org/t/rust-wrapper-around-c-flexible-array/52605/2?u=yandros</a></p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

@@ -1,0 +1,596 @@
+[
+    {
+        "content": "<p>A new proposal has been announced: <a href=\"https://github.com/rust-lang/lang-team/issues/86\">MCP: Allowing the compiler to eagerly drop values #86</a>. It will be announced at the next meeting to try and draw attention to it, but usually MCPs are not discussed during triage meetings. If you think this would benefit from discussion amongst the team, consider proposing a design meeting.</p>",
+        "id": 228761207,
+        "sender_full_name": "triagebot",
+        "timestamp": 1614859988
+    },
+    {
+        "content": "<p>I believe this is the correct place for technical discussion. If not, it would be nice if someone could point me to the correct place, thank you in advance.</p>\n<p>One thing about this, I actually explored this informally when I was looking into the rules of borrow checking somewhere on IRLO. What I determined is that having non-trivial drops occur after last use and not end of scope may be suprising to those coming from other languages like C++ (which may be a footgun when those authors write unsafe code).<br>\nHowever, more than just being suprising, this would be a breaking change. In my <a href=\"https://github.com/chorman0773/fused-lock-rs\">fused-lock library</a>, I maintain a backing RwLock&lt;()&gt; (specifically the one from parking_lot, but it's applicable to the standard library RwLock as well). At <a href=\"https://github.com/chorman0773/fused-lock-rs/blob/dba4ab707aacaf4360a9db5d2d13f17b649f6a47/src/lib.rs#L81\">this line</a>, I acquire the guard, and then completely ignore it. This makes the following <code>try_write</code> sound, and specifically sound in conjunction with <code>try_read</code> (which is the point of fused-lock, in that it allows unguarded read access once locked). If the compiler is permitted to drop the unused guard in <code>lock</code>, then the guard acquired by try_write will not protect the lock state transition to read-only, so the entire type becomes unsound (thus breaking the code, which is, or should be, sound).</p>",
+        "id": 228763846,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1614861275
+    },
+    {
+        "content": "<p>Yes, I'm well aware of this. That's why it would be opt-in at best without an edition change, and could be opt-out in potentially in a future edition (probably only after 2021) to work around the backwards compatibility issues.</p>",
+        "id": 228764611,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1614861609
+    },
+    {
+        "content": "<p>Indeed, though my point of it being potentially surprising stands. I know that when I started Rust from C++ I expected drop to work much like destructors did in C++ (and that's still an expectation I hold). On top of unsafe code, it would also, notably, affect scope guards that are intended to defer an action until the end of scope.</p>",
+        "id": 228765752,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1614862105
+    },
+    {
+        "content": "<p>hmm. even with something like <code>EagerDrop</code>, it sounds like you want something where the dynamic semantics of when a drop happens would depend on the results of lifetime inference. Is that correct?</p>",
+        "id": 228815535,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1614879100
+    },
+    {
+        "content": "<p>I could imagine this working if we had a mechanism for saying \"this is a scope guard, require an explicit drop at the point you want to drop it\". Together with convenience methods that take a closure and automatically call drop after the closure.</p>",
+        "id": 228826450,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614882992
+    },
+    {
+        "content": "<p>People have expressed a desire for the former even without this.</p>",
+        "id": 228826463,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614883000
+    },
+    {
+        "content": "<p>I think it would be good for the proposal here to have a mention of why this wasn't done with NLL in the first place, and why people might <em>want</em> the end-of-block drop in some cases.  For example, if I'm using a file lock I might <em>want</em> to keep it over the await.  It's not clear that \"the compiler should know to drop [it] before\" is absolutely true.</p>\n<p>I do think there's an interesting difference between like a \"meaningful drop\" and a \"it's just boring cleanup drop\", but I don't know how to make that concrete or how to decide what it means in recursive situations.  (Like the difference between <code>needs_drop::&lt;T&gt;</code> and <code>T: Drop</code> is a bit weird.)</p>",
+        "id": 228827997,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1614883575
+    },
+    {
+        "content": "<p>Or, at a different level, <code>Drop</code> being a trait at all is kinda weird, since it doesn't behave like any other trait out there.</p>",
+        "id": 228828357,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1614883698
+    },
+    {
+        "content": "<p>The \"meaningful drop\" case may want eager drop as well, rather than end-of-block drop; it depends on the \"meaningful\" semantics.</p>",
+        "id": 228828894,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614883920
+    },
+    {
+        "content": "<p>For instance, dropping a file closes it. That can be good to do eagerly.</p>",
+        "id": 228828962,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614883934
+    },
+    {
+        "content": "<p>And important for correctness, even, in the case of a pipe (drop it when you're done with it, so the other end produces EOF).</p>",
+        "id": 228829059,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614883975
+    },
+    {
+        "content": "<p>(I mention that case as a counterpoint to the Mutex case. Either eager or end-of-block may be what someone may need.)</p>",
+        "id": 228829182,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614884016
+    },
+    {
+        "content": "<p>yet sometimes a pipe can be an interprocess \"lock\", where that EOF signals release</p>",
+        "id": 228842410,
+        "sender_full_name": "cuviper",
+        "timestamp": 1614888863
+    },
+    {
+        "content": "<p>I'm more thinking of the deadlock case, where if you don't close the pipe, another process will block indefinitely and you'll block indefinitely if you're waiting on them.</p>",
+        "id": 228847017,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614890607
+    },
+    {
+        "content": "<p>Spawn process with pipes as stdin and stdout, write to the stdin pipe, forget to close the stdin pipe, block waiting on the stdout pipe, other process is blocked on the stdin pipe before it writes to stdout, deadlock.</p>",
+        "id": 228847171,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614890670
+    },
+    {
+        "content": "<p>personally I really don't like the idea of silent changes in behavior</p>",
+        "id": 228847187,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614890678
+    },
+    {
+        "content": "<p>especially when it's something like drop where it's very hard to notice until it goes wrong</p>",
+        "id": 228847215,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614890690
+    },
+    {
+        "content": "<p>sure, my point is that the intention could still go either way -- we don't know just from the type, being a pipe</p>",
+        "id": 228847229,
+        "sender_full_name": "cuviper",
+        "timestamp": 1614890699
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"232545\">Joshua Nelson</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/228847187\">said</a>:</p>\n<blockquote>\n<p>personally I really don't like the idea of silent changes in behavior</p>\n</blockquote>\n<p>I don't think we should have silent changes, but I think it might be reasonable to have very <em>loud</em> changes phased in over a long period.</p>",
+        "id": 228847315,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614890727
+    },
+    {
+        "content": "<p>Yes, clearly if we want to make changes here they'll need to be very careful and clearly announced and linted and whatever</p>",
+        "id": 228853579,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1614893307
+    },
+    {
+        "content": "<p>just in my mind, aligning with the CFG is more intuitive for destructors than aligning with lexical scopes, similar to the NLL changes</p>",
+        "id": 228853637,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1614893338
+    },
+    {
+        "content": "<p>so that, if you want to keep something alive, you might insert an explicit <code>drop(lock)</code> call</p>",
+        "id": 228853692,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1614893363
+    },
+    {
+        "content": "<p>I do think there's something to be said for the <code>let guard = foo; bar; drop(guard)</code> pattern over the <code>let _guard = foo; bar;</code> pattern, especially since <code>let _ = foo</code> is such a bad idea.</p>\n<p>The big question to me is whether there's a way to do that transition in a way that's not <em>incredibly</em> annoying.</p>",
+        "id": 228854183,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1614893567
+    },
+    {
+        "content": "<p>My current idea would involve something like an <code>EagerDrop</code> marker trait that can be implemented, then we start linting things that aren't <code>EagerDrop</code> some time in advance of the 2024 edition, then in 2024 edition we make <code>EagerDrop</code> the default</p>",
+        "id": 228856010,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1614894340
+    },
+    {
+        "content": "<p>(this is actually Niko's idea)</p>",
+        "id": 228856109,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1614894371
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125270\">scottmcm</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/228854183\">said</a>:</p>\n<blockquote>\n<p>I do think there's something to be said for the <code>let guard = foo; bar; drop(guard)</code> pattern over the <code>let _guard = foo; bar;</code> pattern, especially since <code>let _ = foo</code> is such a bad idea.</p>\n<p>The big question to me is whether there's a way to do that transition in a way that's not <em>incredibly</em> annoying.</p>\n</blockquote>\n<p>Personally, most of the time, I'd like to see that written as <code>foo.something(|| bar);</code>.</p>",
+        "id": 228870158,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614901012
+    },
+    {
+        "content": "<p>Like <code>with</code> in Python?</p>",
+        "id": 228870914,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1614901443
+    },
+    {
+        "content": "<p>Wouldn't <code>Foo::something</code> need to manage a <code>guard</code> the same way?</p>",
+        "id": 228871057,
+        "sender_full_name": "cuviper",
+        "timestamp": 1614901517
+    },
+    {
+        "content": "<p>Yeah, for panic safety it seems like it would.</p>",
+        "id": 228871107,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1614901539
+    },
+    {
+        "content": "<p>Excuse me if this is a dumb question, but can't a person just call <code>drop</code> on the thing they want to drop if they need to drop it early?</p>",
+        "id": 228879568,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1614906399
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224471\">@Lokathor</span> Yes, just as they can do so if they want to drop it later. The question is what makes more sense as a default (either with or without taking into account current behavior).</p>",
+        "id": 228889724,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614913215
+    },
+    {
+        "content": "<p>I think eager drop is a good way to screw up unsafe code.</p>",
+        "id": 228892439,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1614915215
+    },
+    {
+        "content": "<p>evidence: every newbie already messes up the CString.as_ptr() thing at least once</p>",
+        "id": 228892494,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1614915244
+    },
+    {
+        "content": "<p>Eager drop together with use-after-free detection would catch that <em>sooner</em>. :)</p>",
+        "id": 228895833,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614918031
+    },
+    {
+        "content": "<p>yeah but isn't the <em>entire</em> deal with <code>unsafe</code> code that humans have to do the checking because the compiler can't?</p>",
+        "id": 228903766,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1614925311
+    },
+    {
+        "content": "<p>Anyway, now that I'm at a real keyboard, let's have a look at your earlier question:</p>\n<ul>\n<li><strong>With Taking Current Behavior Into Account:</strong> If you're accounting for current code, people do not expect early drops, and you can already call <code>drop</code> if you need to trigger an early drop, and I think that a <em>trait</em> would be entirely the wrong way to approach early drop. A trait is defined on a type, so you're saying \"I, the person who produced this thing but who isn't the user of the thing, will <em>presume</em> on behalf of the user that this thing should be early dropped\". I don't think that's the approach that should be taken. If anything, I'd suggest a magical wrapper type <code>EarlyDrop&lt;D:Drop&gt;(D)</code> which <em>the user of a value</em> puts around any value that they want to be early dropped.</li>\n<li><strong>Ignoring Current Behavior:</strong> So if all drops were early, then presumably we'd develop some core function called <code>extend</code> which would actually be blank like <code>drop</code> is now, but rather than sometimes throwing a value to <code>drop</code> to early drop it, you'd call <code>extend</code> at magical points where you need to be <em>sure</em> that the value lives at least that long. In general, I think that having a bunch of cleanup code running at not-immediately-obvious points in functions would feel <em>not dissimilar</em> from unexpected GC pauses in languages like Java/C# and/or unexpected laziness in haskell. Sometimes things would go wrong for reasons that weren't apparent at the time, and I think you'd get an increase in the average grumpiness of a Rust veteran. People <em>expect</em> that stuff goes away at the end of a scope. That's how stack stuff goes away, so when other things go away in the same way, that's good. People <em>do not expect</em> that suddenly extra code might run after <em>any</em> given line anywhere if it happened to be the last use of a dropping type.</li>\n</ul>",
+        "id": 228904573,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1614925989
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116083\">pnkfelix</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/228815535\">said</a>:</p>\n<blockquote>\n<p>hmm. even with something like <code>EagerDrop</code>, it sounds like you want something where the dynamic semantics of when a drop happens would depend on the results of lifetime inference. Is that correct?</p>\n</blockquote>\n<p>Not necessarily lifetime inference, but at least some form of liveness analysis. Which is IMO way too magical.</p>\n<p>Having the compiler automatically insert code into the middle of user code is a thin line to ride. Even what we do now already can be very confusing. I think it is important that the rules for this be as simple as possible without making the feature useless. Making code insertion depend on liveness analysis can lead to incredibly surprising \"spooky action at a distance\", where adding a new use of a variable <em>somewhere in its scope</em> suddenly changes program behavior in dramatical ways. I think this is way too non-local to be considered \"simple\".</p>\n<p>To give one example: Right now, if you need early drop, you write <code>drop(foo)</code>, and then if you accidentally use <code>foo</code> again later <em>you get an error</em>. With this proposal, you could need early drop and it happens implicitly, and then if you accidentally use <code>foo</code> again later you just broke the program. So even if you <em>want</em> early drop, you should still write <code>drop</code> to (a) document that fact and (b) ensure you actually <em>do</em> get early drop.</p>\n<p>So I think early drops dont make the drop situation any less of a footgun, they just make some previously explicit cases implicit and vice versa. We end up at a different point in the design space that to me looks no better than the old one in terms of accidentally writing the wrong code (it's just different kinds of code that are affected), and looks <em>worse</em> than the old one in two other important dimensions: having simple, local rules; and having one consistent set of rules that applies to the entire language. (The latter is true because we all agree that we cannot change the behavior of existing <code>impl Drop</code> types.)</p>",
+        "id": 228921981,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1614935770
+    },
+    {
+        "content": "<p>Earer dropping will make the place of dropping dependent on borrowck, right? That would make improvements to borrowck (eg polonius) change the behavior of programs and it would require alternative rust compiler to immediately implement borrowck rather than allowing them to wait until the rest of rust has decent support.</p>",
+        "id": 228924394,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1614936938
+    },
+    {
+        "content": "<p>Oh yeah true. It would also make implementing rust completely without borrowck or providing a compiler flag (or a configuration flag at compiler-build time) to disable borrowck (for efficiency reasons or to avoid additional dependencies, particularly when bootstrapping) impossible.</p>",
+        "id": 228975164,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1614959384
+    },
+    {
+        "content": "<p>AIUI, the implicit <code>Drop::drop</code> call counts as a use for the purpose of borrowck (possibly relaxed by <code>may_dangle</code>). It seems twisted for that drop location to also depend on borrowck.</p>",
+        "id": 228979155,
+        "sender_full_name": "cuviper",
+        "timestamp": 1614960890
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> That's a good argument.</p>",
+        "id": 228992861,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614965632
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> Would it depend on full borrowck, or just \"last referenced\"?</p>",
+        "id": 228993042,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1614965693
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"138448\">cuviper</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/228979155\">said</a>:</p>\n<blockquote>\n<p>AIUI, the implicit <code>Drop::drop</code> call counts as a use for the purpose of borrowck (possibly relaxed by <code>may_dangle</code>). It seems twisted for that drop location to also depend on borrowck.</p>\n</blockquote>\n<p>to repeat myself, isnt the idea that drop location is defined by <em>liveness</em>, not borrowck?</p>",
+        "id": 228993614,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1614965912
+    },
+    {
+        "content": "<p>i.e., during MIR creation (or so), find the \"last use of a variable\" and add <code>drop</code> there.</p>",
+        "id": 228993671,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1614965948
+    },
+    {
+        "content": "<p>Hm, now that I say it, that might be unsound since that use might be taking a reference and who knows how long that lives...</p>",
+        "id": 228993714,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1614965967
+    },
+    {
+        "content": "<p>so this would have to bail out and do drop-at-scope-end if a reference is ever taken (or use \"borrowck light\" for determining the drop site which seems even worse)</p>",
+        "id": 228994046,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1614966090
+    },
+    {
+        "content": "<p>right, liveness must transitively include all of its borrowers</p>",
+        "id": 228997118,
+        "sender_full_name": "cuviper",
+        "timestamp": 1614967301
+    },
+    {
+        "content": "<p>whereas the end of scope provides a hard cutoff</p>",
+        "id": 228997290,
+        "sender_full_name": "cuviper",
+        "timestamp": 1614967356
+    },
+    {
+        "content": "<blockquote>\n<p>We end up at a different point in the design space that to me looks no better than the old one in terms of accidentally writing the wrong code (it's just different kinds of code that are affected), and looks <em>worse</em> than the old one in two other important dimensions: having simple, local rules; and having one consistent set of rules that applies to the entire language.</p>\n</blockquote>\n<p>While I'm sympathetic to this viewpoint for the particular design point of locks and things like that (visible side-effect drops?), I'm not so sure it generalizes well to more garden-variety \"this type needs a little cleanup logic\" <code>Drop</code> impls, where most users would really not care when exactly the drop happens, and the current state is making me care even in those cases.</p>",
+        "id": 229011277,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1614972748
+    },
+    {
+        "content": "<p>if you don't care when the Drop happens it seems fine to have it happen at the end of a block.</p>",
+        "id": 229012483,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1614973230
+    },
+    {
+        "content": "<p>No, because as the first example in my project proposal illustrates, that makes a bunch of things harder</p>",
+        "id": 229013301,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1614973561
+    },
+    {
+        "content": "<p>And also causes some kinds of spooky action at a distance</p>",
+        "id": 229013395,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1614973585
+    },
+    {
+        "content": "<p>I wouldn't say that's an example of you \"not caring\" when the drop happens. I would say that's an example of you \"very much caring\" when the drop happens.</p>",
+        "id": 229014247,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1614973974
+    },
+    {
+        "content": "<p>this seems more like an argument for <a href=\"https://without.boats/blog/notes-on-a-smaller-rust/\">https://without.boats/blog/notes-on-a-smaller-rust/</a> than anything else</p>",
+        "id": 229014357,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614974032
+    },
+    {
+        "content": "<p>but I don't think it fits very well with the current design of the language</p>",
+        "id": 229014399,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614974043
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"226095\">Dirkjan Ochtman</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/229013301\">said</a>:</p>\n<blockquote>\n<p>No, because as the first example in my project proposal illustrates, that makes a bunch of things harder</p>\n</blockquote>\n<p>btw, that example is a bit confusing because there are two <code>fn sophisticated</code> and it took me a while to realize which one you are referring to after the code ;)</p>",
+        "id": 229087954,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1615027760
+    },
+    {
+        "content": "<p>But I see what you mean -- you care about when the drop happens only insofar as it shortens some lifetimes, nit insofar as the side-effects of the drop are concerned.</p>",
+        "id": 229088037,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1615027842
+    },
+    {
+        "content": "<p>So, what algorithm do you suggest should be used for drop placement? Note that borrowck requires drop to already be located (because they influence lifetimes, as your example shows), so you cannot use the results of borrowck to determine drop locations, you have to do it before that (or you have to use some interesting fixpoint construction).</p>",
+        "id": 229088068,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1615027894
+    },
+    {
+        "content": "<p>I think rather than <code>EagerDrop</code>, this should be a trait like <code>SimpleDrop</code> which asserts that the drop doesn't do anything besides free memory (and in particular excludes mutex locks and other \"observable\" drops), where dropping sooner is (almost) always better, and then the semantics can say that it is up to the implementation when to drop</p>",
+        "id": 229088433,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1615028333
+    },
+    {
+        "content": "<p>It's not clear to me whether this can go so far as to say that the abstract machine continues to drop at end of scope, and this is relegated to an unobservable compiler optimization</p>",
+        "id": 229088660,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1615028530
+    },
+    {
+        "content": "<p><code>DontCareWhenItHappensDrop</code> ;)</p>",
+        "id": 229088716,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1615028602
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/229088660\">said</a>:</p>\n<blockquote>\n<p>It's not clear to me whether this can go so far as to say that the abstract machine continues to drop at end of scope, and this is relegated to an unobservable compiler optimization</p>\n</blockquote>\n<p>give the observable-effect on which programs type-check, I dont think that is possible</p>",
+        "id": 229088728,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1615028630
+    },
+    {
+        "content": "<p>Well, such a mechanism wouldn't make anything type check that wouldn't otherwise</p>",
+        "id": 229088807,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1615028696
+    },
+    {
+        "content": "<p>in particular it doesn't actually fix the examples in the MCP</p>",
+        "id": 229088858,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1615028726
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/229088858\">said</a>:</p>\n<blockquote>\n<p>in particular it doesn't actually fix the examples in the MCP</p>\n</blockquote>\n<p>oh. but if it doesnt solve the problem the MCP is designed to solve then why should we consider it (in this thread)?<br>\nI kind of took that goal as an implicit assumption, given this is the MCP thread. ;)</p>",
+        "id": 229090466,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1615030232
+    },
+    {
+        "content": "<blockquote>\n<p>So, what algorithm do you suggest should be used for drop placement?</p>\n</blockquote>\n<p>Just ASAP, as soon as the last use is CFG-dead? That seems like a fairly clear rule</p>",
+        "id": 229097159,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1615036529
+    },
+    {
+        "content": "<p>Asserting it doesn't do anything besides free memory is too strong, and so is \"observable\", I think. In my case, it was putting back something in a hashmap in one of the mutably borrowed references.</p>",
+        "id": 229097244,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1615036587
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/229090466\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/229088858\">said</a>:</p>\n<blockquote>\n<p>in particular it doesn't actually fix the examples in the MCP</p>\n</blockquote>\n<p>oh. but if it doesnt solve the problem the MCP is designed to solve then why should we consider it (in this thread)?<br>\nI kind of took that goal as an implicit assumption, given this is the MCP thread. ;)</p>\n</blockquote>\n<p>That's a fair point, but I guess I'm interpreting the examples under the assumption that the real Drop impls don't do something silly like <code>println!</code>. But it seems that <span class=\"user-mention silent\" data-user-id=\"226095\">Dirkjan Ochtman</span> 's examples are in fact of the \"observable\" kind, and I agree with <span class=\"user-mention silent\" data-user-id=\"125270\">scottmcm</span> that there are reasons to prefer <code>let guard = foo; bar; drop(guard)</code> in this case.</p>",
+        "id": 229099173,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1615038321
+    },
+    {
+        "content": "<p>Another advantage of a <code>SimpleDrop</code> trait, if it covers enough useful types (at least <code>Box</code>, <code>Vec</code>, <code>Arc</code>, <code>Rc</code> even though the latter are a bit more than just freeing memory), is that a clippy lint could require that <em>all</em> types that are not <code>SimpleDrop</code> be explicitly dropped.</p>",
+        "id": 229099469,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1615038592
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"226095\">@Dirkjan Ochtman</span> </p>\n<blockquote>\n<p>Just ASAP, as soon as the last use is CFG-dead? That seems like a fairly clear rule</p>\n</blockquote>\n<p>What is \"CFG-dead\"? Remember that there could be outstanding references, you cannot drop something while the references are alive:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nb\">String</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">some_method</span><span class=\"p\">();</span><span class=\"w\"> </span><span class=\"c1\">// this is the last use of x.</span>\n<span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"c1\">// whether x is alive here depends on whether `y` points into `x`!</span>\n<span class=\"k\">use</span><span class=\"p\">(</span><span class=\"n\">y</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>\n<p>If <code>some_method</code> is <code>as_ref</code>, we have to drop x after <code>use(y)</code>; if <code>some_method</code> is <code>clone</code> we can drop much earlier.</p>\n<p>So I ask again, what is the algorithm? At the very least, it has to take the lifetimes of the methods called on <code>x</code> into account. Looks like you need to basically do borrow checking to figure out when drops can happen.</p>",
+        "id": 229103002,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1615041719
+    },
+    {
+        "content": "<p>You surely can't just drop vec and box as soon as they're not talked about because that breaks unsafe code.</p>",
+        "id": 229104299,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1615042952
+    },
+    {
+        "content": "<p>I think the issue this proposal want to solve is actually a syntax issue at its very root.  We seldom want to write a statement that consists of a single block expression because it's so ugly, but it occurs quite a lot in the pre-nll era.<br>\nThis code:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">simple</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Foo</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">adapter</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">.</span><span class=\"n\">simple</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">adapter</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">.</span><span class=\"n\">simple</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>was written as this before nll:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">simple</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Foo</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">adapter</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">.</span><span class=\"n\">simple</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">adapter</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">.</span><span class=\"n\">simple</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Nowadays, we rarely write code in this style.<br>\nand if there was a fictional \"let-block\", the issue here can be resolved quite intuitively.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">simple</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Foo</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">adapter</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">.</span><span class=\"n\">simple</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">adapter</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">.</span><span class=\"n\">simple</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>This also echoes with the proposed <code>let...else...</code> syntax.</p>",
+        "id": 229259606,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1615189951
+    },
+    {
+        "content": "<p>I think in this case the difficulty is that the first adapter should drop away before the second foo.simple call.</p>",
+        "id": 229265956,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1615193587
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">simple</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Foo</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">adapter</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">.</span><span class=\"n\">simple</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"nb\">drop</span><span class=\"p\">(</span><span class=\"n\">adapter</span><span class=\"p\">);</span><span class=\"w\"> </span><span class=\"c1\">// as i understand it, this is just about somehow avoiding typing a single line.</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">adapter</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">.</span><span class=\"n\">simple</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">adapter</span><span class=\"p\">.</span><span class=\"n\">next</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 229266051,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1615193638
+    },
+    {
+        "content": "<blockquote>\n<p>if there was a fictional \"let-block\", the issue here can be resolved quite intuitively</p>\n</blockquote>\n<p>Yeah, Niko invoked Python's context manager (<code>with</code>) stuff when we discussed it. That still feels heavyweight to me for something like this.</p>",
+        "id": 229366942,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1615234645
+    },
+    {
+        "content": "<blockquote>\n<p>So I ask again, what is the algorithm? At the very least, it has to take the lifetimes of the methods called on x into account. Looks like you need to basically do borrow checking to figure out when drops can happen.</p>\n</blockquote>\n<p>I'm a little unsure what level of detail you want me to hit on this. Are you saying there's a potential cyclic dependency between destructor insertion and the borrow checker? I guess I'm pretty hazy on how the details of lifetime inference works, but yeah, I suppose something whose lifetime is still borrowed wouldn't need to be considered, and \"CFG-dead\" is not a good enough description of that. So maybe something that is CFG-dead, plus all of its borrows must be CFG-dead? It feels like this is not fundamentally impossible to decide, but maybe it is too complex.</p>",
+        "id": 229367650,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1615234997
+    },
+    {
+        "content": "<p>It would be really helpful if somebody would summarize the major examples and things that came out of this thread</p>",
+        "id": 229524975,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1615313466
+    },
+    {
+        "content": "<p>perhaps creating a FAQ</p>",
+        "id": 229525011,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1615313475
+    },
+    {
+        "content": "<p>(I've found that's a very useful format)</p>",
+        "id": 229525035,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1615313483
+    },
+    {
+        "content": "<p>Even with something like EagerDrop, it sounds like you want something where the dynamic semantics of when a drop happens would depend on the results of lifetime inference. Is that correct?<br>\nWouldn't Foo::something need to manage a guard the same way?<br>\nCan't a person just call drop on the thing they want to drop if they need to drop it early?<br>\nIsn't the entire deal with unsafe code that humans have to do the checking because the compiler can't?<br>\nEarlier dropping will make the place of dropping dependent on borrowck, right?<br>\nWould it depend on full borrowck, or just \"last referenced\"?<br>\nIsnt the idea that drop location is defined by liveness, not borrowck?<br>\nWhat algorithm do you suggest should be used for drop placement?<br>\nIf it doesnt solve the problem the MCP is designed to solve then why should we consider it (in this thread)?<br>\nJust ASAP, as soon as the last use is CFG-dead?<br>\nWhat is \"CFG-dead\"? <br>\nWhat is the algorithm?<br>\nAre you saying there's a potential cyclic dependency between destructor insertion and the borrow checker?</p>",
+        "id": 229547469,
+        "sender_full_name": "oliver",
+        "timestamp": 1615321663
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281739\">oliver</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/229547469\">said</a>:</p>\n<blockquote>\n<p>Even with something like EagerDrop, it sounds like you want something where the dynamic semantics of when a drop happens would depend on the results of lifetime inference. Is that correct?</p>\n</blockquote>\n<p>I do not want this</p>",
+        "id": 229552609,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1615323530
+    },
+    {
+        "content": "<p>(personally)</p>",
+        "id": 229552622,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1615323534
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"226095\">Dirkjan Ochtman</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/229367650\">said</a>:</p>\n<blockquote>\n<p>I'm a little unsure what level of detail you want me to hit on this. Are you saying there's a potential cyclic dependency between destructor insertion and the borrow checker? I guess I'm pretty hazy on how the details of lifetime inference works, but yeah, I suppose something whose lifetime is still borrowed wouldn't need to be considered, and \"CFG-dead\" is not a good enough description of that. So maybe something that is CFG-dead, plus all of its borrows must be CFG-dead? It feels like this is not fundamentally impossible to decide, but maybe it is too complex.</p>\n</blockquote>\n<p>I'm asking for a spec that is precise enough that one can go ahead and implement it without any ambiguities. ;) I am asking for what exactly you'd write into the Rust Reference to explain to someone new to Rust where <em>exactly</em> values are being dropped. It is very important to be able to say this, so this needs to be documented without leaving open any edge cases. What I am predicting is that when you do this you'll notice this spec / documentation will be very complicated.</p>\n<p>Currently, all we have is a vague idea: \"I wish somehow drop placement was smarter\". In this thread we gave a long list of reasons for why making it smarter is hard, so I think to proceed in this discussion we need a precise proposal for what \"smarter\" is. Personally, my impression so far is that \"smarter\" cannot be achieved without having an overcomplicated, unpredictable set of rules.</p>",
+        "id": 230153399,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1615630919
+    },
+    {
+        "content": "<p>So based on what I saw it seems like a lot of challenges were raised in Zulip. It'd be nice to get a summary of the discussion -- what concerns were raised, what are some interesting examples, and so forth. I think there may be room to do some smaller steps, such as adding lints that suggest explicit drops, or investigations into how frequently various code patterns occur in the wild.</p>",
+        "id": 232457976,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1617122744
+    },
+    {
+        "content": "<p>My feeling is that this proposal won't be accepted at this time as is, even though I definitely agree with that this is an area where we could make a lot improvements -- the design area feels too big without an active champion who has time to devote to it.</p>",
+        "id": 232458139,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1617122804
+    },
+    {
+        "content": "<p>But it'd be really good to capture some of the knowledge that was created in this thread for future attempts, and I could also imagine that the act of doing so might lead to new ideas.</p>",
+        "id": 232458199,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1617122831
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"226095\">@Dirkjan Ochtman</span> do you have any interest in attempting to create a summary of what came up in this thread?</p>",
+        "id": 232458253,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1617122848
+    },
+    {
+        "content": "<p>I'm unsatisfied and a little frustrated with the discussion in this thread so far. I don't yet feel that I understand where the complexity in the borrowck/drop insertion comes from.</p>",
+        "id": 232776804,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1617290979
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"226095\">@Dirkjan Ochtman</span> Would it help to try to untangle the questions being raised? For example: Do you understand why we do not want the choice of where drops are inserted to depend on the borrowck analysis? <em>Or</em>, are you claiming that it should not be a problem to let borrowck and drop-placement be interwoven?</p>",
+        "id": 232813722,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1617306162
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"226095\">Dirkjan Ochtman</span> <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/232776804\">said</a>:</p>\n<blockquote>\n<p>I'm unsatisfied and a little frustrated with the discussion in this thread so far. I don't yet feel that I understand where the complexity in the borrowck/drop insertion comes from.</p>\n</blockquote>\n<p>you <a href=\"#narrow/stream/243200-t-lang.2Fmajor-changes/topic/MCP.3A.20Allowing.20the.20compiler.20to.20eagerly.20drop.20val.E2.80.A6.20lang-team.2386/near/229367650\">*did* admit</a> that \"CFG-dead\" is not a god enough condition, and something more clever is required to even ensure soundness of drop insertion. that is a very large source of complexity; no concrete algorithm has even been proposed yet that would do this.<br>\n\"it's not fundamentally impossible to find an algorithm\" is a bit too weak as a starting point for me personally; the details of the algorithm matter, after all, for evaluating backwards compatibility, learnability, things like that.</p>",
+        "id": 232924169,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1617383027
+    },
+    {
+        "content": "<p>OK, I took some <a href=\"https://hackmd.io/6tR_rMWeS1SGAnX9R_Bc8A\">very raw notes</a> and I'm going to clean them up</p>",
+        "id": 240217615,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1621961564
+    },
+    {
+        "content": "<p>Opened <a href=\"https://github.com/rust-lang/lang-team/pull/103\">https://github.com/rust-lang/lang-team/pull/103</a></p>",
+        "id": 245067194,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1625590375
+    },
+    {
+        "content": "<p>Oof, I find the thought of doing this for lock guards fairly scary. I would hope that those kinds of types would be what you try to avoid doing this for, but instead it's even one of the examples where in the MCP where it's considered desirable...</p>\n<p>I think that doing so could easily trigger new silent data races in multi-threaded unsafe code, which would be very hard to detect.</p>",
+        "id": 245333153,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1625759454
+    },
+    {
+        "content": "<p>It really depends on the purpose of the lock</p>",
+        "id": 245348554,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1625767199
+    },
+    {
+        "content": "<p>(as the write-up points out)</p>",
+        "id": 245348616,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1625767210
+    },
+    {
+        "content": "<p>arguably <code>Mutex&lt;()&gt;</code> is an anti-pattern (though I've written that code)</p>",
+        "id": 245348651,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1625767222
+    },
+    {
+        "content": "<p>Right, it's not ideal but it ends up happening in unsafe code. Or any place where the mutex represents a critical section rather than a protected resource.</p>",
+        "id": 245348753,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1625767267
+    },
+    {
+        "content": "<p>Yeah, I've needed interior resource controls for a decent ammount of code, and just throwing the Mutex over the resource doesn't work properly. I wrote  this in <a href=\"https://github.com/chorman0773/fused-lock-rs\">fused-rwlock</a>, which allows me return the unguarded immutable reference from the function. It also allows me to save acquiring the lock if the lock is already fused (though I believe I do not yet apply that optimization). (Fused lock is an Owning rw-like lock, that can be locked for writing any number of times (not at once), then it can be locked for reading any number of times, but once it's locked for reading it's \"fused\" in that state and can never be written to again)</p>",
+        "id": 245351719,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1625768571
+    }
+]

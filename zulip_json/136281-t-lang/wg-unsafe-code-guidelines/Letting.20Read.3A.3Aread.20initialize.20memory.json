@@ -1,0 +1,560 @@
+[
+    {
+        "content": "<p>At the all-hands, <span class=\"user-mention\" data-user-id=\"143274\">@Amanieu d'Antras</span> and <span class=\"user-mention\" data-user-id=\"119235\">@David Tolnay</span> suggested the following approach to passing uninitialized memory to Read::read: We could add a function like <code>fn freeze&lt;T&gt;(x: *mut T)</code> to libcore, and the semantics of that function is to \"freeze\" the memory pointed to by <code>x</code> (and with the size given by <code>T</code>). The \"freeze\" operation is the same as in <a href=\"https://www.cs.utah.edu/~regehr/papers/undef-pldi17.pdf\" target=\"_blank\" title=\"https://www.cs.utah.edu/~regehr/papers/undef-pldi17.pdf\">this paper</a>, and its semantics basically is to turn the uninitialized parts of that memory into some non-deterministic fixed bit pattern. Since any fixed bit pattern is valid in a <code>&amp;mut [u8]</code>, an uninitialized array can be passed to <code>Read::read</code> after freezing.<br>\nThe main problem here is actually implementing this function in LLVM, but their realization was that <code>black_box</code>, i.e. an empty <code>volatile memory</code> assembly block, should have this effect.</p>\n<p>What do you think of this plan? I am particularly curious about <span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span>'s thoughts on the LLVM side of this. Also, <span class=\"user-mention\" data-user-id=\"143274\">@Amanieu d'Antras</span> , <span class=\"user-mention\" data-user-id=\"119235\">@David Tolnay</span> how did you plan to introduce this -- seems like it would need an RFC?</p>",
+        "id": 157985072,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1549822629
+    },
+    {
+        "content": "<p>As discussed on #rust-libs on IRC... 1) asm! does not exist on all platforms</p>",
+        "id": 157985141,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549822751
+    },
+    {
+        "content": "<p>it would be possible to \"freeze\" by passing an \"uninit\" buffer into an extern function LLVM has no insight into</p>",
+        "id": 157985146,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549822782
+    },
+    {
+        "content": "<p>LLVM side of things: <a href=\"https://reviews.llvm.org/D29011\" target=\"_blank\" title=\"https://reviews.llvm.org/D29011\">https://reviews.llvm.org/D29011</a></p>",
+        "id": 157985149,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549822799
+    },
+    {
+        "content": "<p>i.e. an instruction that does this has been long-time desired, but hasn’t landed yet despite the existing implementation.</p>",
+        "id": 157985206,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549822858
+    },
+    {
+        "content": "<p>reasons are unclear to me.</p>",
+        "id": 157985213,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549822866
+    },
+    {
+        "content": "<p>the instruction is for values though, not for memory -- it would likely need to be run in a loop or so</p>",
+        "id": 157985332,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1549823123
+    },
+    {
+        "content": "<p>What platforms does a nop asm!() not work on? wasm and BPF, I assume, anything else? On those platforms, throwing in an extern function is problematic: e.g., in wasm that will mean everyone using rustc-generated wasm will have to actually supply such a no-op function under the name we choose (unless we do very hacky hacks in the linking stage).</p>",
+        "id": 157985336,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549823158
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> wasm is the most problematic outstanding example of this, yes.</p>",
+        "id": 157985384,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549823182
+    },
+    {
+        "content": "<p>I recall there being T3 platforms that do not have asmparser component in LLVM, but I don’t recall which platforms are these</p>",
+        "id": 157985387,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549823201
+    },
+    {
+        "content": "<p>the last I know, one issue the LLVM devs have with adapting freeze/poison is about whether poison works on a per-byte or per-value level. but it seems to me that <code>freeze</code> can be defined and is useful independent of such questions.</p>",
+        "id": 157985388,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1549823205
+    },
+    {
+        "content": "<p>Yes, there are difficult open questions about how to proceed with undef/poison, but both an <code>volatile memory</code> inline asm or an unknown external function must be conservatively assumed to initialize the memory in some fashion, so it side steps all questions about how uninitialized memory would behave.</p>",
+        "id": 157985401,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549823259
+    },
+    {
+        "content": "<p>Of course, they both have the side effect of also blocking other optimizations, but for Read::read specifically that doesn't feel like it should be an issue.</p>",
+        "id": 157985444,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549823301
+    },
+    {
+        "content": "<p>one option would be to call something like <code>memset</code> with <code>0</code> size with <code>nobuiltin</code> flag set (so that LLVM does not handle it as such)</p>",
+        "id": 157985445,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549823308
+    },
+    {
+        "content": "<p>I am very uncertain about whether <code>nobuiltin</code> will actually make it do what we want, and even if it does, we'll lose very desirable optimizations in the surrounding code.</p>",
+        "id": 157985462,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549823366
+    },
+    {
+        "content": "<p>Not more than we would with <code>black_box</code>, though?</p>",
+        "id": 157985511,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1549823407
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> given that <code>asm!</code> is an “acceptable” solution and that it inhibits just about every optimisation out there...</p>",
+        "id": 157985513,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549823415
+    },
+    {
+        "content": "<p>they seemed to think that that is fine in this situation. we can always provide a better implementation of this later without changing the contract of this function.</p>",
+        "id": 157985527,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1549823436
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> it is not appropriate to talk about this in terms of <code>black_box</code>, because that is a hint function and may be a no-op.</p>",
+        "id": 157985528,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549823439
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> fair, I meant \"what <code>black_box</code> will get implemented as\"</p>",
+        "id": 157985532,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1549823455
+    },
+    {
+        "content": "<p>Sorry, to be clearer, I don't mean the immediately surrounding code, I mean other uses of memset in the rest of the function/module</p>",
+        "id": 157985534,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549823457
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> <code>nobuiltin</code> is a callsite attribute, not a function attribute.</p>",
+        "id": 157985545,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549823475
+    },
+    {
+        "content": "<p>Ohhh, per call site even? nice</p>",
+        "id": 157985546,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549823486
+    },
+    {
+        "content": "<p>I think?</p>",
+        "id": 157985548,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549823503
+    },
+    {
+        "content": "<p>Us having such a language construct might also give those that want to add freeze to LLVM some support :D</p>",
+        "id": 157985590,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1549823526
+    },
+    {
+        "content": "<p>But I am still concerned about to what extent nobuiltin will stop LLVM optimizations. e.g. it certainly stops  loop idiom recognition, but I can imagine missing checks for it elsewhere</p>",
+        "id": 157985593,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549823561
+    },
+    {
+        "content": "<p>Could we instead just patch the affected backends to accept (only) inline asm with an empty asm string?</p>",
+        "id": 157985594,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549823567
+    },
+    {
+        "content": "<p>but then we break with system LLVM...</p>",
+        "id": 157985602,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1549823584
+    },
+    {
+        "content": "<p>At least it'll be a compile time error rather than a miscompile :)<br>\n And it only affects a few (currently) rather nice targets.</p>",
+        "id": 157985651,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549823650
+    },
+    {
+        "content": "<p>there is ASMParser in wasm target subdirectory tree.</p>",
+        "id": 157985716,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549823792
+    },
+    {
+        "content": "<p>I’m actually very surprised about <code>freeze</code> only taking integer values as an argument</p>",
+        "id": 157986077,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549824474
+    },
+    {
+        "content": "<p>not even aggregates.</p>",
+        "id": 157986078,
+        "sender_full_name": "nagisa",
+        "timestamp": 1549824480
+    },
+    {
+        "content": "<p>FCAs should just go away imo</p>",
+        "id": 157986461,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549825087
+    },
+    {
+        "content": "<p>FCAs?</p>",
+        "id": 157988678,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1549828606
+    },
+    {
+        "content": "<p>first-class aggregates, i.e., structs and arrays used as SSA values</p>",
+        "id": 157990813,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1549832180
+    },
+    {
+        "content": "<p>Alternatively you could write the address of the buffer to a global atomic and then issue a compiler fence. LLVM must assume that a signal handler could have read the global atomic and used it to fill the buffer.</p>",
+        "id": 158047539,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1549905590
+    },
+    {
+        "content": "<blockquote>\n<p>What do you think of this plan?</p>\n</blockquote>\n<p>While freeze is ok, I'm still unconvinced about allowing uninitialized integers. The only argument seems to be \"to avoid breaking code using <code>mem::uninitialized</code>\", but AFAICT we want to deprecate <code>mem::uninitialized</code> anyways.</p>",
+        "id": 158375454,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1549996275
+    },
+    {
+        "content": "<p>Deprecating it will not make any existing uses go away.</p>",
+        "id": 158385135,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550003605
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> the plan is to make it freeze memory</p>",
+        "id": 158385152,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550003633
+    },
+    {
+        "content": "<p>I saw mention of that, but I was replying specifically to what <span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span> wrote here</p>",
+        "id": 158385228,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550003679
+    },
+    {
+        "content": "<p>that will make the issue with integers go away for sure, and actually in practice I think this will even make the issues with all the other types go away (if freeze is implemented as an assembly block) as LLVM has to assume they might have been initialized correctly.</p>",
+        "id": 158385248,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550003701
+    },
+    {
+        "content": "<p>yeah I think <span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span> said that in the context of the proposal to freeze</p>",
+        "id": 158385279,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550003723
+    },
+    {
+        "content": "<p>OK. Speaking of which: I'd like to actually get some experience with shipping ptr::freeze based code before comitting. Replacing <code>mem::uninitialized</code> with <code>MaybeUninit</code> currently has regressions and I would hate to bring similar regressions to existing unmodified code if we can avoid it</p>",
+        "id": 158385518,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550003908
+    },
+    {
+        "content": "<blockquote>\n<p>Replacing mem::uninitialized with MaybeUninit currently has regressions</p>\n</blockquote>\n<p>It does? I thought we fixed them?</p>",
+        "id": 158387436,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550005578
+    },
+    {
+        "content": "<p>I was thinking of <a href=\"https://github.com/rust-lang/rust/issues/58201\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/58201\">https://github.com/rust-lang/rust/issues/58201</a> but I misremembered, that happens with mem::uninitialized too</p>",
+        "id": 158387493,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550005648
+    },
+    {
+        "content": "<p>Where might I read more about freeze? I see this PR: <a href=\"https://github.com/rust-lang/rust/pull/58363\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/58363\">https://github.com/rust-lang/rust/pull/58363</a></p>",
+        "id": 158458783,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550078199
+    },
+    {
+        "content": "<p>what kind of documentation are you looking for? there's <a href=\"https://www.cs.utah.edu/~regehr/papers/undef-pldi17.pdf\" target=\"_blank\" title=\"https://www.cs.utah.edu/~regehr/papers/undef-pldi17.pdf\">https://www.cs.utah.edu/~regehr/papers/undef-pldi17.pdf</a>, but I suppose you were not asking for a paper?</p>",
+        "id": 158459321,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550078605
+    },
+    {
+        "content": "<p>Well, I was rather hoping for something more Rust-specific</p>",
+        "id": 158460527,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550079581
+    },
+    {
+        "content": "<p><em>insert my typical moaning about Rust having more features than documentation</em></p>",
+        "id": 158460589,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550079605
+    },
+    {
+        "content": "<p>I'm afraid I don't know of anything</p>",
+        "id": 158464156,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550082166
+    },
+    {
+        "content": "<p>ideally the doccomment in that PR would help?</p>",
+        "id": 158464169,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550082180
+    },
+    {
+        "content": "<p>is there a concrete question you have? that might help expanding the docs</p>",
+        "id": 158464194,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550082198
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116155\">@Jake Goulding</span> My understanding on a very broad level is that freeze makes uninitalized memory readable; normally, it's UB to read it, whereas freeze makes those bytes 'frozen' in that they're no longer going to be side</p>",
+        "id": 158469692,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1550086043
+    },
+    {
+        "content": "<blockquote>\n<p>no longer going to be side</p>\n</blockquote>\n<p><span class=\"user-mention\" data-user-id=\"116122\">@simulacrum</span> typo?</p>",
+        "id": 158470932,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550087004
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> no real concrete questions. The way my brain works is to have a big catalog of \"these are the available tools\" and then mapping them to usecases (this is why I like SO — it exercises those connections). This often involves having a broad but shallow understanding of many things. I see an interesting thing like \"freeze\" (which unfortunately makes me think of <a href=\"https://blog.honeybadger.io/when-to-use-freeze-and-frozen-in-ruby/\" target=\"_blank\" title=\"https://blog.honeybadger.io/when-to-use-freeze-and-frozen-in-ruby/\">Ruby's freeze</a>) and I want to know how to file it away in the brain.</p>",
+        "id": 158471241,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550087275
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116122\">@simulacrum</span> correction: it is UB to perform any operation on it (comparison, arithmetic, whatever), but a plain read (at least into a <code>MaybeUninit</code>) is not UB</p>",
+        "id": 158471350,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550087351
+    },
+    {
+        "content": "<p>it's not like Ruby's freeze at all, that much I can say^^</p>",
+        "id": 158471463,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550087441
+    },
+    {
+        "content": "<p>no idea what I meant by \"side\" there</p>\n<p>Ah, interesting -- I was not aware that plain read would be permitted...</p>",
+        "id": 158481573,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1550095598
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> how can a comparison be UB when a read isn't? What is the important difference?</p>",
+        "id": 158490085,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550104345
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116155\">@Jake Goulding</span> anything that actually inspects the bits is UB, basically</p>",
+        "id": 158510960,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550131729
+    },
+    {
+        "content": "<p>reading does not inspect the bits</p>",
+        "id": 158510963,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550131740
+    },
+    {
+        "content": "<p>(LLVM is slightly more permissive: there, comparing uninit with something isn't UB, but it returns uninit. So anything that uninit even indirectly flows into gets \"poisened\" by uninit. If you then ever do a conditional branch on uninit, that's UB. This is a good choice for an optimizing IR, but for a surface language like Rust I feel it is simpler to make UB happen earlier.)</p>",
+        "id": 158511030,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550131818
+    },
+    {
+        "content": "<blockquote>\n<p>reading does not inspect the bits</p>\n</blockquote>\n<p>I do not follow this sentence. Are we using non-English definitions for \"read\"?</p>",
+        "id": 158535026,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550156412
+    },
+    {
+        "content": "<p>How could reading data do anything <strong>but</strong> look at the bits... that it... <em>reads</em>?</p>",
+        "id": 158535061,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550156446
+    },
+    {
+        "content": "<p>\"read\" in the sense of \"read memory\" or \"load from memory\", so it <em>copies</em> them but does not care what the bits are</p>",
+        "id": 158535165,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550156513
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116155\">@Jake Goulding</span> hm yeah words are hard sometimes around this. basically, imagine every byte in memory is of the following type</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">enum</span> <span class=\"nc\">Byte</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">Uninit</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">Init</span><span class=\"p\">(</span><span class=\"kt\">u8</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 158535546,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550156627
+    },
+    {
+        "content": "<p>then a \"read\" operation will just copy data at type <code>Byte</code>, no problem</p>",
+        "id": 158535573,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550156639
+    },
+    {
+        "content": "<p>but any operation that needs to actually do a <code>match</code> is UB if the byte is currently <code>Uninit</code></p>",
+        "id": 158535631,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550156653
+    },
+    {
+        "content": "<p>does that make sense?</p>",
+        "id": 158535636,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550156655
+    },
+    {
+        "content": "<p>Are these terms set in stone already? If we could magically come up with something else, could those be used?</p>",
+        "id": 158535709,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550156706
+    },
+    {
+        "content": "<p>Is it accurate to say  \"if the CPU uses the data to make a decision, it's UB\"?</p>",
+        "id": 158536157,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550157003
+    },
+    {
+        "content": "<p>I guess that's pretty close to \"if you then ever do a conditional branch on ...\"</p>",
+        "id": 158536235,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550157047
+    },
+    {
+        "content": "<p>The CPU doesn't really enter the picture, this is all formal language semantics. The CPU doesn't have a concept of uninitalized memory to begin with.</p>",
+        "id": 158536301,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550157097
+    },
+    {
+        "content": "<p>And in the formal semantics, it's most likely that even arithmetic and bitwise operations and the like are UB on uninit data.</p>",
+        "id": 158536323,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550157121
+    },
+    {
+        "content": "<blockquote>\n<p>Are these terms set in stone already? If we could magically come up with something else, could those be used?</p>\n</blockquote>\n<p>do you mean the words we are using or the actual rules?</p>",
+        "id": 158536648,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157330
+    },
+    {
+        "content": "<p>LLVM has a set of rules that we're unlikely to change (they call it <code>poison</code>, I call it <code>Uninit</code>, it's the same thing)</p>",
+        "id": 158536688,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157360
+    },
+    {
+        "content": "<p>and the only wiggle-room (EDIT: for Rust) I know is whether <code>Uninit + x</code> is UB, or returns <code>Uninit</code>.</p>",
+        "id": 158536753,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157380
+    },
+    {
+        "content": "<blockquote>\n<p>And in the formal semantics, it's most likely that even arithmetic and bitwise operations and the like are UB on uninit data.</p>\n</blockquote>\n<p>yeah, that's certainly how LLVM handles it</p>",
+        "id": 158536767,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157393
+    },
+    {
+        "content": "<p>that is required to enable optimizations that turn logical into arithmetic operations, I think</p>",
+        "id": 158536832,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157432
+    },
+    {
+        "content": "<p>I'm really sure <code>poison + 1</code> is <code>poison</code>, not UB. <code>select</code> may be different but that's basically a kind of branch.</p>",
+        "id": 158536935,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550157502
+    },
+    {
+        "content": "<p>yeah LLVM delays UB as much as possible, sorry if what I said came across differently</p>",
+        "id": 158536951,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157527
+    },
+    {
+        "content": "<p>they need that to be able to reorder stuff</p>",
+        "id": 158536963,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157534
+    },
+    {
+        "content": "<p>and hoist it out of loops, in particular</p>",
+        "id": 158536976,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157544
+    },
+    {
+        "content": "<p>but for a surface language like Rust, it might be easier to just say UB earlier</p>",
+        "id": 158536992,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157557
+    },
+    {
+        "content": "<p>Yes, I agree with that. What you said earlier seems to directly contradict that.</p>",
+        "id": 158537070,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550157603
+    },
+    {
+        "content": "<p>then it was probably a statement about Rust that I made in a way that it sounds like I am talking about LLVM?</p>",
+        "id": 158537437,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550157867
+    },
+    {
+        "content": "<blockquote>\n<blockquote>\n<p>And in the formal semantics, it's most likely that even arithmetic and bitwise operations and the like are UB on uninit data.</p>\n</blockquote>\n<p>yeah, that's certainly how LLVM handles it</p>\n</blockquote>\n<p>^ this is what threw me off, and there you mention LLVM explicitly ^^;</p>",
+        "id": 158538084,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550158258
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> s/CPU/the program/ then?</p>",
+        "id": 158538145,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550158314
+    },
+    {
+        "content": "<p>Yeah that solves that objection. But also note the subtleties under \"make a decision\"; it may not be just branching and the like but even just operating on it with primitive operations such as <code>+</code>.</p>",
+        "id": 158538224,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550158362
+    },
+    {
+        "content": "<p>\"used for computation\"?</p>",
+        "id": 158538988,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1550158866
+    },
+    {
+        "content": "<p>i guess?</p>",
+        "id": 158539029,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1550158905
+    },
+    {
+        "content": "<blockquote>\n<p>^ this is what threw me off, and there you mention LLVM explicitly ^^;</p>\n</blockquote>\n<p>hm, no idea what I was thinking. I probably misread. sorry.</p>",
+        "id": 158539963,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550159499
+    },
+    {
+        "content": "<blockquote>\n<p>\"used for computation\"?</p>\n</blockquote>\n<p>I usually say \"anything but a simple copy\". <em>shrug</em></p>",
+        "id": 158540155,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1550159635
+    }
+]

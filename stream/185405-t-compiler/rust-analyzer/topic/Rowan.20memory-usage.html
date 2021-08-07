@@ -1,0 +1,746 @@
+<html>
+<head><meta charset="utf-8"><title>Rowan memory-usage · t-compiler/rust-analyzer · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/index.html">t-compiler/rust-analyzer</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html">Rowan memory-usage</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="197823879"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197823879" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197823879">(May 17 2020 at 01:22)</a>:</h4>
+<p>Hi</p>
+<p>DHAT shows the Rowan trees to be the most memory-hungry while running analysis-stats. AFAICT Rowan nodes are only cached for a file, but this cache is not shared across files. Is this correct?</p>
+<p>I would like to investigate ways to reduce Rowan memory usage. I have some ideas I would like to try, but unsure how to do it.</p>
+<ul>
+<li><em>Reuse the same NodeCache across many files.</em> Where would be the best place to put this cache?</li>
+<li><em>Allocate Rowan nodes in an arena (https://github.com/rust-analyzer/rowan/issues/15).</em> Does this mean not using thin-dst? It seems to be thin-dst that does the Box allocation. </li>
+</ul>
+<p>Any pointers? Ideas?</p>
+
+
+
+<a name="197837818"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197837818" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197837818">(May 17 2020 at 08:34)</a>:</h4>
+<p>Yeah, sharing node cache should be an easy win!</p>
+<p>The simplest thing to do would be to add a read-only cache with pre-interned Node, and than use it for all files</p>
+
+
+
+<a name="197837827"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197837827" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197837827">(May 17 2020 at 08:35)</a>:</h4>
+<p>More complicated thing would be something like a thread-local cache, but I am afraid it can grow unbounded, so it also needs some kind of LRU...</p>
+
+
+
+<a name="197849315"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197849315" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197849315">(May 17 2020 at 13:31)</a>:</h4>
+<p>Regarding sharing node cache. I see Roslyn simply makes SyntaxNodeCache be a static class with a bound of 65536 elements. <a href="https://github.com/dotnet/roslyn/blob/f03f87fbb636dfba824947c0e19e779ee9a39626/src/Compilers/Core/Portable/Syntax/InternalSyntax/SyntaxNodeCache.cs#L113">https://github.com/dotnet/roslyn/blob/f03f87fbb636dfba824947c0e19e779ee9a39626/src/Compilers/Core/Portable/Syntax/InternalSyntax/SyntaxNodeCache.cs#L113</a></p>
+<p>I'll experiment with instantiating NodeCache thread locally statically. Let's try for now without any bounds</p>
+
+
+
+<a name="197850183"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197850183" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197850183">(May 17 2020 at 13:50)</a>:</h4>
+<p>Yeah, actually making it just a global should also work. The only thing I am worrying about is that this might make parsing slower, as you'd need synchronisation for looking up nodes</p>
+
+
+
+<a name="197851992"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197851992" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197851992">(May 17 2020 at 14:31)</a>:</h4>
+<p>Yeah, I suspect the synchronization cost will be high (haven't benchmarked though). How parallel is rust analyzer currently? Analysis-stats seems serial AFAICT</p>
+
+
+
+<a name="197852814"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197852814" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197852814">(May 17 2020 at 14:53)</a>:</h4>
+<p>The only really parallel bit is this one: <a href="https://github.com/rust-analyzer/rust-analyzer/blob/71e94b1d0bf7c58aa377513f010fcb3f56081f5f/crates/ra_ide_db/src/symbol_index.rs#L113">https://github.com/rust-analyzer/rust-analyzer/blob/71e94b1d0bf7c58aa377513f010fcb3f56081f5f/crates/ra_ide_db/src/symbol_index.rs#L113</a></p>
+
+
+
+<a name="197852861"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197852861" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197852861">(May 17 2020 at 14:54)</a>:</h4>
+<p>It'd be good to expose it as <code>analysis-stats</code>/ <code>analysis-bench</code>, as it's a good measure of how fast we can parse files in parallel</p>
+
+
+
+<a name="197852908"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197852908" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197852908">(May 17 2020 at 14:55)</a>:</h4>
+<p>I haven't looked at the rowan PR yet (hopefully do tat on monday), but I think it makes sense to remove the cache from the public API completely, and just use a global singleton, provided that the synchronization cost is not too bad</p>
+
+
+
+<a name="197963267"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197963267" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197963267">(May 18 2020 at 16:50)</a>:</h4>
+<p>(now I'm wondering about trying to build a lru cache on a dashmap (sharded hashmap) instead of a plain hashmap and seeing how that behaves)</p>
+
+
+
+<a name="197963382"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197963382" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197963382">(May 18 2020 at 16:51)</a>:</h4>
+<p>If this ends up positive, I'll at least need to consider what the global cache would look like for sorbus</p>
+
+
+
+<a name="197963506"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197963506" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197963506">(May 18 2020 at 16:52)</a>:</h4>
+<p>One tricky thing I'm doing in sorbus right now is deduplicating based on subtree identity rather than subtree contents</p>
+
+
+
+<a name="197963672"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197963672" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197963672">(May 18 2020 at 16:53)</a>:</h4>
+<p>This however becomes problematic (in terms of ideal deduplication) if small nodes exit the cache and thus any new parents of them stop getting deduplicated</p>
+
+
+
+<a name="197964110"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197964110" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197964110">(May 18 2020 at 16:57)</a>:</h4>
+<p>There's still the comment in Rowan's cache to avoid re-hashing subtrees. That's what the identity-based cache in sorbus is doing</p>
+
+
+
+<a name="197964260"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197964260" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197964260">(May 18 2020 at 16:58)</a>:</h4>
+<p>Plus "how many direct children does this node have" is a terrible heuristic for "how deep is this node"</p>
+
+
+
+<a name="197964276"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197964276" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197964276">(May 18 2020 at 16:58)</a>:</h4>
+<p>Where the second is the more interesting one for caching</p>
+
+
+
+<a name="197964474"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197964474" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197964474">(May 18 2020 at 16:59)</a>:</h4>
+<p>How deep a node is a decent heuristic for how likely it is to have the same node duplicated elsewhere in the compilation unit</p>
+
+
+
+<a name="197964627"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197964627" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197964627">(May 18 2020 at 17:00)</a>:</h4>
+<p>(as the deeper a tree gets the more chances it has to diverge)</p>
+
+
+
+<a name="197965212"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197965212" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197965212">(May 18 2020 at 17:05)</a>:</h4>
+<p>Ok, I thought of an interesting way to bound the cache compute cost while being resilient to some cache evictions</p>
+
+
+
+<a name="197965301"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197965301" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197965301">(May 18 2020 at 17:05)</a>:</h4>
+<p>Basically, do the identity equivalence some number of levels down, rather than initially</p>
+
+
+
+<a name="197965370"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197965370" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197965370">(May 18 2020 at 17:06)</a>:</h4>
+<p>The question, though, is if that even helps in any common cases</p>
+
+
+
+<a name="197965505"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/197965505" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#197965505">(May 18 2020 at 17:07)</a>:</h4>
+<p>Seeing as if a shallow node is evicted from the cache, its ancestors are not unlikely to also be on the way out</p>
+
+
+
+<a name="198045834"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198045834" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198045834">(May 19 2020 at 10:20)</a>:</h4>
+<p>I haven't looked into how sorbus does identity of a tree, so correct me where I am wrong in the following. To avoid hashing the complete subtree of a node(all descendants of a node), would it be enough to hash the kind + text size + child1 ptr... ChildN ptr?</p>
+
+
+
+<a name="198084886"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198084886" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198084886">(May 19 2020 at 15:39)</a>:</h4>
+<p>Actually if this child pointers are enough to give identity to a node, then text size is unnecessary as that information is already contained in the children</p>
+
+
+
+<a name="198098548"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198098548" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198098548">(May 19 2020 at 17:16)</a>:</h4>
+<p>Here it is in the code: <a href="https://github.com/CAD97/sorbus/blob/2b5fcd42808fb99f41170f575bddea9e0f873878/src/green/builder.rs#L30">https://github.com/CAD97/sorbus/blob/2b5fcd42808fb99f41170f575bddea9e0f873878/src/green/builder.rs#L30</a></p>
+
+
+
+<a name="198098719"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198098719" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198098719">(May 19 2020 at 17:17)</a>:</h4>
+<p>But yes, for the builder cache I'm hashing the node as the rough equivalent of <code>hash(kind), hash(text_len), for child in children ptr::hash(Arc::as_ptr(child))</code></p>
+
+
+
+<a name="198098903"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198098903" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198098903">(May 19 2020 at 17:18)</a>:</h4>
+<p>It would be possible to skip hashing the text length for a small decrease in work, though, yes</p>
+
+
+
+<a name="198099098"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198099098" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198099098">(May 19 2020 at 17:20)</a>:</h4>
+<p>(this is only for the builder; regular <code>PartialEq</code>/<code>Hash</code> does full tree equivalence)</p>
+
+
+
+<a name="198107383"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198107383" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198107383">(May 19 2020 at 18:25)</a>:</h4>
+<p>AFAICT sorbus doesn’t have the condition to only cache nodes with &lt;= 3 children. How come? I would think would help only caching nodes with a high chance of being seen again</p>
+
+
+
+<a name="198225939"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198225939" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198225939">(May 20 2020 at 16:49)</a>:</h4>
+<p>The reason is that (so far) I don't think that's a good heuristic for what we actually want</p>
+
+
+
+<a name="198225976"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198225976" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198225976">(May 20 2020 at 16:49)</a>:</h4>
+<p>Which would be the number of (transitive) children(?)</p>
+
+
+
+<a name="198226018"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198226018" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198226018">(May 20 2020 at 16:49)</a>:</h4>
+<p>What we want is a decent heuristic for whether the node is likely to have duplicates that we can dedupe</p>
+
+
+
+<a name="198226190"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198226190" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198226190">(May 20 2020 at 16:50)</a>:</h4>
+<p>It was important for Rowan to use some heuristic here because it recursively rehashed the entire subtree</p>
+
+
+
+<a name="198226239"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198226239" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198226239">(May 20 2020 at 16:51)</a>:</h4>
+<p>Whereas sorbus from the start didn't do that, instead using child identity for deduping</p>
+
+
+
+<a name="198226342"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198226342" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198226342">(May 20 2020 at 16:52)</a>:</h4>
+<p>It's important to note that Rowan's "3 or fewer direct children" would still rehash subtrees even if they had more than 3 direct children</p>
+
+
+
+<a name="198226406"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198226406" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198226406">(May 20 2020 at 16:52)</a>:</h4>
+<p>So, abusing big O, Rowan's cache was roughly O(n) and sorbus's was O(log n)</p>
+
+
+
+<a name="198226470"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198226470" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198226470">(May 20 2020 at 16:53)</a>:</h4>
+<p>(where N is the number of nodes in the tree, and log n is asymptotically the number of direct children of any one node)</p>
+
+
+
+<a name="198226695"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198226695" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198226695">(May 20 2020 at 16:55)</a>:</h4>
+<p>Rowan's just had a gate on the O(n) that said you had to have 3 or fewer direct children to be part of that n</p>
+
+
+
+<a name="198226983"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198226983" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198226983">(May 20 2020 at 16:57)</a>:</h4>
+<p>Basically, the fact that I no longer had to revisit subtrees to do the cache let me just always do node creation through the cache. But with a strong argument that some O(1) heuristic is a good approximation for "does this node have duplicates", I'd be perfectly happy to re-add that heuristic to sorbus</p>
+
+
+
+<a name="198227494"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198227494" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198227494">(May 20 2020 at 17:01)</a>:</h4>
+<p>I'd have to double-check how exactly r-a parses them, but my gut says that some nodes that could definitely be cached end up not being cached because of this heuristic, like <code>#[rustfmt::skip]</code></p>
+
+
+
+<a name="198227693"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198227693" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198227693">(May 20 2020 at 17:02)</a>:</h4>
+<p>If anything, I think textual length is probably a better heuristic than number of direct children</p>
+
+
+
+<a name="198227836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198227836" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198227836">(May 20 2020 at 17:03)</a>:</h4>
+<p>But also one that isn't available before iterating the children to sum their length, so that'd be an O(children) minimum heuristic</p>
+
+
+
+<a name="198228412"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198228412" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198228412">(May 20 2020 at 17:07)</a>:</h4>
+<p>Plus <span class="user-mention" data-user-id="139182">@Simon Vandel Sillesen</span>, there's another big hole I just realized in caching based on identity while also caching based on direct children length:</p>
+<p>Your patch will now decrease the number of cached nodes, because nodes now can only be cached if their children were</p>
+
+
+
+<a name="198228485"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198228485" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198228485">(May 20 2020 at 17:08)</a>:</h4>
+<p>Which actually was a key reason in sorbus caching everything now that I think about it</p>
+
+
+
+<a name="198265122"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198265122" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198265122">(May 20 2020 at 22:25)</a>:</h4>
+<p><span class="user-mention" data-user-id="132829">@Christopher Durham</span> I have a few clarifying questions. </p>
+<p>I read <a href="https://github.com/rust-analyzer/rowan/blob/40fe55c450c88f4da7cf315bf027bec3250a7352/src/green/builder.rs#L29">https://github.com/rust-analyzer/rowan/blob/40fe55c450c88f4da7cf315bf027bec3250a7352/src/green/builder.rs#L29</a> as Rowan only hashing if the direct children are &lt;= 3. What am I missing?</p>
+<p>Regarding caching based on identity with children count heuristic. I feel like I’m missing something obvious - my mental model is not yet accurate of parsing and trees. Why can nodes only be cached if the children were? I think an example would help me greatly.</p>
+<p>Finding a nice heuristic will however help reducing the number of hashes. I’ll benchmark no limitations on cache next week when I get to a computer.</p>
+
+
+
+<a name="198266628"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198266628" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198266628">(May 20 2020 at 22:43)</a>:</h4>
+<p>So if I have node A 2+2 that is a node with 3 children (all tokens). In another branch of the tree i now want to build the node B 2+2 node. This second node B would have the same identity hash as the first node A, right? If token + of node A went out of cache, node A would still be in the cache .... ah okay, I think I realize ... so when constructing the token + for node B it will not be found in the cache and will therefore get a different ptr. So the identity of node A and B will not be the same</p>
+
+
+
+<a name="198267670"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198267670" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198267670">(May 20 2020 at 22:56)</a>:</h4>
+<p>Idea to find heuristic: setup caching based on identity with no limitations. Instrument the hashmap access with cache miss/hit and eprtintln the miss/hit along with kind, Len of node and a print of each child. It would be interesting to see which of these, if any, are a good predictor of a cache hit. Run this data collection on representative code</p>
+
+
+
+<a name="198267775"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198267775" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198267775">(May 20 2020 at 22:57)</a>:</h4>
+<p>A good predictor of a cache miss would be equally useful as those can be used to avoid hashing</p>
+
+
+
+<a name="198272974"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198272974" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198272974">(May 21 2020 at 00:11)</a>:</h4>
+<p>Actually it should be caching based on subtree hashing. Else we get misleading information on cachability of a node</p>
+
+
+
+<a name="198480951"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198480951" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198480951">(May 22 2020 at 18:56)</a>:</h4>
+<p><span class="user-mention" data-user-id="139182">@Simon Vandel Sillesen</span> (sorry for slow replies, I'm trying to do too many things at the same time right now <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span> )</p>
+
+
+
+<a name="198480966"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198480966" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198480966">(May 22 2020 at 18:56)</a>:</h4>
+<p>First off, something I just realized:</p>
+
+
+
+<a name="198481019"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198481019" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198481019">(May 22 2020 at 18:57)</a>:</h4>
+<blockquote>
+<p>For example, all <code>#[inline]</code> in this file share the same green node!</p>
+</blockquote>
+
+
+
+<a name="198481058"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198481058" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198481058">(May 22 2020 at 18:57)</a>:</h4>
+<p>This is actually not true if we gate caching to nodes that have &lt;= 3 direct children</p>
+
+
+
+<a name="198481087"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198481087" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198481087">(May 22 2020 at 18:57)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>    ATTR@25..34
+      POUND@25..26 &quot;#&quot;
+      L_BRACK@26..27 &quot;[&quot;
+      PATH@27..33
+        PATH_SEGMENT@27..33
+          NAME_REF@27..33
+            IDENT@27..33 &quot;inline&quot;
+      R_BRACK@33..34 &quot;]&quot;
+</code></pre></div>
+
+
+
+<a name="198481180"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198481180" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198481180">(May 22 2020 at 18:58)</a>:</h4>
+<p>As <code>#[inline]</code> is a node with four direct children</p>
+
+
+
+<a name="198481489"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198481489" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198481489">(May 22 2020 at 19:01)</a>:</h4>
+<p>If you do something like sorbus's cache where _every_ node is built with the cache and persisted in the cache, you know you have perfect deduplication and can still get perfect deduplication via identity</p>
+
+
+
+<a name="198844944"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198844944" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198844944">(May 27 2020 at 02:48)</a>:</h4>
+<p>I just keep having more and more cursed ideas for how to optimize this.</p>
+<p>In sorbus, we're storing the node's children's textual offset from the parent in the children array, so that going from <code>&amp;green::Node, (kind, offset)</code> to <code>&amp;green::Node</code> is ~O(log n) rather than O(n)</p>
+
+
+
+<a name="198844957"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198844957" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198844957">(May 27 2020 at 02:48)</a>:</h4>
+<p>The first node is obviously at offset 0, though, so that's a wasted u32!</p>
+
+
+
+<a name="198845024"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198845024" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198845024">(May 27 2020 at 02:50)</a>:</h4>
+<p>So we <em>could</em> "just" stick a depth counter there and have our O(1) depth check</p>
+
+
+
+<a name="198845040"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198845040" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198845040">(May 27 2020 at 02:50)</a>:</h4>
+<p>(Should we? Probably not, it'd add a very annoying edge case to child iteration.)</p>
+
+
+
+<a name="198845537"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198845537" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198845537">(May 27 2020 at 03:03)</a>:</h4>
+<p>If we care a little less about performance of a cache and a little more about proper caching while retaining a bounded size, then <a href="https://medium.com/@bparli/enhancing-least-frequently-used-caches-with-dynamic-aging-64dc973d5857#9457">LFUDA or GDS</a> caches sound enticing, especially for a shared cache</p>
+
+
+
+<a name="198845746"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198845746" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198845746">(May 27 2020 at 03:08)</a>:</h4>
+<p>Other than stealing the first child's offset as space for storing depth, we could also just add another <code>u32</code> to <code>Node</code> and flip the parity of the children array</p>
+
+
+
+<a name="198900706"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198900706" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198900706">(May 27 2020 at 14:40)</a>:</h4>
+<p>Shrinking node size would be a way to reduce the work that needs to be done on memory allocation. However a 4 byte decrease like your example might actually not be that significant. I guess it will depend on the memory allocator, and its bucket sizes.</p>
+<p>An orthogonal, and I think it might be more fruitful, idea would be to add arena allocation of nodes. If er can add an api to basically batch allocate the complete tree, that would work well for <a href="http://crates.io">crates.io</a> dependencies that don't change.</p>
+
+
+
+<a name="198900966"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198900966" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198900966">(May 27 2020 at 14:41)</a>:</h4>
+<p>I'm currently working on a patch for rust-analyzer to reduce the amount of events allocated in the parser. I don't have any numbers yet, but i believe it should be helpful in reducing memory usage of parsing  <span aria-label="+1" class="emoji emoji-1f44d" role="img" title="+1">:+1:</span></p>
+
+
+
+<a name="198903355"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198903355" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198903355">(May 27 2020 at 14:55)</a>:</h4>
+<p><span class="user-mention" data-user-id="132829">@Christopher Durham</span> i just read the article on dynamics cache aging. It seems like something that could be useful in case of a global cache. A good cache policy could definitely improve performance a bunch</p>
+
+
+
+<a name="198903776"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198903776" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198903776">(May 27 2020 at 14:57)</a>:</h4>
+<p>Hey, it seems like I am not able to follow this work to closely. I hope to catch up with it once things calm down (hehe). If you need something from me to unblock experimentation (publishing crates or what not), feel free to agressively ping :)</p>
+
+
+
+<a name="198906455"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198906455" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198906455">(May 27 2020 at 15:13)</a>:</h4>
+<p>No blockings on my side <span aria-label="slight smile" class="emoji emoji-1f642" role="img" title="slight smile">:slight_smile:</span></p>
+
+
+
+<a name="198914545"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198914545" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pksunkara <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198914545">(May 27 2020 at 16:10)</a>:</h4>
+<p>I am working on publishing crates. Chalk should start publishing soon and then I can move on to rust-analyzer</p>
+
+
+
+<a name="198969211"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198969211" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198969211">(May 28 2020 at 00:07)</a>:</h4>
+<p>(I'm just dumping this cursed idea here so it's recorded, but I doubt it's actually a good idea:<br>
+It's theoretically possible to have both thread-local shared builder caches and sharing between threads. "Just" have a cache miss look at the other thread's caches before making a new node and inserting it to the local cache.)</p>
+
+
+
+<a name="198969462"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198969462" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198969462">(May 28 2020 at 00:10)</a>:</h4>
+<p><span class="user-mention" data-user-id="139182">@Simon Vandel Sillesen</span> </p>
+<blockquote>
+<p>arena allocation</p>
+</blockquote>
+<p>Out of curiousity, do you know if sorbus's FAM-based nodes are inherently problematic for an arena?</p>
+
+
+
+<a name="198969511"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198969511" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198969511">(May 28 2020 at 00:11)</a>:</h4>
+<p>From a theoretical point of view, arena-allocating nodes, at least for dependencies, makes sense</p>
+
+
+
+<a name="198969528"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198969528" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198969528">(May 28 2020 at 00:11)</a>:</h4>
+<p>From a convenience point of view, owning trees makes everything _so much easier_.</p>
+
+
+
+<a name="198994262"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198994262" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198994262">(May 28 2020 at 08:19)</a>:</h4>
+<p><span class="user-mention" data-user-id="132829">@Christopher Durham</span> i believe roslyn uses this concept of a L1 and L2 cache system. Probably a good thing to write on that list of things to experiment with</p>
+
+
+
+<a name="198994421"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198994421" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198994421">(May 28 2020 at 08:21)</a>:</h4>
+<p><span class="user-mention" data-user-id="132829">@Christopher Durham</span> does Fam-based nodes mean nodes in a family tree? As in parents point to children, but not the opposite? I don't know on the top of my head, will need to research or think some time</p>
+
+
+
+<a name="198994673"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/198994673" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#198994673">(May 28 2020 at 08:24)</a>:</h4>
+<p>I think the api and ownership semantics would need to be different for arena-trees. As in ownership is only possible at the root level of a tree (the complete syntax tree)</p>
+
+
+
+<a name="199048703"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/199048703" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#199048703">(May 28 2020 at 16:52)</a>:</h4>
+<p>FAM = Flexible Array Member</p>
+
+
+
+<a name="199048910"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/199048910" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#199048910">(May 28 2020 at 16:54)</a>:</h4>
+<p>(wait, I did actually get Rowan using an older version of my FAM infra)</p>
+
+
+
+<a name="199049030"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/199049030" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#199049030">(May 28 2020 at 16:55)</a>:</h4>
+<p>Basically,<br>
+Without FAM <code>Node = { kind, len, childs: Vec&lt;Child&gt; }</code><br>
+With FAM <code>Node = { kind, len, childs: [Child] }</code></p>
+
+
+
+<a name="199049201"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/199049201" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#199049201">(May 28 2020 at 16:56)</a>:</h4>
+<p>It means <code>Node</code> (well, the heap part) is dynamically sized. This means a simple typed arena doesn't work.</p>
+
+
+
+<a name="199055949"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/199055949" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#199055949">(May 28 2020 at 17:44)</a>:</h4>
+<p>By the way, <code>AsRef&lt;[T]&gt;</code> for <code>vec::Drain</code> and <code>vec::IntoIter</code> (the API required for no-alloc cache hits) are FCP-merge. Once they're in nightly, I can make a PR to Rowan to use them; I already have <a href="https://github.com/CAD97/sorbus/pull/40">a proof-of-concept patch for sorbus</a> (as well as a slightly less POC draft locally).</p>
+
+
+
+<a name="199062665"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/199062665" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Simon Vandel Sillesen <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#199062665">(May 28 2020 at 18:29)</a>:</h4>
+<p><span class="user-mention" data-user-id="132829">@Christopher Durham</span> </p>
+<blockquote>
+<p>no-alloc cache hits </p>
+</blockquote>
+<p>sounds good! Unfortunately rust analyzer is stable only, right? </p>
+<blockquote>
+<p>FAM</p>
+</blockquote>
+<p>Ah okay, I see. So Node is not Sized, right?<br>
+In any case, we could have different sized bins ala <a href="https://citybound.github.io/citybound/chunky/struct.MultiArena.html">https://citybound.github.io/citybound/chunky/struct.MultiArena.html</a></p>
+
+
+
+<a name="199091973"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/199091973" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#199091973">(May 28 2020 at 22:03)</a>:</h4>
+<p>Yeah, r-a compiles on stable and it'd be nice to keep it that way. The API in question is be stabilized by the PRs, though, so it'll probably be available in 1.46 (1.45 if it sneaks in before the beta cutoff next week)</p>
+
+
+
+<a name="199091999"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/199091999" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#199091999">(May 28 2020 at 22:03)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/pull/72584">https://github.com/rust-lang/rust/pull/72584</a>, <a href="https://github.com/rust-lang/rust/pull/72584">https://github.com/rust-lang/rust/pull/72584</a></p>
+
+
+
+<a name="199092094"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/199092094" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#199092094">(May 28 2020 at 22:04)</a>:</h4>
+<p><code>vec::Drain</code> is the more important one, as that's how the <code>TreeBuilder</code> works.</p>
+
+
+
+<a name="201093986"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201093986" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201093986">(Jun 17 2020 at 01:45)</a>:</h4>
+<p>The necessary API for no-alloc cache hits are riding the trains to stable</p>
+
+
+
+<a name="201093996"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201093996" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201093996">(Jun 17 2020 at 01:46)</a>:</h4>
+<p>I've done the requisite patch in sorbus: <a href="https://github.com/CAD97/sorbus/pull/45">https://github.com/CAD97/sorbus/pull/45</a></p>
+
+
+
+<a name="201094051"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201094051" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201094051">(Jun 17 2020 at 01:46)</a>:</h4>
+<p>If nobody has done the same for rowan by the time 1.46 hits stable I'll do the same for rowan</p>
+
+
+
+<a name="201094069"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201094069" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201094069">(Jun 17 2020 at 01:47)</a>:</h4>
+<p>The <code>weak_as_ptr</code> feature is also stabilizing in 1.46</p>
+
+
+
+<a name="201094086"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201094086" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201094086">(Jun 17 2020 at 01:47)</a>:</h4>
+<p>And that may potentially have an answer for the cache growth!</p>
+
+
+
+<a name="201094225"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201094225" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201094225">(Jun 17 2020 at 01:50)</a>:</h4>
+<p>"Just" store weak pointers in the cache</p>
+
+
+
+<a name="201094230"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201094230" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201094230">(Jun 17 2020 at 01:50)</a>:</h4>
+<p>And expose a <code>.gc(&amp;mut self)</code> to walk the cache and clear out any dangling pointers</p>
+
+
+
+<a name="201094314"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201094314" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201094314">(Jun 17 2020 at 01:53)</a>:</h4>
+<p>Alternatively: be <del>even more</del> less clever, and expose the <code>.gc(&amp;mut self)</code> that just purges any cached element with <code>strong_count() == 1</code></p>
+
+
+
+<a name="201179377"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201179377" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201179377">(Jun 17 2020 at 18:09)</a>:</h4>
+<p><a href="https://github.com/CAD97/sorbus/pull/46">https://github.com/CAD97/sorbus/pull/46</a> is an implementation in sorbus of a cache GC.</p>
+
+
+
+<a name="201313254"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201313254" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201313254">(Jun 18 2020 at 19:14)</a>:</h4>
+<p>upstream hashbrown prereqs merged, so we have GC for the sorbus caches exposed now.<br>
+I went to port this to rowan only to be foiled by myself; <code>thin_dst::ThinArc</code> doesn't expose any way to get at <code>Arc::strong_count</code>.</p>
+
+
+
+<a name="201313290"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201313290" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201313290">(Jun 18 2020 at 19:14)</a>:</h4>
+<p>I guess I need to look into actually updating rowan from using <code>thin_dst</code> to <code>slice_dst</code> and <code>erasable</code> then...</p>
+
+
+
+<a name="201346166"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201346166" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201346166">(Jun 19 2020 at 02:14)</a>:</h4>
+<p>Simple cache gc support for rowan: <a href="https://github.com/rust-analyzer/rowan/pull/63">https://github.com/rust-analyzer/rowan/pull/63</a></p>
+
+
+
+<a name="201517815"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201517815" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201517815">(Jun 21 2020 at 05:23)</a>:</h4>
+<p><a href="https://github.com/CAD97/sorbus/pull/53">I'm doing evil things to hash tables</a></p>
+
+
+
+<a name="201517826"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201517826" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201517826">(Jun 21 2020 at 05:23)</a>:</h4>
+<p>The current cache GC is roughly O(m log n)</p>
+
+
+
+<a name="201517869"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201517869" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201517869">(Jun 21 2020 at 05:24)</a>:</h4>
+<p>That's why sorbus exposes a O(m) "GC turn" that only collects roughly one and a half "layers" of a freeable tree</p>
+
+
+
+<a name="201518000"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201518000" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201518000">(Jun 21 2020 at 05:24)</a>:</h4>
+<p>But this is a way of getting a complete collection in just one pass</p>
+
+
+
+<a name="201518050"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201518050" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201518050">(Jun 21 2020 at 05:26)</a>:</h4>
+<p>(m is the number of cached elements, n is the number of freeable elements)</p>
+
+
+
+<a name="201518059"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201518059" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201518059">(Jun 21 2020 at 05:26)</a>:</h4>
+<p>(which isn't quite O(m), but should be O(m+n) (which... is O(m) because asymptotes and n⊂m))</p>
+
+
+
+<a name="201518065"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201518065" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201518065">(Jun 21 2020 at 05:27)</a>:</h4>
+<p>But the evil part is it works via concurrent modification and iteration of the hash table</p>
+
+
+
+<a name="201518069"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201518069" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201518069">(Jun 21 2020 at 05:27)</a>:</h4>
+<p>I think I found a way for it to actually be sound</p>
+
+
+
+<a name="201518115"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/201518115" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#201518115">(Jun 21 2020 at 05:28)</a>:</h4>
+<p>But I'm <a href="https://github.com/rust-lang/hashbrown/issues/165">asking hashbrown how abusive I'm allowed to be to their hash tables</a> to be safe.</p>
+
+
+
+<a name="206986269"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/206986269" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#206986269">(Aug 14 2020 at 21:52)</a>:</h4>
+<p>I am warming up to Roslyn/libsyntax idea of storing trivia in tokens more!</p>
+<p>The idea is that, instead of storing comments, white space and skipped tokens as nodes, we store them as leading/trailing fields of tokens.</p>
+<p>On the first sight, this seems like a royally bad idea, because <strong>most</strong> of the tree are tokens, and we are growing each token by two pointers.</p>
+<p>However, I think we’ll actually save on memory here. Most of the tokens are interned (even if we take trivia into account), so +two pointers is not such a big deal. OTOH, we now store twice as few pointers in internal nodes, which would seem like a bigger win.</p>
+
+
+
+<a name="206992224"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/206992224" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#206992224">(Aug 14 2020 at 23:13)</a>:</h4>
+<p>Hmm</p>
+
+
+
+<a name="206992231"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/206992231" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#206992231">(Aug 14 2020 at 23:13)</a>:</h4>
+<p>That definitely does seem plausible</p>
+
+
+
+<a name="206992246"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/206992246" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#206992246">(Aug 14 2020 at 23:13)</a>:</h4>
+<p>The number of unique tokens would go up, ofc</p>
+
+
+
+<a name="206992304"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/206992304" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#206992304">(Aug 14 2020 at 23:14)</a>:</h4>
+<p>(as not every token with the same text would store the same lead/tail trivia)</p>
+
+
+
+<a name="206992354"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/206992354" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Christopher Durham <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#206992354">(Aug 14 2020 at 23:15)</a>:</h4>
+<p>But it does seem like it could reduce the number of pointers to any given trivia node</p>
+
+
+
+<a name="207023990"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/207023990" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mr Smeet <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#207023990">(Aug 15 2020 at 14:23)</a>:</h4>
+<p>It seems to me that before making any decisions regarding changes, we should develop a benchmark. Because maybe we will win some memory but lose execution speed or that don't give any benefits</p>
+
+
+
+<a name="216997634"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/216997634" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#216997634">(Nov 17 2020 at 12:48)</a>:</h4>
+<blockquote>
+<p>I am warming up to Roslyn/libsyntax idea of storing trivia in tokens more!</p>
+</blockquote>
+<p>Ok, I've made up my mind, we should switch to roslyn's handling of trivia. It's way to easy to loose trivia during refactors otherwise.</p>
+<p>Now we need only to rewrite everything <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span></p>
+
+
+
+<a name="217037464"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rowan%20memory-usage/near/217037464" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Rowan.20memory-usage.html#217037464">(Nov 17 2020 at 17:48)</a>:</h4>
+<p><a href="https://github.com/rust-analyzer/rust-analyzer/issues/6584">https://github.com/rust-analyzer/rust-analyzer/issues/6584</a></p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

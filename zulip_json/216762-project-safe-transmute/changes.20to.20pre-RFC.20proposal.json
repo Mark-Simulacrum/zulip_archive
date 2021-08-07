@@ -1,0 +1,362 @@
+[
+    {
+        "content": "<p>I took the time to write out what I believe are the limitations of the pre-RFC proposal: </p>\n<ul>\n<li>Runtime check required for converting between two types where the type being cast to is not FromAnyBytes but the type being cast from happens to have the same in-memory representation as the type being cast to. For instance, casting between two c-style enums that are technically equivalent to one another.</li>\n<li>Runtime performance is fully reliant on a sufficiently smart optimizer (though the optimizer is generally smart enough in reality)</li>\n<li>Type level checks even when it's obvious these are not needed (e.g. casting between Foo(u8, u8) and Bar(u16) will require the user to unwrap even though that will never fail). </li>\n<li>No ability to directly indicate in the type system that two types can be trivially transmuted between each other (since we always use bytes as the intermediary). </li>\n<li>No ability to encode type size constraints at the type level (i.e., we rely on the optimizer to be able to remove these)</li>\n</ul>\n<p>To address these issues I propose the following changes:</p>\n<ul>\n<li>Taking a page out of <span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span>'s proposal, we replace <code>FromAnyBytes</code> with a general <code>unsafe Compatible&lt;T&gt;</code> trait. All types that would have implemented <code>FromAnyBytes</code> will implement <code>Compatible&lt;[u8]&gt;</code> (the same derive mechanism still exists) . Given that fully taking advantage of <code>Compatible&lt;T&gt;</code> requires changes to the trait system, we don't implement <code>Compatible&lt;T&gt;</code> for anything else yet. In the future as Chalk becomes a thing, we can implement <code>Compatible&lt;T&gt;</code> for more types.</li>\n<li><code>ToBytes</code> and <code>FromBytes</code> still exist - these types handle casting types to types that are <code>Compatible</code> _and_ types that can only sometimes be casted to other types if they meet certain runtime conditions.</li>\n<li>We leave a <code>safe_transmute</code> API (which is essentially just the infallible version of what we're proposing here) for a future RFC when the needed changes to the trait system are a bit closer to reality.</li>\n<li>Additionally, we tie the proposal to const generics and encode size (and alignment when possible) in the type system so that these checks are guaranteed to not happen at runtime. </li>\n</ul>\n<p>This addresses some of the concerns listed above, though not all, but I believe it leaves things open for those concerns to be addressed in the future in a way that makes sense and is a natural progression of this RFC. </p>\n<p>These changes do not _guarantee_ that casts are  zero cost because the API also needs to handle when there is a cost. Though it should be clearer to be people that the optimizer will handle the <code>Compatible</code> case. In the future with chalk, people can move to using <code>safe_transmute</code> if they are casting types that are <code>Compatible</code>. The same goes for the fact that infallible casts need to be <code>unwrap</code>ed, but again these can be move to using the <code>safe_transmute</code> API in the future. Thoughts?</p>",
+        "id": 183641991,
+        "sender_full_name": "rylev",
+        "timestamp": 1576584370
+    },
+    {
+        "content": "<blockquote>\n<p>All types that would have implemented FromAnyBytes will implement Compatible&lt;u8&gt; (the same derive mechanism still exists) </p>\n</blockquote>\n<p>Do you mean something like <code>Compatible&lt;[u8]&gt;</code> instead of <code>Compatible&lt;u8&gt;</code> ?</p>",
+        "id": 183642176,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576584585
+    },
+    {
+        "content": "<p>Yes, sorry. Will fix the typo</p>",
+        "id": 183642276,
+        "sender_full_name": "rylev",
+        "timestamp": 1576584663
+    },
+    {
+        "content": "<p>Sounds like a good idea. I think the very first <code>Compatible&lt;T&gt;</code> discussion included an incremental approach to implementing it, that kind of aligns with what you have suggested.</p>",
+        "id": 183642571,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576584896
+    },
+    {
+        "content": "<p><a href=\"https://internals.rust-lang.org/t/pre-rfc-frombits-intobits/7071/24\" target=\"_blank\" title=\"https://internals.rust-lang.org/t/pre-rfc-frombits-intobits/7071/24\">See this comment</a>:</p>\n<blockquote>\n<p>A first version could just be this, requiring manual implementation of the trait.</p>\n<p>A second version could add compiler support for automatically deriving the trait in addition to doing so manually and for performing transitive closure so that if A: Compatible&lt;B&gt; and B: Compatible&lt;C&gt; (whether manually or automatically), then A: Compatible&lt;C&gt;.</p>\n<p>A further addition could be to provide a safe way to manually implement the trait for private types in the current crate.</p>\n</blockquote>",
+        "id": 183642597,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576584933
+    },
+    {
+        "content": "<p>I think that the <code>Compatible&lt;T&gt;</code> design direction most appealing advantage is the transitive closure part, so I'd be wary of stabilizing a less powerful version without at least some nightly prototype supporting transitive closure.</p>",
+        "id": 183642712,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576585043
+    },
+    {
+        "content": "<p>If when somebody tries to implement this, for whatever reason, we discover that transitive closure is a bad idea, then maybe <code>Compatible&lt;T&gt;</code> isn't worth it and there is a better solution that could be pursued instead.</p>",
+        "id": 183642763,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576585082
+    },
+    {
+        "content": "<blockquote>\n<p>If when somebody tries to implement this, for whatever reason, we discover that transitive closure is a bad idea, then maybe <code>Compatible&lt;T&gt;</code> isn't worth it and there is a better solution that could be pursued instead.</p>\n</blockquote>\n<p>This is the only thing I worry about. While I agree that <code>Compatible&lt;T&gt;</code> is probably the most appealing approach, it does rely on a bit of faith that the implementation is possible.</p>",
+        "id": 183643001,
+        "sender_full_name": "rylev",
+        "timestamp": 1576585299
+    },
+    {
+        "content": "<p>But I think we encode that in the alternatives section of the RFC. I personally am not familiar enough with rustc development to have an opinion here</p>",
+        "id": 183643216,
+        "sender_full_name": "rylev",
+        "timestamp": 1576585471
+    },
+    {
+        "content": "<p>After doing some thinking I think it would be best if we kept Compatible as an unstable Feature and just implemented FromAnyBytes and ToBytes in terms of it. That way we don't have to 1000% sure about compatible before stabilizing the feature.</p>",
+        "id": 183660735,
+        "sender_full_name": "rylev",
+        "timestamp": 1576597786
+    },
+    {
+        "content": "<p>I think that all changes being zero cost isn't a realistic goal in the first place.</p>",
+        "id": 183665280,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576600347
+    },
+    {
+        "content": "<p>I think that having changes be zero-cost AND have a cheap type-level compilation overhead is indeed overly optimistic: we may indeed be able to move many checks to const / compile-time through derives, marker traits, and const_asserts, but so doing will impact compile-time, especially the derives. Imho the benefits (safe, quasi-zero-cost type punning) would clearly outweigh such cost, but it is something to be aware of.</p>\n<p>(by the way I'd love to contribute to this project <span aria-label=\"slight smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"slight smile\">:slight_smile:</span>)</p>",
+        "id": 183742427,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1576669125
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> so one thing i'm not sure how well it would work with <code>FromAnyBytes</code> and <code>ToBytes</code> is packed SIMD vectors.</p>",
+        "id": 183759128,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576682495
+    },
+    {
+        "content": "<p>Can you expand on this?</p>",
+        "id": 183759435,
+        "sender_full_name": "rylev",
+        "timestamp": 1576682654
+    },
+    {
+        "content": "<p>I can see the use case of going from <code>&amp;__m128</code> to <code>&amp;__m128d</code> when working with slices, but often one loads data, e.g., from a slice, into SIMD vectors on the stack, and then one needs to \"transmute\" <code>__m128</code> to <code>__m128d</code>.</p>",
+        "id": 183759460,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576682683
+    },
+    {
+        "content": "<p>For this later use case, it is kind of weird to have to create a <code>&amp;__m128</code> to the stack (feels like a reference to a register), then transmute that into a <code>&amp;__m128d</code>, and then load from it, which creates a copy.</p>",
+        "id": 183759625,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576682785
+    },
+    {
+        "content": "<p>Does that make sense?</p>",
+        "id": 183759836,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576682933
+    },
+    {
+        "content": "<p>I'm not sure I fully understand. It sounds like you're saying you don't believe the current proposal handles \"owned to owned\" casting. Is that what you mean?</p>",
+        "id": 183759881,
+        "sender_full_name": "rylev",
+        "timestamp": 1576682979
+    },
+    {
+        "content": "<p>Yes, thanks, that's a much better way to put it.</p>",
+        "id": 183759955,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576683007
+    },
+    {
+        "content": "<p>The main use case of the FromBits/IntoBits proposal was SIMD, and for that use case, \"owned to owned\" feels more idiomatic.</p>",
+        "id": 183760032,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576683064
+    },
+    {
+        "content": "<p>I believe it should. There should be a <code>cast_into</code>method in addition to the other casts.</p>",
+        "id": 183760044,
+        "sender_full_name": "rylev",
+        "timestamp": 1576683072
+    },
+    {
+        "content": "<p>Oh, I don't recall seeing <code>cast_into</code> in the v2</p>",
+        "id": 183760136,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576683123
+    },
+    {
+        "content": "<p>Is it new in the repo ?</p>",
+        "id": 183760177,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576683145
+    },
+    {
+        "content": "<p>It was removed in the v2 proposal when Josh posted it, and I'm not sure why. I've added back on the RFC draft I'm working on now. I haven't push that work to the repo yet unfortunately. I need to ask Josh if that was on purpose, and if so, why.</p>",
+        "id": 183760360,
+        "sender_full_name": "rylev",
+        "timestamp": 1576683252
+    },
+    {
+        "content": "<p>Ah ok, thanks, i'll check the v1 version.</p>",
+        "id": 183760376,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576683269
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span> one question I never got answered about <code>Compatible</code> is how it interacts with the orphan rule. If I have a type <code>B</code> and some other crates has type <code>A</code> and I want to express that it is safe to read <code>B</code> when you have a <code>A</code> (and perhaps not the other way around), how do you encode this? I don't believe it would be possible to <code>impl Compatible&lt;B&gt; for A</code> because type <code>A</code> lives outside your crate.</p>",
+        "id": 183762732,
+        "sender_full_name": "rylev",
+        "timestamp": 1576684645
+    },
+    {
+        "content": "<p>Yes good question. I think the orphan rules allow <code>impl Compatible&lt;A&gt; for B</code> but i'm not sure if <code>impl Compatible&lt;B&gt; for A</code> is allowed</p>",
+        "id": 183763505,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685111
+    },
+    {
+        "content": "<p>Probably not, since <code>Compatible</code> is outside your crate, and so is A.</p>",
+        "id": 183763544,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685147
+    },
+    {
+        "content": "<p>Yes the first is allowed because the current crate \"owns\" that type, but the second is not allowed I believe. <br>\nIs this a deal breaker? Seems pretty serious to me</p>",
+        "id": 183763624,
+        "sender_full_name": "rylev",
+        "timestamp": 1576685195
+    },
+    {
+        "content": "<p>I'm not sure if it is possible to relax the orphan ruls to allow that impl, but I recall there were proposals to relax the orphan rules in directions similar to this (e.g. for <code>impl From&lt;B&gt; for A</code> maybe?)</p>",
+        "id": 183763625,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685198
+    },
+    {
+        "content": "<p>It's definetely not good, and i'm not sure if it is a deal breaker.</p>",
+        "id": 183763651,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685224
+    },
+    {
+        "content": "<p>Simple example would be <code>impl Compatible&lt;B&gt; for [u8; size_of::&lt;B&gt;()]</code></p>",
+        "id": 183763709,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685268
+    },
+    {
+        "content": "<p>since the array type is outside all crates but libcore. It would be very bad if that can't work, since then nothing works. Nice catch.</p>",
+        "id": 183763800,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685314
+    },
+    {
+        "content": "<p>hehe but then we're back to using bytes as intermediary which is very similar to the \"v2\" proposal</p>",
+        "id": 183763813,
+        "sender_full_name": "rylev",
+        "timestamp": 1576685323
+    },
+    {
+        "content": "<p>Nono, that array was just an example of some <code>A</code> type</p>",
+        "id": 183763834,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685341
+    },
+    {
+        "content": "<p>notice that <code>[u8; N]</code>, <code>[T]</code>, etc. are all declared in libcore</p>",
+        "id": 183763847,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685352
+    },
+    {
+        "content": "<p>so that's the crate they belong to</p>",
+        "id": 183763857,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685358
+    },
+    {
+        "content": "<p>So then we're back to needing to change the orphan rules to get Compatible&lt;T&gt; to work</p>",
+        "id": 183763905,
+        "sender_full_name": "rylev",
+        "timestamp": 1576685393
+    },
+    {
+        "content": "<p>If you have a crate with a type <code>B</code>, and you want to express that <code>[u8; N]</code> can be constructed from <code>B</code>, then you need such an impl to work, and that's somehting everybody has to be able to impl</p>",
+        "id": 183763969,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685413
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> are you sure that you need to change the orphan rules for that ?</p>",
+        "id": 183763985,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685427
+    },
+    {
+        "content": "<p>E.g. does <code>impl From&lt;B&gt; for </code>u8` do not work ?</p>",
+        "id": 183763994,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685439
+    },
+    {
+        "content": "<p>IIRC the \"trait\" isn't <code>From</code>, but \"\"<code>From&lt;B&gt;</code>\"\", and since <code>B</code> is defined in your crate, then <code>From&lt;B&gt;</code> is kind of like defined in your crate as well, so you are like implementing a trait from your crate to an external type, and that does not violate orphan rules.</p>",
+        "id": 183764051,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685489
+    },
+    {
+        "content": "<p>Let me check if I can find that</p>",
+        "id": 183764081,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685510
+    },
+    {
+        "content": "<p>Yeah, see this issue: <a href=\"https://github.com/rust-lang/rfcs/issues/1856\" target=\"_blank\" title=\"https://github.com/rust-lang/rfcs/issues/1856\">https://github.com/rust-lang/rfcs/issues/1856</a></p>",
+        "id": 183764160,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685549
+    },
+    {
+        "content": "<p>And this RFC: <a href=\"https://github.com/rust-lang/rfcs/pull/2451\" target=\"_blank\" title=\"https://github.com/rust-lang/rfcs/pull/2451\">https://github.com/rust-lang/rfcs/pull/2451</a></p>",
+        "id": 183764216,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685594
+    },
+    {
+        "content": "<blockquote>\n<p>More concretely, it allows impl&lt;T&gt; ForeignTrait&lt;LocalType&gt; for ForeignType&lt;T&gt; to be written.</p>\n</blockquote>",
+        "id": 183764239,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685608
+    },
+    {
+        "content": "<blockquote>\n<p>For example, impl From&lt;Foo&gt; for Vec&lt;i32&gt; is something any crate can write, even though From is a foreign trait, and Vec is a foreign type.</p>\n</blockquote>",
+        "id": 183764362,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685660
+    },
+    {
+        "content": "<p>So it appears that this was allowed even before that RFC</p>",
+        "id": 183764378,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685668
+    },
+    {
+        "content": "<p>That RFC extended that to the <code>impl&lt;T&gt;</code> case</p>",
+        "id": 183764396,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685680
+    },
+    {
+        "content": "<p>Ah ok then maybe we don't have a problem</p>",
+        "id": 183764426,
+        "sender_full_name": "rylev",
+        "timestamp": 1576685697
+    },
+    {
+        "content": "<p>I think that if this is a problem, then it would be kind of a killer</p>",
+        "id": 183764448,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576685713
+    },
+    {
+        "content": "<p>This does bring up the issue that new types cannot help you if a piece of your Compatible type is a foreign type and it does not impl Compatible</p>",
+        "id": 183764768,
+        "sender_full_name": "rylev",
+        "timestamp": 1576685914
+    },
+    {
+        "content": "<p>Why would you load data as <code>__m128</code> and then transmute to <code>__m128d</code>? There's functions to load directly into <code>__m128d</code> already.</p>",
+        "id": 183783514,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576698246
+    },
+    {
+        "content": "<p>As to orphaning, I know that in <code>beryllium</code> I've written impls like</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">core</span>::<span class=\"nb\">From</span><span class=\"o\">&lt;</span><span class=\"n\">beryllium</span>::<span class=\"n\">ControllerAxisEvent</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">fermium</span>::<span class=\"n\">SDL_ControllerAxisEvent</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>(not quite real, I'm putting the crate origin in front of each type for clarity)</p>\n<p>So in this case I'm using another crate's trait (core) and <em>for</em> another crate's type (fermium), but since the generic of the other crate's trait is a type from my own crate (beryllium), the overall instance is mine to write or not.</p>",
+        "id": 183784107,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576698621
+    },
+    {
+        "content": "<p>So anyone defining their own type should be able to similarly write <code>impl Compatible&lt;MyType&gt; for [u8; 4]</code> or whatever.</p>",
+        "id": 183784654,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576698989
+    },
+    {
+        "content": "<blockquote>\n<p>Why would you load data as __m128 and then transmute to __m128d? </p>\n</blockquote>\n<p>Some intrinsics accept one type and not the other.</p>",
+        "id": 183830545,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576749162
+    },
+    {
+        "content": "<p>So you need to go from one to the other somehow.</p>",
+        "id": 183830563,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576749186
+    },
+    {
+        "content": "<blockquote>\n<p>This does bring up the issue that new types cannot help you if a piece of your Compatible type is a foreign type and it does not impl Compatible</p>\n</blockquote>\n<p>Do you have an example of what you mean ?</p>",
+        "id": 183830598,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576749219
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span> there's intrinsics for those conversions, and probably they will perform better than whatever cast mechanism we make.</p>\n<p>I don't mean to say that they shouldn't be supported by a casting API, but just that a casting API is the fallback case already.</p>",
+        "id": 183865895,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576776030
+    },
+    {
+        "content": "<p>Care to elaborate? Those intrinsics just call transmute, the transmutes are safe, so a safe transmute API should be able to perform them if it aims to be complete , which his one of the constraints mentioned.</p>",
+        "id": 183866364,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576776370
+    }
+]

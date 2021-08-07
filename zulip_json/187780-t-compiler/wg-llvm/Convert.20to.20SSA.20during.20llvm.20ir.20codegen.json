@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>I noticed that cg_llvm always uses <code>alloca</code> to store locals even when it is possible to use SSA values. This leads to more inefficient code and more ir to churn through for llvm. While llvm is able to turn it into SSA using the mem2reg pass, this doesn't happen for <code>-Copt-level=0</code>, which is the default. This means that cg_llvm generates slower code in debug mode than necessary. cg_clif is able to directly turn it into SSA form on the fly using cranelift_frontend, which uses an algorithm based on \"Simple and Efficient Construction of Static Single Assignment Form\" (<a href=\"https://github.com/bytecodealliance/wasmtime/blob/76998f0404d83f1c303887c5fd207e14a07dcf4c/cranelift/frontend/src/ssa.rs\">cranelift source</a>)</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">a</span><span class=\"p\">()</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">u8</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n<div class=\"codehilite\" data-code-language=\"LLVM\"><pre><span></span><code><span class=\"k\">define</span> <span class=\"k\">i8</span> <span class=\"vg\">@_ZN7example1a17ha389e3fd0a4f8f11E</span><span class=\"p\">()</span> <span class=\"k\">unnamed_addr</span> <span class=\"vg\">#0</span> <span class=\"p\">{</span>\n  <span class=\"nv\">%a</span> <span class=\"p\">=</span> <span class=\"k\">alloca</span> <span class=\"k\">i8</span><span class=\"p\">,</span> <span class=\"k\">align</span> <span class=\"m\">1</span>\n  <span class=\"k\">store</span> <span class=\"k\">i8</span> <span class=\"m\">0</span><span class=\"p\">,</span> <span class=\"k\">i8</span><span class=\"p\">*</span> <span class=\"nv\">%a</span><span class=\"p\">,</span> <span class=\"k\">align</span> <span class=\"m\">1</span>\n  <span class=\"k\">store</span> <span class=\"k\">i8</span> <span class=\"m\">1</span><span class=\"p\">,</span> <span class=\"k\">i8</span><span class=\"p\">*</span> <span class=\"nv\">%a</span><span class=\"p\">,</span> <span class=\"k\">align</span> <span class=\"m\">1</span>\n  <span class=\"nv nv-Anonymous\">%0</span> <span class=\"p\">=</span> <span class=\"k\">load</span> <span class=\"k\">i8</span><span class=\"p\">,</span> <span class=\"k\">i8</span><span class=\"p\">*</span> <span class=\"nv\">%a</span><span class=\"p\">,</span> <span class=\"k\">align</span> <span class=\"m\">1</span>\n  <span class=\"k\">ret</span> <span class=\"k\">i8</span> <span class=\"nv nv-Anonymous\">%0</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n\n<div class=\"codehilite\"><pre><span></span><code>function u0:0() -&gt; i8 system_v {\n                                block0:\n                                    nop\n                                    jump block1\n\n                                block1:\n                                    nop\n@0001                               v0 = iconst.i8 0\n@0002                               v1 = iconst.i8 1\n@0003                               v2 = iconst.i8 1\n@0005                               return v2\n}\n</code></pre></div>\n\n\n<p>As for the speed difference. Look at this:</p>\n<div class=\"codehilite\"><pre><span></span><code>$ ./raytracer_cg_clif\n10519 milliseconds elapsed.\n$ ./raytracer_cg_clif_no_ssa\n19927 milliseconds elapsed.\n</code></pre></div>\n\n\n<p>This is both with the same sysroot compiled with SSA conversion.</p>",
+        "id": 213904004,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1603192859
+    },
+    {
+        "content": "<p>To be fair it seems that cg_llvm does perform this in limited cases where there is only a single assignment and some other conditions.</p>",
+        "id": 213904184,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1603193007
+    },
+    {
+        "content": "<p>For reference this is the cg_clif diff I used to test this:</p>\n<div class=\"codehilite\" data-code-language=\"Diff\"><pre><span></span><code><span class=\"gh\">diff --git a/src/analyze.rs b/src/analyze.rs</span>\n<span class=\"gh\">index fd25b19..ae497f9 100644</span>\n<span class=\"gd\">--- a/src/analyze.rs</span>\n<span class=\"gi\">+++ b/src/analyze.rs</span>\n<span class=\"gu\">@@ -19,7 +19,7 @@ pub(crate) fn analyze(fx: &amp;FunctionCx&lt;'_, '_, impl Module&gt;) -&gt; IndexVec&lt;Local, S</span>\n         .map(|local_decl| {\n             let ty = fx.monomorphize(&amp;local_decl.ty);\n             if fx.clif_type(ty).is_some() || fx.clif_pair_type(ty).is_some() {\n<span class=\"gd\">-                SsaKind::Ssa</span>\n<span class=\"gi\">+                SsaKind::NotSsa</span>\n             } else {\n                 SsaKind::NotSsa\n             }\n</code></pre></div>",
+        "id": 213904502,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1603193256
+    },
+    {
+        "content": "<p>What's the effect on debuginfo?</p>",
+        "id": 213931068,
+        "sender_full_name": "cuviper",
+        "timestamp": 1603205749
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> How easily could cg_llvm use SSA directly in cases where it currently uses alloca?</p>",
+        "id": 213943913,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1603211170
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"138448\">cuviper</span> <a href=\"#narrow/stream/187780-t-compiler.2Fwg-llvm/topic/Convert.20to.20SSA.20during.20llvm.20ir.20codegen/near/213931068\">said</a>:</p>\n<blockquote>\n<p>What's the effect on debuginfo?</p>\n</blockquote>\n<p>The same as the current limited SSA conversion. <a href=\"https://github.com/rust-lang/rust/blob/59dafb876e125c49fca93820c5ef22da3fcb8644/compiler/rustc_codegen_ssa/src/mir/debuginfo.rs#L228\">https://github.com/rust-lang/rust/blob/59dafb876e125c49fca93820c5ef22da3fcb8644/compiler/rustc_codegen_ssa/src/mir/debuginfo.rs#L228</a></p>\n<blockquote>\n<p>\"Spill\" the value onto the stack, for debuginfo,<br>\nwithout forcing non-debuginfo uses of the local<br>\nto also load from the stack every single time.<br>\nFIXME(<a href=\"https://github.com/rust-lang/rust/issues/68817\">#68817</a>) use <code>llvm.dbg.value</code> instead,<br>\nat least for the cases which LLVM handles correctly.</p>\n</blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"239881\">Josh Triplett</span> <a href=\"#narrow/stream/187780-t-compiler.2Fwg-llvm/topic/Convert.20to.20SSA.20during.20llvm.20ir.20codegen/near/213943913\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"133247\">bjorn3</span> How easily could cg_llvm use SSA directly in cases where it currently uses alloca?</p>\n</blockquote>\n<p>It would need an implementation of \"Simple and Efficient Construction of Static Single Assignment Form\" or another algorithm for constructing SSA form. It is not trivial but it is relatively small. The Cranelift implementation is 700 lines including a lot of comments and excluding tests.</p>",
+        "id": 213945176,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1603211736
+    },
+    {
+        "content": "<p>It sounds like that would be shared code between cg_clif and cg_llvm, can they share some of that?</p>",
+        "id": 213956159,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1603216450
+    },
+    {
+        "content": "<p>The Cranelift implementation only works for clif ir. It should be possible to be generic over the ir though.</p>",
+        "id": 213956377,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1603216554
+    },
+    {
+        "content": "<p>Can you link the Cranelift implementation?</p>",
+        "id": 213956742,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1603216686
+    },
+    {
+        "content": "<p><a href=\"https://github.com/bytecodealliance/wasmtime/blob/76998f0404d83f1c303887c5fd207e14a07dcf4c/cranelift/frontend/src/ssa.rs\">https://github.com/bytecodealliance/wasmtime/blob/76998f0404d83f1c303887c5fd207e14a07dcf4c/cranelift/frontend/src/ssa.rs</a></p>",
+        "id": 213956899,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1603216750
+    },
+    {
+        "content": "<p>So one could pull something like that into cg_ssa.</p>",
+        "id": 213957802,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1603217112
+    },
+    {
+        "content": "<p>There have also been mentions of forming a fully SSA data structure from MIR so as to do a proper optimization pass, since MIR is not really designed to do optimization.</p>\n<p><span class=\"user-mention silent\" data-user-id=\"125250\">Wesley Wiser</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/peephole.20optimization/near/211688371\">said</a>:</p>\n<blockquote>\n<p>We've talked a little before about having a different IR for optimizations. MIR was not really designed to be optimization friendly, it was really just more concerned with being nice to consume from the borrow checker (iirc).</p>\n</blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"220917\">Nick Fitzgerald</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/peephole.20optimization/near/211688766\">said</a>:</p>\n<blockquote>\n<p>yeah, SSA would make this a lot easier</p>\n</blockquote>\n<p>So it seems like this is generally considered a good idea.</p>",
+        "id": 213963226,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1603219715
+    },
+    {
+        "content": "<p>cc <a href=\"https://bytecodealliance.zulipchat.com/#narrow/stream/217117-cranelift/topic/ir.20independent.20implementation.20of.20ssa.20conversion/near/213970608\">https://bytecodealliance.zulipchat.com/#narrow/stream/217117-cranelift/topic/ir.20independent.20implementation.20of.20ssa.20conversion/near/213970608</a></p>",
+        "id": 213970939,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1603223473
+    }
+]

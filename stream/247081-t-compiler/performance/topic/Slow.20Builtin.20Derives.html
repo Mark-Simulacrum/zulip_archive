@@ -1,0 +1,761 @@
+<html>
+<head><meta charset="utf-8"><title>Slow Builtin Derives · t-compiler/performance · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/index.html">t-compiler/performance</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html">Slow Builtin Derives</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="215750815"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215750815" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215750815">(Nov 05 2020 at 18:01)</a>:</h4>
+<p><strong>tl;dr Using #[derive] for built in traits incurs significant overhead at scale</strong><br>
+I've created a benchmark which has 5,000 structs with one <code>i32</code> field. I then <code>#[derive(Copy, Clone, Default, Eq, PartialEq, Debug)]</code> for all the structs. This builds using the current nightly compiler  (f2bbdd0a3 2020-11-04) in ~5 seconds. When I manually implement these traits, the code compiles in ~2.5 seconds. It seems that <code>resolve_crate</code> is taking a significant amount of time in the <code>derive</code> case  specifically in <code>rustc_resolve::Resolver::finalize_macro_resolutions</code>. In particular there are a lot of calls to <code>early_resolve_ident_in_lexical_scope</code> when iterating <code>self.single_segment_macro_resolutions</code> AND especially so when iterating <code>self.builtin_attrs</code> which currently take 12% and 18% of compilation time respectively. This benchmark is inspired by a realworld crate I'm working on that has similar perf characteristics although it seems that calls to <code>early_resolve_ident_in_lexical_scope</code>on <code>self.builtin_attrs</code> take 40% of the time and calls when iterating <code>self.single_segment_macro_resolutions</code> only take 5% of the time on that crate.</p>
+
+
+
+<a name="215751066"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215751066" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215751066">(Nov 05 2020 at 18:02)</a>:</h4>
+<p>cc <span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span> <span class="user-mention" data-user-id="120989">@njn</span></p>
+
+
+
+<a name="215751910"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215751910" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215751910">(Nov 05 2020 at 18:09)</a>:</h4>
+<p>I'm also going to push a WIP PR to rustc-perf since this seems like a benchmark that makes sense to have</p>
+
+
+
+<a name="215752999"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215752999" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215752999">(Nov 05 2020 at 18:17)</a>:</h4>
+<p>And here is the benchmark PR: <a href="https://github.com/rust-lang/rustc-perf/pull/791">https://github.com/rust-lang/rustc-perf/pull/791</a></p>
+
+
+
+<a name="215762993"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215762993" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215762993">(Nov 05 2020 at 19:34)</a>:</h4>
+<p><span class="user-mention" data-user-id="224872">@Ryan Levick</span> have you compared different derives at all? I wonder if the performance is a particular derive or if it's all about the same</p>
+
+
+
+<a name="215766797"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215766797" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215766797">(Nov 05 2020 at 20:03)</a>:</h4>
+<p><span class="user-mention" data-user-id="224872">@Ryan Levick</span> Is there already a small cache attached to that lookup?</p>
+
+
+
+<a name="215766876"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215766876" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215766876">(Nov 05 2020 at 20:04)</a>:</h4>
+<p>To ensure that the same type is readily at hand for a series of derives?</p>
+
+
+
+<a name="215767212"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215767212" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215767212">(Nov 05 2020 at 20:07)</a>:</h4>
+<p>it seems the more derives there are the slower it gets</p>
+
+
+
+<a name="215767565"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215767565" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215767565">(Nov 05 2020 at 20:10)</a>:</h4>
+<p>That certainly <em>sounds</em> like it might be doing duplicate work between the derives.</p>
+
+
+
+<a name="215767598"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215767598" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215767598">(Nov 05 2020 at 20:10)</a>:</h4>
+<p><span class="user-mention" data-user-id="224872">@Ryan Levick</span> I just posted a comment suggesting some tweaks to the test to make it catch more issues.</p>
+
+
+
+<a name="215767673"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215767673" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215767673">(Nov 05 2020 at 20:11)</a>:</h4>
+<p>just for anecdata, cargo check on my machine:</p>
+<ul>
+<li>no derives: 47ms</li>
+<li>w/ Default: 350ms</li>
+<li>w/ Copy + Clone: 657ms (Clone by itself is 525)</li>
+<li>w/ Debug: 765ms</li>
+<li>w/ PartialEq + Eq: 1.29s (PartialEq by itself is 780)</li>
+<li>all of the above: 4.77s (while the sum is 3.1s even if it's meaningless)</li>
+</ul>
+
+
+
+<a name="215767806"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215767806" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215767806">(Nov 05 2020 at 20:12)</a>:</h4>
+<p>It'd be helpful to be able to compare those to manual impls of the same traits.</p>
+
+
+
+<a name="215767831"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215767831" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215767831">(Nov 05 2020 at 20:12)</a>:</h4>
+<p>yup that was next on my list ^^</p>
+
+
+
+<a name="215767885"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215767885" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215767885">(Nov 05 2020 at 20:13)</a>:</h4>
+<p>In particular, does it get slower the more traits you derive, disproportionately compared to the same code with more traits manually implemented?</p>
+
+
+
+<a name="215769443"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215769443" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215769443">(Nov 05 2020 at 20:27)</a>:</h4>
+<p>this will take a short while to check</p>
+
+
+
+<a name="215769929"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215769929" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215769929">(Nov 05 2020 at 20:31)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116122">simulacrum</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Slow.20Builtin.20Derives/near/215762993">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="224872">Ryan Levick</span> have you compared different derives at all? I wonder if the performance is a particular derive or if it's all about the same</p>
+</blockquote>
+<p>Yes, Copy has the least overhead, followed by Default, then Clone and Eq seem to be roughly the same and PartialEq and debug seem to be the slowest</p>
+
+
+
+<a name="215770085"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215770085" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215770085">(Nov 05 2020 at 20:32)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="239881">Josh Triplett</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Slow.20Builtin.20Derives/near/215766797">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="224872">Ryan Levick</span> Is there already a small cache attached to that lookup?</p>
+</blockquote>
+<p>I'm still getting familiar with the code but I did not see one immediately. That's on my list for tomorrow</p>
+
+
+
+<a name="215770218"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215770218" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215770218">(Nov 05 2020 at 20:33)</a>:</h4>
+<p>This is the first time I see anyone benchmarking this code ( <span aria-label="tada" class="emoji emoji-1f389" role="img" title="tada">:tada:</span> ).<br>
+I certainly didn't that myself, and only had time to work on its functional correctness.</p>
+
+
+
+<a name="215770664"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215770664" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215770664">(Nov 05 2020 at 20:37)</a>:</h4>
+<p>All the listed functions are necessary to ensure that macro resolution didn't result in time-traveling / paradoxes.<br>
+If they are not run then some invalid code will be accepted, but otherwise everything should continue compiling.<br>
+Perhaps they can be optimized somehow, I don't know right away.</p>
+
+
+
+<a name="215772903"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215772903" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215772903">(Nov 05 2020 at 20:57)</a>:</h4>
+<p><span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span> awesome! I’m really excited to help benchmark this code. I’m new to rustc dev so you’ll have to forgive me not knowing my way around. Do you think there might be repeated work between derives on the same type that would be helped by caching?</p>
+
+
+
+<a name="215773078"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215773078" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215773078">(Nov 05 2020 at 20:58)</a>:</h4>
+<p>anecdata 2.0, electric boogaloo:</p>
+<ul>
+<li>no derives: 47ms</li>
+<li>Default -- derived: 350ms, manual: 240ms</li>
+<li>Copy + Clone -- derived: 657ms, manual w/ feature derive_clone_copy: 331ms, without the feature: 308ms</li>
+<li>Debug -- derived: 765ms, manual: 680ms</li>
+<li>PartialEq + Eq -- derived: 1.29s, manual w/ features derive_eq and structural_match impls: 934ms, without the features (so possibly with an incorrect equivalence relation): 677ms</li>
+<li>all of the above -- derived: 4.77s, manual w/ all the features: 2.16s, without the features: 1.84s</li>
+</ul>
+
+
+
+<a name="215774176"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215774176" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215774176">(Nov 05 2020 at 21:06)</a>:</h4>
+<p><span class="user-mention" data-user-id="224872">@Ryan Levick</span> <br>
+Not sure about caching, but could you check, is the hot part of <code>early_resolve_ident_in_lexical_scope</code> located in this code by any chance?</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">                    </span><span class="n">Scope</span>::<span class="n">MacroRules</span><span class="p">(</span><span class="n">macro_rules_scope</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">match</span><span class="w"> </span><span class="n">macro_rules_scope</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                        </span><span class="n">MacroRulesScope</span>::<span class="n">Binding</span><span class="p">(</span><span class="n">macro_rules_binding</span><span class="p">)</span><span class="w"></span>
+<span class="w">                            </span><span class="k">if</span><span class="w"> </span><span class="n">ident</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">macro_rules_binding</span><span class="p">.</span><span class="n">ident</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"></span>
+<span class="w">                        </span><span class="p">{</span><span class="w"></span>
+<span class="w">                            </span><span class="nb">Ok</span><span class="p">((</span><span class="n">macro_rules_binding</span><span class="p">.</span><span class="n">binding</span><span class="p">,</span><span class="w"> </span><span class="n">Flags</span>::<span class="n">MACRO_RULES</span><span class="p">))</span><span class="w"></span>
+<span class="w">                        </span><span class="p">}</span><span class="w"></span>
+<span class="w">                        </span><span class="n">MacroRulesScope</span>::<span class="n">Invocation</span><span class="p">(</span><span class="n">invoc_id</span><span class="p">)</span><span class="w"></span>
+<span class="w">                            </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">this</span><span class="p">.</span><span class="n">output_macro_rules_scopes</span><span class="p">.</span><span class="n">contains_key</span><span class="p">(</span><span class="o">&amp;</span><span class="n">invoc_id</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"></span>
+<span class="w">                        </span><span class="p">{</span><span class="w"></span>
+<span class="w">                            </span><span class="nb">Err</span><span class="p">(</span><span class="n">Determinacy</span>::<span class="n">Undetermined</span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="p">}</span><span class="w"></span>
+<span class="w">                        </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="nb">Err</span><span class="p">(</span><span class="n">Determinacy</span>::<span class="n">Determined</span><span class="p">),</span><span class="w"></span>
+<span class="w">                    </span><span class="p">},</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="215774540"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215774540" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215774540">(Nov 05 2020 at 21:09)</a>:</h4>
+<p>Every derive macro can potentially produce a <code>macro_rules</code> item, so every derive macro start a "<code>macro_rules</code> scope" that continues until the end of the module (or even further with <code>#[macro_use]</code>).<br>
+So if you have a lot of derives in a module, the chain of <code>macro_rules</code> scopes may grow very large.</p>
+
+
+
+<a name="215774629"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215774629" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215774629">(Nov 05 2020 at 21:10)</a>:</h4>
+<p>(And you need to walk that chain in <code>early_resolve_ident_in_lexical_scope</code>.)</p>
+
+
+
+<a name="215781689"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215781689" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215781689">(Nov 05 2020 at 22:18)</a>:</h4>
+<p>As a side note this is a "known" issue already within small parts of the community, and for example <code>winapi</code> avoids all derives and manually implements all the impls for all of its structs.</p>
+
+
+
+<a name="215787884"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215787884" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215787884">(Nov 05 2020 at 23:33)</a>:</h4>
+<p>I knew about winapi and always assumed that it's just "expanding is slower than not expanding".<br>
+But the mentioned hot functions are not really about expansion (as in token stream juggling), and this is the first time I see them mentioned in this context.</p>
+
+
+
+<a name="215821355"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215821355" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215821355">(Nov 06 2020 at 09:22)</a>:</h4>
+<p>For posterity's sake, here's how the original codebase (not the benchmark) behaves when adding new traits to the derive attribute when compared to the previous version (i.e., each trait gets added to the list):</p>
+<ul>
+<li>No derive: 16s</li>
+<li>Clone: +1.76s</li>
+<li>Copy: +0.58s</li>
+<li>Default: +1.45s</li>
+<li>PartialEq: +3.04s</li>
+<li>Eq: +2.28s</li>
+<li>Debug: +3.11s</li>
+</ul>
+
+
+
+<a name="215823483"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215823483" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215823483">(Nov 06 2020 at 09:46)</a>:</h4>
+<p><span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span> the <code>MacroRules</code> handling does seem to be a hotspot. In one benchmark run it's being called 146969002 times and taking 13% of the time.</p>
+
+
+
+<a name="215828429"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215828429" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215828429">(Nov 06 2020 at 10:37)</a>:</h4>
+<p>(I've tried yesterday splitting the one derive into one per trait, and it didn't seem to make much of a difference -- I mean +1-2% in addition to the mentioned 260% -- in addition to rustfmt collapsing them back into one)</p>
+
+
+
+<a name="215834101"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215834101" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215834101">(Nov 06 2020 at 11:36)</a>:</h4>
+<p><span class="user-mention" data-user-id="224872">@Ryan Levick</span> one fun thing, if you're measuring exact counts of anything, is to use only powers of ten (or large primes if you're bored, but that's easier to pattern-match by eye) in the inputs, and try to find a formula in the outputs :P</p>
+
+
+
+<a name="215834148"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215834148" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215834148">(Nov 06 2020 at 11:37)</a>:</h4>
+<p>because <code>146969002</code> for example looks like <code>146969 * 1000 + 2</code>, but I'm not sure what other factors are used in the input</p>
+
+
+
+<a name="215918208"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215918208" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215918208">(Nov 06 2020 at 23:45)</a>:</h4>
+<p>Should be fixed in <a href="https://github.com/rust-lang/rust/pull/78826">https://github.com/rust-lang/rust/pull/78826</a>.</p>
+
+
+
+<a name="215945606"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215945606" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215945606">(Nov 07 2020 at 09:01)</a>:</h4>
+<p>tried to understand it, hopefully I did correctly, r+!</p>
+
+
+
+<a name="215973777"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/215973777" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#215973777">(Nov 07 2020 at 21:13)</a>:</h4>
+<p><span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span> Awesome, thank you!</p>
+
+
+
+<a name="216062129"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216062129" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216062129">(Nov 09 2020 at 09:52)</a>:</h4>
+<p>Awesome stuff. This change compiles the benchmark in half the time. Master: ~29.9s <span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span>'s changes: ~17.3s</p>
+
+
+
+<a name="216062344"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216062344" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216062344">(Nov 09 2020 at 09:54)</a>:</h4>
+<p>The <code>resolve_crate</code> item goes from taking ~31% of time to ~1% of time.</p>
+
+
+
+<a name="216064143"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216064143" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216064143">(Nov 09 2020 at 10:13)</a>:</h4>
+<p>The benchmark is now taking ~20.5% of time on <code>typeck</code> which I find a bit unexpected. Might be a good place to look next.</p>
+
+
+
+<a name="216068084"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216068084" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216068084">(Nov 09 2020 at 10:53)</a>:</h4>
+<p>Also interesting: adding PartialOrd derive incurs a very large overhead. In local tests, the time to compile doubles when adding <code>PartialOrd</code> to the derive list</p>
+
+
+
+<a name="216068567"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216068567" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216068567">(Nov 09 2020 at 10:57)</a>:</h4>
+<p>Also: using <code>#[derive]</code> (with <span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span>'s changes) still incurs around a 50% compile time penalty over implementing the traits manually (for Debug, PartialEq, Eq, Clone, Copy, Default)</p>
+
+
+
+<a name="216068710"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216068710" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216068710">(Nov 09 2020 at 10:59)</a>:</h4>
+<p>My local test takes 4.8s when the traits are implemented manually vs 6.6s when using derive. I assume this is because the derive implementations are more expensive to compile</p>
+
+
+
+<a name="216069205"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216069205" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216069205">(Nov 09 2020 at 11:04)</a>:</h4>
+<p><span class="user-mention" data-user-id="224872">@Ryan Levick</span> <br>
+Could you also copypaste the derived implementations from <code>cargo expand</code> or something, and measure how much time do they take to compile?</p>
+
+
+
+<a name="216069555"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216069555" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216069555">(Nov 09 2020 at 11:08)</a>:</h4>
+<p>Interestingly, while <code>typeck</code> and <code>mir_borrowck</code> are faster when manually implementing the traits, <code>LLVM_module_codegen_emit_obj</code> and <code>LLVM_passes</code> are both slower</p>
+
+
+
+<a name="216071582"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216071582" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216071582">(Nov 09 2020 at 11:29)</a>:</h4>
+<p><span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span> the copy-pasted expanded derived implementations take roughly just as long as the <code>derive</code>impl which would suggest that most of the overhead of expanding the derives has been removed by your PR and now it's the code that it gets expanded to itself that is causing further slowness. Here's the profiling data from all three types of compiles <a href="https://gist.github.com/rylev/14430d2e1ea384b1f10efae6b5c385f2">https://gist.github.com/rylev/14430d2e1ea384b1f10efae6b5c385f2</a></p>
+
+
+
+<a name="216075348"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216075348" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216075348">(Nov 09 2020 at 12:06)</a>:</h4>
+<p>note that deriving eg Eq and PartialEq has additional types your manual impl doesn't (this is the reason why I was mentioning the features <code>derive_clone_copy</code>, <code>derive_eq</code> and <code>structural_match</code> in my own numbers)</p>
+
+
+
+<a name="216085391"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216085391" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216085391">(Nov 09 2020 at 13:48)</a>:</h4>
+<p><span class="user-mention" data-user-id="224872">@Ryan Levick</span> hm, so on <a href="https://github.com/rust-lang/rustc-perf/pull/791">https://github.com/rust-lang/rustc-perf/pull/791</a>, did you want to add in the changes I suggested (and Josh's as well?)</p>
+
+
+
+<a name="216085428"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216085428" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216085428">(Nov 09 2020 at 13:48)</a>:</h4>
+<p>I don't think we need the separate derive case</p>
+
+
+
+<a name="216085596"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216085596" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216085596">(Nov 09 2020 at 13:50)</a>:</h4>
+<p>I did make most of the changes. I can get rid of the second type of derive (that includes copy). Is there anything else I’m missing?</p>
+
+
+
+<a name="216085781"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216085781" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216085781">(Nov 09 2020 at 13:52)</a>:</h4>
+<p>hm not sure I followed that, what second type of derive?</p>
+
+
+
+<a name="216085802"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216085802" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216085802">(Nov 09 2020 at 13:52)</a>:</h4>
+<p>But I think it looks good then and I can merge it</p>
+
+
+
+<a name="216085997"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216085997" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216085997">(Nov 09 2020 at 13:54)</a>:</h4>
+<p>Ok, I'm going to merge -- I think it's good</p>
+
+
+
+<a name="216086074"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216086074" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216086074">(Nov 09 2020 at 13:55)</a>:</h4>
+<p>should get picked up in the next perf run</p>
+
+
+
+<a name="216095911"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216095911" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216095911">(Nov 09 2020 at 15:04)</a>:</h4>
+<p><span class="user-mention" data-user-id="116122">@simulacrum</span> should we trigger a run for <a href="https://github.com/rust-lang/rust/pull/78826">https://github.com/rust-lang/rust/pull/78826</a>?</p>
+
+
+
+<a name="216095963"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216095963" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216095963">(Nov 09 2020 at 15:04)</a>:</h4>
+<p>I don't think it's necessary? It'll get collected on the master merge, and before then we don't yet have a master commit with the new benchmark</p>
+
+
+
+<a name="216095982"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216095982" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216095982">(Nov 09 2020 at 15:05)</a>:</h4>
+<p>(I would rather not work to requeue it)</p>
+
+
+
+<a name="216130163"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216130163" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216130163">(Nov 09 2020 at 19:10)</a>:</h4>
+<p><span class="user-mention" data-user-id="224872">@Ryan Levick</span> By the way, what are you using for profiling?</p>
+
+
+
+<a name="216135112"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216135112" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216135112">(Nov 09 2020 at 19:50)</a>:</h4>
+<p>I’m just using -Zself-profile.</p>
+
+
+
+<a name="216462846"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216462846" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216462846">(Nov 12 2020 at 12:50)</a>:</h4>
+<p>Doing some additional perf on testing, it seems that PartialOrd is by far the most expensive to derive of the traits in std. The derive benchmark with <a href="https://gist.github.com/rylev/6240ab415e9f353c1582889cea41b4b1#file-partialeq-partialord"><code>#[derive(PartialEq, PartialOrd)]</code></a> takes 9.1s on my machine while just <a href="https://gist.github.com/rylev/6240ab415e9f353c1582889cea41b4b1#file-partialeq"><code>#[derive(PartialEq)]</code></a> takes 1.9s. This is presumably because the <code>PartialOrd</code> derive implements all of the methods of PartialOrd instead of only implementing <code>partial_cmp</code> and using the defaults for everything else. When I implement <a href="https://gist.github.com/rylev/6240ab415e9f353c1582889cea41b4b1#file-partialeq-partialord-manual-impl"><code>PartialOrd</code> manually</a> with the same implementation the derive uses (but only implementing <code>partial_cmp</code>, it only takes 4.9s.</p>
+
+
+
+<a name="216463226"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216463226" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216463226">(Nov 12 2020 at 12:54)</a>:</h4>
+<p>Beyond the obvious question of if implementing all methods of <code>PartialOrd</code> is the correct thing to do, it'd be interesting to dive more into why typeck takes up so much time. in all of the derive cases.</p>
+
+
+
+<a name="216469062"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216469062" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216469062">(Nov 12 2020 at 13:44)</a>:</h4>
+<p><span class="user-mention" data-user-id="224872">@Ryan Levick</span> <code>cachegrind</code> from the valgrind suite (together with <code>kcachegrind</code>) are pretty good tools for diving into the details of some piece of single-threaded code.</p>
+
+
+
+<a name="216591369"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216591369" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216591369">(Nov 13 2020 at 10:12)</a>:</h4>
+<p>Thanks to <span class="user-mention" data-user-id="124287">@mw</span> we found that <span class="user-mention" data-user-id="139363">@bluss</span> last changed the code in PartialOrd derive to only impl all the methods in some cases. But this was 5 years ago, and it's not clear why we can't _always_ depend on the default impls of the non-<code>partial_cmp</code> methods</p>
+
+
+
+<a name="216591384"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216591384" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216591384">(Nov 13 2020 at 10:12)</a>:</h4>
+<p>Here's the change from <span class="user-mention" data-user-id="139363">@bluss</span> <a href="https://github.com/rust-lang/rust/commit/edcc02bfee262ce8bc3f087d9793ce68d73b1a40">https://github.com/rust-lang/rust/commit/edcc02bfee262ce8bc3f087d9793ce68d73b1a40</a></p>
+
+
+
+<a name="216592352"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216592352" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216592352">(Nov 13 2020 at 10:25)</a>:</h4>
+<p>The <a href="https://doc.rust-lang.org/std/cmp/trait.PartialOrd.html#how-can-i-implement-partialord">PartialOrd documentation</a> says that it should be OK to only implement <code>partial_cmp</code> and rely on the default implementations for the rest. One could argue that the same should be true for automatically derived impls. It would be interesting to see if someone can construct a counter example, e.g. the derived impl of a struct containing an <code>f32</code> field behaving differently in the two cases.</p>
+
+
+
+<a name="216602968"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216602968" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216602968">(Nov 13 2020 at 12:23)</a>:</h4>
+<p>From the PR description:</p>
+<blockquote>
+<p>One case where it's easy to recognize is when it's a C-like enum. Most other cases can not omit ne, because any value field may have a custom PartialEq implementation.</p>
+</blockquote>
+
+
+
+<a name="216610240"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216610240" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216610240">(Nov 13 2020 at 13:33)</a>:</h4>
+<p>Hmm ok that's a shame, but it makes sense. I'm still surprised by how much overhead these implementations add. More than doubling compilation time just when adding a <code>partial_cmp</code> implementation</p>
+
+
+
+<a name="216619762"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216619762" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216619762">(Nov 13 2020 at 14:41)</a>:</h4>
+<p>This might be infeasible but in my experience, if there's a <code>#[derive(PartialOrd)]</code> 99% of the time, there's also a <code>#[derive(PartialEq)]</code> and so there's no user-defined custom implementation for that trait. Could we detect this situation and only generate the implementation for <code>partial_cmp</code> then?</p>
+
+
+
+<a name="216714815"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216714815" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216714815">(Nov 14 2020 at 08:04)</a>:</h4>
+<p><span class="user-mention" data-user-id="119009">@eddyb</span> <br>
+I implemented the lazy compression in <a href="https://github.com/rust-lang/rust/pull/79034">https://github.com/rust-lang/rust/pull/79034</a>.<br>
+There's no effect on performance, but the code certainly looks cleaner.</p>
+
+
+
+<a name="216714889"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216714889" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216714889">(Nov 14 2020 at 08:06)</a>:</h4>
+<p>heh, neat!</p>
+
+
+
+<a name="216859785"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216859785" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216859785">(Nov 16 2020 at 11:36)</a>:</h4>
+<p>FYI: The crate which prompted me to look into this issue and the foreign modules issue that we've also fixed compiles in 2m33s on stable and in 33 seconds on nightly!</p>
+
+
+
+<a name="216859929"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216859929" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216859929">(Nov 16 2020 at 11:38)</a>:</h4>
+<p>(It was taking 58s before <span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span>'s change)</p>
+
+
+
+<a name="216867468"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216867468" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216867468">(Nov 16 2020 at 13:03)</a>:</h4>
+<p>Nice!</p>
+
+
+
+<a name="216871562"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216871562" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216871562">(Nov 16 2020 at 13:41)</a>:</h4>
+<p>Wow, that's incredible!</p>
+
+
+
+<a name="216982231"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/216982231" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#216982231">(Nov 17 2020 at 09:40)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Slow.20Builtin.20Derives/near/216602968">said</a>:</p>
+<blockquote>
+<p>From the PR description:</p>
+<blockquote>
+<p>One case where it's easy to recognize is when it's a C-like enum. Most other cases can not omit ne, because any value field may have a custom PartialEq implementation.</p>
+</blockquote>
+</blockquote>
+<p>Maybe the approach could be extended to other cases where we can syntactically detect that <code>eq</code> and <code>ne</code> are symmetrical? E.q. if all fields are non-float basic types?</p>
+
+
+
+<a name="219241494"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219241494" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219241494">(Dec 08 2020 at 18:12)</a>:</h4>
+<p>FYI: I tried to see if it's currently possible to determine if the user is deriving <code>PartialEq</code> when deriving <code>PartialOrd</code> and it does not seem it is.</p>
+<p>I'm not sure if it's worth trying <span class="user-mention" data-user-id="124287">@mw</span>'s idea of seeing if all of the fields of a type are non-float primitive types but of course simple things break this (e.g., new types, arrays, etc.)</p>
+
+
+
+<a name="219243038"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219243038" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219243038">(Dec 08 2020 at 18:25)</a>:</h4>
+<p>You can <code>use ArbitraryType as u8;</code>, which would break this</p>
+
+
+
+<a name="219243761"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219243761" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219243761">(Dec 08 2020 at 18:31)</a>:</h4>
+<p>Another good point. So I think the only safe thing to do is determine if the user is deriving PartialEq as well which is not possible currently</p>
+
+
+
+<a name="219243823"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219243823" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219243823">(Dec 08 2020 at 18:32)</a>:</h4>
+<p>We have a <code>Copy</code> + <code>Clone</code> optimzation I think, how does that work?</p>
+
+
+
+<a name="219244317"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219244317" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219244317">(Dec 08 2020 at 18:35)</a>:</h4>
+<p>Do you mean specializing Clone if the type is also copy to use fn clone(&amp;self) -&gt; Self { *self }?</p>
+
+
+
+<a name="219244551"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219244551" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219244551">(Dec 08 2020 at 18:36)</a>:</h4>
+<p>Looks like <code>ExtCtxt</code> has a resolver field which implements ResolverExpand which has a method <code>has_derive_copy</code></p>
+
+
+
+<a name="219244722"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219244722" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219244722">(Dec 08 2020 at 18:38)</a>:</h4>
+<p>the implementation of that also is only about copy</p>
+
+
+
+<a name="219245054"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219245054" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219245054">(Dec 08 2020 at 18:41)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="211727">Jonas Schievink</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Slow.20Builtin.20Derives/near/219243823">said</a>:</p>
+<blockquote>
+<p>We have a <code>Copy</code> + <code>Clone</code> optimzation I think, how does that work?</p>
+</blockquote>
+<p>I think this generates MIR shims ...</p>
+
+
+
+<a name="219245648"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219245648" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219245648">(Dec 08 2020 at 18:46)</a>:</h4>
+<p>Either way, what I said above stands ^^ it seems there is specialized logic to know if a type derives Copy specifically</p>
+
+
+
+<a name="219245842"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219245842" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219245842">(Dec 08 2020 at 18:47)</a>:</h4>
+<p><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/enum.InstanceDef.html#variant.CloneShim">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/enum.InstanceDef.html#variant.CloneShim</a></p>
+
+
+
+<a name="219246047"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219246047" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219246047">(Dec 08 2020 at 18:48)</a>:</h4>
+<p><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir/shim/fn.build_clone_shim.html">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir/shim/fn.build_clone_shim.html</a></p>
+
+
+
+<a name="219246464"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219246464" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219246464">(Dec 08 2020 at 18:52)</a>:</h4>
+<p>Do we think it's worth it to do this for other derives?</p>
+
+
+
+<a name="219251284"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219251284" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219251284">(Dec 08 2020 at 19:33)</a>:</h4>
+<p>This was the PR that added the clone shim: <a href="https://github.com/rust-lang/rust/pull/43690">https://github.com/rust-lang/rust/pull/43690</a></p>
+<p>Of note:</p>
+<blockquote>
+<p>My problem is not how it's implemented, but using this method only for some Clone impls. I'd be far more comfortable if all built-in derive impls were moved to MIR shims.</p>
+</blockquote>
+<p>So it sounds to me like this might have been wanted from the beginning.</p>
+
+
+
+<a name="219251554"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219251554" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219251554">(Dec 08 2020 at 19:35)</a>:</h4>
+<p>Regardless, the built-in derive macros seem a bit special to the compiler currently. If we can significantly improve performance in important cases, I don't see an issue with making them more special.</p>
+
+
+
+<a name="219251692"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219251692" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219251692">(Dec 08 2020 at 19:36)</a>:</h4>
+<p>My guess is that actually landing a PR that did this would probably need to go through the MCP process but having concrete data about what kind of performance improvement this creates would be invaluable for that MCP.</p>
+
+
+
+<a name="219253062"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219253062" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219253062">(Dec 08 2020 at 19:48)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125250">Wesley Wiser</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Slow.20Builtin.20Derives/near/219251692">said</a>:</p>
+<blockquote>
+<p>My guess is that actually landing a PR that did this would probably need to go through the MCP process but having concrete data about what kind of performance improvement this creates would be invaluable for that MCP.</p>
+</blockquote>
+<p>Can you share your thoughts on how to gather this data? Should I implement it, and then open the MCP?</p>
+
+
+
+<a name="219254770"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219254770" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219254770">(Dec 08 2020 at 20:02)</a>:</h4>
+<p>That's what I was thinking. While we could get an upper bound on how much this could possibly improve just by looking at how much time the derives add to compilation, I can't think of any way to get a reasonable estimate on what the likely improvement might be from doing this change without doing the change.</p>
+
+
+
+<a name="219271593"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219271593" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219271593">(Dec 08 2020 at 22:23)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="224872">Ryan Levick</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Slow.20Builtin.20Derives/near/219245648">said</a>:</p>
+<blockquote>
+<p>Either way, what I said above stands ^^ it seems there is specialized logic to know if a type derives Copy specifically</p>
+</blockquote>
+<p>A special case for build-in <code>PartialEq</code> could be added in exactly the same way if really necessary.<br>
+Also the special case in derive expansion precedes MIR shims for <code>Clone</code>, perhaps it can even be removed now.</p>
+
+
+
+<a name="219276140"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219276140" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219276140">(Dec 08 2020 at 23:11)</a>:</h4>
+<p>I’m not sure if I should try to hack it in to see if there’s substantial perf gains or if I should try to find a suitable solution that isn’t a hack</p>
+
+
+
+<a name="219961741"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/219961741" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#219961741">(Dec 15 2020 at 10:48)</a>:</h4>
+<p>FYI: I have a PR open which special cases <code>PartialOrd</code> to only implement <code>partial_cmp</code> when the user is also deriving <code>PartialEq</code>. We'll see how much this helps. <a href="https://github.com/rust-lang/rust/pull/80050">https://github.com/rust-lang/rust/pull/80050</a></p>
+
+
+
+<a name="220012376"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220012376" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220012376">(Dec 15 2020 at 17:23)</a>:</h4>
+<p>Interesting that only clap incremental regresses.</p>
+
+
+
+<a name="220246809"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220246809" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220246809">(Dec 17 2020 at 14:06)</a>:</h4>
+<p>I closed the above PR due to issues brought up by <span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span> and moved the discussion into an issue <a href="https://github.com/rust-lang/rust/issues/80118">https://github.com/rust-lang/rust/issues/80118</a>.</p>
+
+
+
+<a name="220397061"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220397061" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220397061">(Dec 18 2020 at 16:51)</a>:</h4>
+<p>The <code>Clone+Copy</code> optimization can work but only because there was an RFC that established a bunch of rules around what the compiler may assume.</p>
+
+
+
+<a name="220397128"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220397128" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220397128">(Dec 18 2020 at 16:51)</a>:</h4>
+<p>if we wanted to optimise <code>PartialEq</code> implementation to defer to <code>PartialOrd::partial_ord</code> we cannot really do that because that affects observable behaviour.</p>
+
+
+
+<a name="220397260"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220397260" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220397260">(Dec 18 2020 at 16:52)</a>:</h4>
+<p>(if a field type implements either of the traits manually, it can observe that the derived <code>PartialEq</code> is actually invoking field's <code>PartialOrd</code>, rather than <code>PartialEq</code>)</p>
+
+
+
+<a name="220397289"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220397289" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220397289">(Dec 18 2020 at 16:52)</a>:</h4>
+<p>(this is likely to also be the cause of runtime regressions)</p>
+
+
+
+<a name="220397326"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220397326" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220397326">(Dec 18 2020 at 16:53)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="123586">nagisa</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Slow.20Builtin.20Derives/near/220397260">said</a>:</p>
+<blockquote>
+<p>(if a field type implements either of the traits manually, it can observe that the derived <code>PartialEq</code> is actually invoking field's <code>PartialOrd</code>, rather than <code>PartialEq</code>)</p>
+</blockquote>
+<p>This is exactly why the above pull request was closed.</p>
+
+
+
+<a name="220397343"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220397343" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220397343">(Dec 18 2020 at 16:53)</a>:</h4>
+<p>Right. Didn't read the issue closely enough to tell exact reason.</p>
+
+
+
+<a name="220397946"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220397946" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220397946">(Dec 18 2020 at 16:56)</a>:</h4>
+<p>My bad.</p>
+
+
+
+<a name="220398051"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220398051" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220398051">(Dec 18 2020 at 16:57)</a>:</h4>
+<p>I wonder if it would make sense to have some sort of an attribute for macros that would effectively be "assume typechecked, borrowchecked etc"</p>
+
+
+
+<a name="220398238"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220398238" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220398238">(Dec 18 2020 at 16:58)</a>:</h4>
+<p>Which would add additional requirements on the code generated (e.g. no types that would need inference), but also avoid a huge time sink.</p>
+
+
+
+<a name="220398260"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220398260" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> rylev <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220398260">(Dec 18 2020 at 16:58)</a>:</h4>
+<p>This could help. We may also want to try to check that the generated code is "friendly" to the type/borrow checkers</p>
+
+
+
+<a name="220398615"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/220398615" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#220398615">(Dec 18 2020 at 17:00)</a>:</h4>
+<p>Yeah, the friendly code came up in <a href="https://github.com/rust-lang/rust/issues/79671">#79671</a> briefly where adding some type annotations helped with build times somewhat as per <a href="https://github.com/rust-lang/rust/issues/79671#issuecomment-738761965">this comment</a>.</p>
+
+
+
+<a name="223826936"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/223826936" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bluss <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#223826936">(Jan 24 2021 at 18:13)</a>:</h4>
+<p>If #[derive(PartialOrd)] is simplified to only emit partial_cmp for structs, then I'd be worried for performance of float struct fields. <code>f64::partial_cmp</code> is slow, does extra work compared to <code>f64::lt</code>, so it would be preferred to keep using <code>f64::lt</code> directly where it is possible.</p>
+
+
+
+<a name="224021814"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/224021814" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tm <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#224021814">(Jan 26 2021 at 10:44)</a>:</h4>
+<p>The derived implementation of PartialOrd for &lt;, &lt;=, &gt;, &gt;= is quite complex. It contains nested closures with depth proportional to the number of fields. Such use of closures have been observed to cause various exponential behaviours. There is a small test case which generates more incremental cache data than during compilation of the whole rustc.</p>
+
+
+
+<a name="224022006"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/224022006" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tm <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#224022006">(Jan 26 2021 at 10:47)</a>:</h4>
+<p>BTW, I think the earlier proposal to simply skip deriving those operators was correct. There is only one correct behaviour of those operators given the implementation of partial_cmp.</p>
+
+
+
+<a name="224036524"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Slow%20Builtin%20Derives/near/224036524" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tm <a href="https://rust-lang.github.io/zulip_archive/stream/247081-t-compiler/performance/topic/Slow.20Builtin.20Derives.html#224036524">(Jan 26 2021 at 13:15)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="139363">bluss</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Slow.20Builtin.20Derives/near/223826936">said</a>:</p>
+<blockquote>
+<p>If #[derive(PartialOrd)] is simplified to only emit partial_cmp for structs, then I'd be worried for performance of float struct fields. <code>f64::partial_cmp</code> is slow, does extra work compared to <code>f64::lt</code>, so it would be preferred to keep using <code>f64::lt</code> directly where it is possible.</p>
+</blockquote>
+<p>All methods of PartialOrd are derived in terms of partial_cmp, so perf concerns apply to them as well.</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

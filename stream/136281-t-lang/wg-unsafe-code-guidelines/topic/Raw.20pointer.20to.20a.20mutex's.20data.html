@@ -1,0 +1,484 @@
+<html>
+<head><meta charset="utf-8"><title>Raw pointer to a mutex&#x27;s data · t-lang/wg-unsafe-code-guidelines · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/index.html">t-lang/wg-unsafe-code-guidelines</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html">Raw pointer to a mutex&#x27;s data</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="219054826"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219054826" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219054826">(Dec 07 2020 at 09:03)</a>:</h4>
+<p>Is it fine to read a mutex's data via a shared reference while somewhere else in the code a <code>*mut ...</code> raw pointer (1) points to the same data and (2) is not dereferenced? Here is a <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=9c425dc325a66020627e94e0b629e696">concrete example</a>; the <code>println!</code> statements are where the shared reference is used. I think it's not UB, because the mutex's data is in an unsafe cell, but I would like a confirmation. MIRI with <code>-Zmiri-track-raw-pointers</code> gives no warnings.</p>
+
+
+
+<a name="219056162"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219056162" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219056162">(Dec 07 2020 at 09:18)</a>:</h4>
+<p>As a comparison, I expect <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=ab9dc81acd6c80659e95d369e1d36015">this program</a> to have UB because it uses a <code>Box</code> instead of a <code>Mutex</code>. However, MIRI doesn't give warnings on that either. I'm not sure if it's a false negative of MIRI or a misunderstanding on my side.</p>
+
+
+
+<a name="219078341"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219078341" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219078341">(Dec 07 2020 at 13:21)</a>:</h4>
+<p>I <em>think</em> it's a false negative: aliasing (or rather, lack thereof) ought to be a transitive property. I guess it's just not transitively checked yet.</p>
+<p>Note that your initial example is UB if you do:</p>
+<div class="codehilite" data-code-language="Diff"><pre><span></span><code><span class="gd">- let data_guard =   data_mutex.lock().unwrap();</span>
+<span class="gi">+ let data_guard = &amp;*data_mutex.lock().unwrap();</span>
+</code></pre></div>
+<p>That is, if you do have a Rust reference that lives past the <code>lib</code> call <em>and which gets used / dereferenced</em> after the call then that write-dereference in <code>lib</code> breaks SB (and Miri does then complain).</p>
+<p>In the case where all you have is a guard it's less clear cut: implementation-wise, a <code>Guard</code> is a <code>&amp;UnsafeCell&lt;_&gt;</code>, <em>i.e.</em>, a shared read-write in SB parlance. It's only when you use its <code>Deref{,Mut}</code> that some aliasing properties get applied, and for the duration of the dereference.  But I wonder if the implementation could change to upgrade on lock rather than on deref, in which case your code would be UB even without an initial <code>&amp;*</code> <span aria-label="thinking" class="emoji emoji-1f914" role="img" title="thinking">:thinking:</span></p>
+
+
+
+<a name="219079291"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219079291" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219079291">(Dec 07 2020 at 13:30)</a>:</h4>
+<p>In practice, you may want to use/write your own <code>(Mutex&lt;()&gt;, UnsafeCell&lt;u32&gt;)</code> wrapper pair, or actually "simply" use a <code>RwLock&lt;Cell&lt;u32&gt;&gt;</code>. In the latter case, while performing a <code>.read()</code> lock on the <code>Cell</code>, it won't be possible to assert any lack of aliasing on the <code>u32</code> thanks to the <code>Cell</code>.</p>
+
+
+
+<a name="219454460"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219454460" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219454460">(Dec 10 2020 at 10:26)</a>:</h4>
+<p>Thank you, everything you wrote makes much sense. I'm aware that the code snippets are far from being Good Rust, but I'm trying to understand what's the (formal) limit of the API of some types.</p>
+
+
+
+<a name="219454552"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219454552" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219454552">(Dec 10 2020 at 10:27)</a>:</h4>
+<p>A surprising consequence of the first example that I posted seems to be that it's not UB to change the data of a <code>RwLock</code> while <em>another</em> thread is holding a <code>RwLockReadGuard</code> (<a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=0c329d1ad68f0422d4b11083b5d9bbed">playground</a>).</p>
+
+
+
+<a name="219454650"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219454650" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219454650">(Dec 10 2020 at 10:28)</a>:</h4>
+<p>So, if I were to implement a library that takes an <code>Arc&lt;RwLock&lt;_&gt;&gt;</code> argument, technically I cannot rely on the fact that it's UB to change the content of a lock while I'm holding a read guard, because a client of the library <em>might</em> find a side channel to do the synchronization (the <code>logic_mutex</code> in the last example that I linked).</p>
+
+
+
+<a name="219456631"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219456631" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Gwaihir Thorondorsen <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219456631">(Dec 10 2020 at 10:49)</a>:</h4>
+<p>Note that if you <code>deref()</code> the guard and keep the reference alive, the example becomes UB (<a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=1573655f7f29b0779611b3dc2ffdbb7c">modified playground</a>). Since <code>first_thread()</code> is all safe code, the UB must come from <code>second_thread()</code>.</p>
+
+
+
+<a name="219457302"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219457302" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219457302">(Dec 10 2020 at 10:57)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="369545">Gwaihir Thorondorsen</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex's.20data/near/219456631">said</a>:</p>
+<blockquote>
+<p>Note that if you <code>deref()</code> the guard and keep the reference alive, the example becomes UB (<a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=1573655f7f29b0779611b3dc2ffdbb7c">modified playground</a>). Since <code>first_thread()</code> is all safe code, the UB must come from <code>second_thread()</code>.</p>
+</blockquote>
+<p>Yes, or from the <code>unsafe impl</code> that I had to use to send the raw pointer.</p>
+
+
+
+<a name="219457750"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219457750" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219457750">(Dec 10 2020 at 11:02)</a>:</h4>
+<p>Actually the <code>unsafe impl</code> can be avoided: <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=b60e69a7fdbf9b3fa9f6ab1eb67efb4b">playground</a>.</p>
+
+
+
+<a name="219458915"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219458915" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219458915">(Dec 10 2020 at 11:15)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116427">Federico Poli</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex's.20data/near/219454650">said</a>:</p>
+<blockquote>
+<p>So, if I were to implement a library that takes an <code>Arc&lt;RwLock&lt;_&gt;&gt;</code> argument, technically I cannot rely on the fact that it's UB to change the content of a lock while I'm holding a read guard, because a client of the library <em>might</em> find a side channel to do the synchronization (the <code>logic_mutex</code> in the last example that I linked).</p>
+</blockquote>
+<p>I don't think this is correct. The invariant of <code>RwLock</code> says that you can only write to it while you hold the write lock. So <code>second_thread</code> is violating that invariant and is unsound (which is to say, it allows <code>first_thread</code> to cause UB without any unsafe code)</p>
+
+
+
+<a name="219459289"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219459289" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219459289">(Dec 10 2020 at 11:19)</a>:</h4>
+<p>If you want to locally violate this invariant and enforce a different one of your own design (something involving the <code>Mutex&lt;()&gt;</code> in this case), you can do so without causing UB because the invariant is at the library level, but the code snippet here demonstrates an unsound API: <code>ReadGuard</code> is built to support RwLock's invariant, and it violates your invariant. The <code>deref</code> impl needs to be unsafe with your invariant.</p>
+
+
+
+<a name="219466536"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219466536" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219466536">(Dec 10 2020 at 12:44)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex's.20data/near/219458915">said</a>:</p>
+<blockquote>
+<p>The invariant of <code>RwLock</code> says that you can only write to it while you hold the write lock.</p>
+</blockquote>
+<p>Do you have a reference? Intuitively this is the invariant that I expect too, but what's unspecified is what "you hold" means. For example, it could be "the thread that does the modification has a local variable of type <code>RwLockWriteGuard</code> on the stack", or "the function that does the modification has a local variable of type <code>RwLockWriteGuard</code>", or "the function that does the modification has a local variable from which the write guard is reachable" ("reachable" would need a definition too...).</p>
+
+
+
+<a name="219466624"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219466624" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219466624">(Dec 10 2020 at 12:45)</a>:</h4>
+<p>Among those three, I think that the correct interpretation should be the last one, such that programs like <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=9c425dc325a66020627e94e0b629e696">the first example of this thread</a> violate the invariant of <code>RwLock</code> and the reasoning is modular. However, I don't have an argument to claim that the first interpretation is incorrect.</p>
+
+
+
+<a name="219470043"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219470043" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219470043">(Dec 10 2020 at 13:19)</a>:</h4>
+<p>The modification must be done from a pointer or reference derived from a WriteGuard that has not yet been dropped</p>
+
+
+
+<a name="219470395"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219470395" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219470395">(Dec 10 2020 at 13:22)</a>:</h4>
+<p>In the first example,</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">data_ptr</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u32</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data_mutex_ref</span><span class="p">.</span><span class="n">lock</span><span class="p">().</span><span class="n">unwrap</span><span class="p">().</span><span class="n">deref_mut</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u32</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<p>creates a pointer that is immediately dangling. It cannot be used.</p>
+
+
+
+<a name="219470451"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219470451" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219470451">(Dec 10 2020 at 13:22)</a>:</h4>
+<p><span class="user-mention" data-user-id="116427">@Federico Poli</span></p>
+
+
+
+<a name="219471041"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219471041" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219471041">(Dec 10 2020 at 13:28)</a>:</h4>
+<p>The location of the write guard is not important. What matters, in order to be consistent with the stacked borrows model (or other similar models, for that matter), is whether the lifetime of the guard has ended. In SB this is represented by whether reference that is being used to perform the write still has an entry on the borrow stack that was put there by the guard (and will remain there until the guard is dropped). All Rust APIs have this form because this is what the lifetime and ownership model gives you, so it makes sense to build APIs that play well with it.</p>
+
+
+
+<a name="219472591"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219472591" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219472591">(Dec 10 2020 at 13:42)</a>:</h4>
+<p>So far, all of the examples have had (library) UB. Miri won't catch this because it only finds language UB, and unfortunately most type invariants are not spelled out in formal detail so I don't have a reference to give, but for RwLock the API makes the invariant pretty obvious: you get a guard and you can only modify the data through that guard. Using unsafe code doesn't change this.</p>
+
+
+
+<a name="219483942"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219483942" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219483942">(Dec 10 2020 at 15:05)</a>:</h4>
+<p><span class="user-mention" data-user-id="271719">@Mario Carneiro</span> Using the guard's lifetime is a really clear way of expressing the invariant, nice! I guess that your definition of "dangling pointer" is not "points to deallocated memory", right? Because in the example the raw pointer references data that will be deallocated by dropping the <code>Mutex</code>, not the <code>MutexGuard</code>.</p>
+
+
+
+<a name="219483986"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219483986" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219483986">(Dec 10 2020 at 15:05)</a>:</h4>
+<p>I find intriguing the "library UB" and "language UB" terms that you use. Could you expand a bit on the difference between them? For example, imagine that I copy-paste the definition of <code>Mutex</code> from the standard library and use it in <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=9c425dc325a66020627e94e0b629e696">the first example</a>. Would you still call it UB, even if as a developer I can rely on the intricate details of my copy-pasted implementation of <code>Mutex</code>?</p>
+
+
+
+<a name="219484706"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219484706" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219484706">(Dec 10 2020 at 15:10)</a>:</h4>
+<p>The definition of language UB is determined by the language spec, i.e. the thing that UCG is trying to determine. By contrast, library UB is defined by the author of the library, in the form of a set of invariants that must hold at the crate boundary. GIven such a definition, the question of whether a given function must be <code>unsafe</code> or not is well defined, as well as the preconditions for <code>unsafe</code> functions that suffice to make the calls safe.</p>
+<p>If you copy paste the definition of <code>Mutex</code>, you may or may not copy paste the invariant as well. If you keep <code>Mutex</code>'s invariant, then the code is still UB, but you can change the invariants, and then it may not be, although you may need to change the signatures of some functions or make them inaccessible to avoid presenting an unsound interface for downstream clients.</p>
+
+
+
+<a name="219485665"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219485665" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219485665">(Dec 10 2020 at 15:16)</a>:</h4>
+<p>Personally, I wish that programs put more emphasis on defining the invariants of their code. But Rust code at least has "explicit safety", and you can usually work backwards from the public safe API of a library to reverse engineer what the invariants are (under the assumption that the library API is sound). I think most programmers are used to doing this, and that's how I'm determining what the invariant of <code>RwLock</code> is.</p>
+
+
+
+<a name="219486909"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219486909" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219486909">(Dec 10 2020 at 15:24)</a>:</h4>
+<p>Now I see your point, thanks! I would like too invariants to be more explicit :) Given that the invariants are (currently) not visible to the compiler, however, don't you think that the compiler is forced to be conservative and act as if there were no invariant at all? I'm not sure that we want a UB definition that depends on non-visible invariants.</p>
+
+
+
+<a name="219487153"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219487153" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219487153">(Dec 10 2020 at 15:26)</a>:</h4>
+<p>Oh, I now see that what you call library UB is probably what I call library (in)correctness.</p>
+
+
+
+<a name="219487207"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219487207" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219487207">(Dec 10 2020 at 15:26)</a>:</h4>
+<p>The compiler operates with respect to the invariants of the language itself, that's language UB</p>
+
+
+
+<a name="219487310"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219487310" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219487310">(Dec 10 2020 at 15:27)</a>:</h4>
+<p>so even if you violate library invariants the compiler doesn't know or care</p>
+
+
+
+<a name="219487652"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219487652" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219487652">(Dec 10 2020 at 15:29)</a>:</h4>
+<p>Yes, I see your point. It's like the distinction "logic bug" vs "soundness bug" of <a href="#narrow/stream/146229-wg-secure-code/topic/How.20do.20programmers.20use.20unsafe.20Rust.3F">this other discussion</a>. In my terminology "UB" is your "language UB".</p>
+
+
+
+<a name="219487674"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219487674" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219487674">(Dec 10 2020 at 15:29)</a>:</h4>
+<p>You can still argue that such code is correct, but now the argument involves the internal details of that library, so you lose stability</p>
+
+
+
+<a name="219487711"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219487711" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219487711">(Dec 10 2020 at 15:29)</a>:</h4>
+<p>Yes</p>
+
+
+
+<a name="219487774"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219487774" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219487774">(Dec 10 2020 at 15:30)</a>:</h4>
+<p>which is why it is best to actually copy paste the code if you want to rely on that behavior</p>
+
+
+
+<a name="219488374"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219488374" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219488374">(Dec 10 2020 at 15:33)</a>:</h4>
+<p>well, there is still a bit of difference between a logic bug and library UB: the latter changes the assignment of <code>unsafe</code> labels to functions</p>
+
+
+
+<a name="219624607"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219624607" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219624607">(Dec 11 2020 at 16:11)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex's.20data/near/219488374">said</a>:</p>
+<blockquote>
+<p>well, there is still a bit of difference between a logic bug and library UB: the latter changes the assignment of <code>unsafe</code> labels to functions</p>
+</blockquote>
+<p>Could you post an example of that?</p>
+
+
+
+<a name="219627931"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219627931" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219627931">(Dec 11 2020 at 16:36)</a>:</h4>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="c1">// The library UB version:</span>
+
+<span class="sd">/// Module invariant: this is always even.</span>
+<span class="sd">/// The field must not be public</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">EvenInt</span><span class="p">(</span><span class="kt">u32</span><span class="p">);</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">EvenInt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="sd">/// There is no promise that the user gave us an even number, so</span>
+<span class="w">    </span><span class="sd">/// this function makes the crate interface unsound.</span>
+<span class="w">    </span><span class="sd">/// (Assume it is not present for the rest)</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">unsound</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">EvenInt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">EvenInt</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// This is okay, because the language invariant says that x is aligned</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">from_aligned_pointer</span><span class="p">(</span><span class="n">x</span>: <span class="kp">&amp;</span><span class="kt">u16</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">EvenInt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">EvenInt</span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u16</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// This is okay, because it is private.</span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">internal_function</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">EvenInt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">EvenInt</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// This is okay, because it is unsafe, signaling that the usual</span>
+<span class="w">    </span><span class="sd">/// preconditions may not be sufficient.</span>
+<span class="w">    </span><span class="sd">/// It should come with an explicit description of the precondition:</span>
+<span class="w">    </span><span class="sd">///</span>
+<span class="w">    </span><span class="sd">/// # Safety</span>
+<span class="w">    </span><span class="sd">///</span>
+<span class="w">    </span><span class="sd">/// This function must not be called with an odd input.</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span> <span class="nf">explicit_precondition</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">EvenInt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">EvenInt</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// This is okay, because of the module invariant</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">relies_on_precondition</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="c1">// Safety: our module invariant ensures that this property holds</span>
+<span class="w">            </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">std</span>::<span class="n">hint</span>::<span class="n">unreachable_unchecked</span><span class="p">()</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+
+
+<span class="c1">// The logic bug version:</span>
+
+<span class="sd">/// This *should* be an even int, but we don't rely on it as such.</span>
+<span class="sd">/// Formally, the module invariant is trivial (it is not necessarily even).</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">ProbablyEvenInt</span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// this can be public, but it doesn't have to be</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="kt">u32</span><span class="w"></span>
+<span class="p">);</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">ProbablyEvenInt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="sd">/// This uses assert for checking, it is okay</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">runtime_checked</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ProbablyEvenInt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">assert</span><span class="o">!</span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="s">"this should be even"</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">ProbablyEvenInt</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// This is only checked in debug mode, but it's still okay because</span>
+<span class="w">    </span><span class="sd">/// there isn't actually an invariant at the memory safety level</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">debug_checked</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ProbablyEvenInt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">debug_assert</span><span class="o">!</span><span class="p">(</span><span class="n">x</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="s">"this should be even"</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">ProbablyEvenInt</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// smelly but still legal. You must have a lot of trust in your users</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">unchecked</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ProbablyEvenInt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">ProbablyEvenInt</span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// Now this function is the unsound one, because we don't have the invariant</span>
+<span class="w">    </span><span class="sd">/// we need except at the logic bug level</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">unsound</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">std</span>::<span class="n">hint</span>::<span class="n">unreachable_unchecked</span><span class="p">()</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="sd">/// Here's how you signal logic bugs that have not been promoted to library UB level:</span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">better</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">unreachable</span><span class="o">!</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="219632672"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219632672" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219632672">(Dec 11 2020 at 17:09)</a>:</h4>
+<p>I really like this example</p>
+
+
+
+<a name="219632774"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219632774" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219632774">(Dec 11 2020 at 17:10)</a>:</h4>
+<p>and it helps me articulate why I don't like cranelift's API, because it <em>always</em> has <code>better</code> but not always <code>runtime_checked</code></p>
+
+
+
+<a name="219632790"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219632790" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219632790">(Dec 11 2020 at 17:10)</a>:</h4>
+<p>so it's hard to track down where things went wrong</p>
+
+
+
+<a name="219772428"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219772428" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219772428">(Dec 13 2020 at 18:08)</a>:</h4>
+<p><span class="user-mention" data-user-id="271719">@Mario Carneiro</span> very nice example indeed. :)</p>
+<p>FWIW, as a matter of code style, I'd usually make <code>internal_function</code> <code>unsafe</code> as well (and would ask people to do that during review). But this is not fundamentally needed for a sound interface.<br>
+Also, and now I am really nitpicking, I think safety comments should be positive, not negative -- so "This function assumes that the argument is even", not "This function must not be called with an odd input".</p>
+
+
+
+<a name="219772520"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219772520" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219772520">(Dec 13 2020 at 18:10)</a>:</h4>
+<p>Indeed. Really the whole discussion about "undefined behavior" seems backward since it talks about when an invariant is violated rather than the positive concept which is the idea of nontrivial invariants (and inferred preconditions)</p>
+
+
+
+<a name="219772546"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219772546" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219772546">(Dec 13 2020 at 18:11)</a>:</h4>
+<blockquote>
+<p>In the case where all you have is a guard it's less clear cut: implementation-wise, a Guard is a &amp;UnsafeCell&lt;_&gt;, i.e., a shared read-write in SB parlance. It's only when you use its Deref{,Mut} that some aliasing properties get applied, and for the duration of the dereference. But I wonder if the implementation could change to upgrade on lock rather than on deref, in which case your code would be UB even without an initial &amp;* <span aria-label="tada" class="emoji emoji-1f389" role="img" title="tada">:tada:</span> </p>
+</blockquote>
+<p>I think the implementation probably could be changed like that, so relying on this internal implementation detail is likely not correct</p>
+
+
+
+<a name="219772556"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219772556" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219772556">(Dec 13 2020 at 18:11)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex's.20data/near/219772520">said</a>:</p>
+<blockquote>
+<p>Indeed. Really the whole discussion about "undefined behavior" seems backward since it talks about when an invariant is violated rather than the positive concept which is the idea of nontrivial invariants (and inferred preconditions)</p>
+</blockquote>
+<p>many stdlib docs get around that by saying "behavior is undefined unless all of the following conditions are met: [...]"</p>
+
+
+
+<a name="219772615"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219772615" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219772615">(Dec 13 2020 at 18:12)</a>:</h4>
+<p>but yeah, with all the baggage that comes with the term "UB", the fact that it focuses on the negative case is really my biggest complaint.</p>
+
+
+
+<a name="219831057"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219831057" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219831057">(Dec 14 2020 at 12:00)</a>:</h4>
+<p>Thank you for the example! Now I see what you mean with adding unsafe.</p>
+
+
+
+<a name="219832612"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219832612" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219832612">(Dec 14 2020 at 12:15)</a>:</h4>
+<p>I find this thread very useful. So, let me condense some ideas.</p>
+<p>Rust code can be annotated with documentation that states properties (invariants, pre/post conditions etc) of the code. The author of the code should always explicitly split these properties in two: <em>correctness</em> and <em>safety</em> properties. When done correctly, violating the former from a client should lead in the worst case to logic errors (panics, computing the wrong result etc) while violating the latter should lead in the worst case to UB. The safety proof of unsafe blocks can only rely on safety properties, not correctness properties.</p>
+<p>When a safety property is violated, two things can happen:</p>
+<ul>
+<li>The code's behavior is undefined. For example, because the compiler infers that a shared and a mutable reference point to the same memory location while they are both active.</li>
+<li>The code's behavior is actually defined, but just because of implementation details. This is fragile because a future version of a library might change the implementation. I think this is a case of @Mario Carneiro's "library UB", but I would call this "fragile behavior" to make it clear that it's not undefined.</li>
+</ul>
+<p>To complete the analogy, when a correctness property is violated, two things can happen:</p>
+<ul>
+<li>The code has a logic error (panics, computes the wrong result etc).</li>
+<li>The code actually runs fine and computes the correct result, because the implementation is more robust than what stated in the declared correctness properties. Of course, this is fragile because the implementation could change in future versions.</li>
+</ul>
+
+
+
+<a name="219832710"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219832710" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Federico Poli <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219832710">(Dec 14 2020 at 12:16)</a>:</h4>
+<p>In the end, my understanding is that all the examples that I linked are cases of <em>fragile behaviour</em>: the code that arrives to the compiler has no UB, but the safety proof is <em>wrong</em> because it relies on an implementation detail of a library and not on its safety properies, which are guaranteed to be preserved in minor updates of the library.</p>
+
+
+
+<a name="219833894"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219833894" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219833894">(Dec 14 2020 at 12:27)</a>:</h4>
+<p>yes, that's a good way to put it</p>
+
+
+
+<a name="219896490"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219896490" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219896490">(Dec 14 2020 at 20:19)</a>:</h4>
+<p>I had assumed panics were a UB property rather than a logic property</p>
+
+
+
+<a name="219933937"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219933937" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219933937">(Dec 15 2020 at 03:29)</a>:</h4>
+<p>panics are never UB</p>
+
+
+
+<a name="219933985"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219933985" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219933985">(Dec 15 2020 at 03:29)</a>:</h4>
+<p>they can crash the program, but they can't write to arbitrary memory or run arbitrary code</p>
+
+
+
+<a name="219948790"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219948790" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219948790">(Dec 15 2020 at 08:29)</a>:</h4>
+<p>heh yeah I think this is because of checks in the MIR, like in,<br>
+C an out-of-bounds read is UB, but in Rust that is prevented</p>
+
+
+
+<a name="219948889"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219948889" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219948889">(Dec 15 2020 at 08:30)</a>:</h4>
+<p>or at least eventually MIR will have safety proofs?</p>
+
+
+
+<a name="219948928"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219948928" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219948928">(Dec 15 2020 at 08:31)</a>:</h4>
+<p>either way I appreciated the outline since I had some bad assumptions :)</p>
+
+
+
+<a name="219976951"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219976951" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219976951">(Dec 15 2020 at 13:18)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="281739">oliver</span> <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex's.20data/near/219948790">said</a>:</p>
+<blockquote>
+<p>heh yeah I think this is because of checks in the MIR, like in,<br>
+C an out-of-bounds read is UB, but in Rust that is prevented</p>
+</blockquote>
+<p>well yes, but it's nothing to do with MIR, there's a <code>panic</code> in <code>Index</code> if you try to read out of bounds: <a href="https://doc.rust-lang.org/src/core/slice/index.rs.html#395">https://doc.rust-lang.org/src/core/slice/index.rs.html#395</a></p>
+
+
+
+<a name="219976995"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/219976995" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#219976995">(Dec 15 2020 at 13:18)</a>:</h4>
+<p>you can still call <code>get_unchecked</code> and it will be UB on an out-of-bounds index</p>
+
+
+
+<a name="220031286"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw%20pointer%20to%20a%20mutex%27s%20data/near/220031286" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://rust-lang.github.io/zulip_archive/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Raw.20pointer.20to.20a.20mutex&#x27;s.20data.html#220031286">(Dec 15 2020 at 19:41)</a>:</h4>
+<p>ooh interesting</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

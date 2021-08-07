@@ -1,0 +1,890 @@
+[
+    {
+        "content": "<p>hey <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span>, I've implemented the <a href=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\">steps you wrote up here</a> and I've been trying to debug a few of the ICEs that have sprung up. Unfortunately, I've not been able to carve out much time for long debugging sessions as I'd have liked recently to tackle these failures. I was hoping you might have some thoughts on what the correct fix is (for the issues where I have an idea what's going wrong) and where I might go looking to fix the other problems.</p>\n<p>There are four distinct failures that I'm seeing:</p>\n<p><strong><code>ui/huge-array.rs</code></strong></p>\n<div class=\"codehilite\"><pre><span></span>error: internal compiler error: src/librustc_mir/interpret/eval_context.rs:139: The type checker should prevent reading from a never-written local\n</pre></div>\n\n\n<p>Here's the function it fails in:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">fn</span> <span class=\"nf\">generic</span><span class=\"o\">&lt;</span><span class=\"n\">T</span>: <span class=\"nb\">Copy</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">t</span>: <span class=\"nc\">T</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">s</span>: <span class=\"p\">[</span><span class=\"n\">T</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">1518600000</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">t</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">1518600000</span><span class=\"p\">];</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>Thus far, I've spent most of my time digging into this error. It appears that the <code>qualify_consts</code> pass determines that <code>t</code> should be a candidate for promotion. Then when constructing the <code>promoted[0]</code> MIR, it eventually hits <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/promote_consts.rs#L366-L368\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/promote_consts.rs#L366-L368\">this line</a> where the <code>LocalKind</code> is an argument, so it stops. Then we end up with promoted MIR that looks like this:</p>\n<div class=\"codehilite\"><pre><span></span>    bb0: {\n         _1 = _1;                         // bb0[0]: scope 0 at src/test/ui/huge-array.rs:8:31: 8:32\n         _0 = move _1;                    // bb0[1]: scope 0 at src/test/ui/huge-array.rs:8:30: 8:45\n         return;                          // bb0[2]: scope 0 at src/test/ui/huge-array.rs:8:30: 8:45\n     }\n</pre></div>\n\n\n<p>And that causes the ICE because <code>_1</code> is never written to. I've been working on the assumption that we're going wrong by considering the <code>t</code> a candidate, and after digging into the <code>IsNotImplicitlyPromotable::in_operand</code> check that we perform, I thought that the fix might be to consider the argument locals in the original MIR not implicitly promotable (and thus the <code>t</code> wouldn't be implicitly promotable either). I wasn't sure if this would have unintended consequences as I'm not that familiar with the const qualification/promotion code, so wanted to ask first.</p>\n<hr>\n<p><strong><code>ui/consts/rfc-2203-const-array-repeat-exprs/nll_borrowck.rs</code></strong></p>\n<div class=\"codehilite\"><pre><span></span>error: internal compiler error: broken MIR in DefId(0:78 ~ nll_borrowck[317d]::non_constants[0]::no_impl_copy_empty_value_no_elements[0]) (NoSolution): could not prove Binder(TraitPredicate(&lt;std::option::Option&lt;Bar&gt; as\n std::marker::Copy&gt;))\n  --&gt; /home/david/projects/rust/rust0/src/test/ui/consts/rfc-2203-const-array-repeat-exprs/nll_borrowck.rs:77:37\n   |\nLL |         let arr: [Option&lt;Bar&gt;; 0] = [x; 0];\n   |                                     ^^^^^^\n</pre></div>\n\n\n<p>(this test is one that I've added enumerating a bunch of the cases with repeat expressions)</p>\n<p>My understanding of this failure is that by disabling the check from <a href=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\">step 1 of your instructions</a> (in your instructions you say <code>tcx.borrowck_mode() == BorrowckMode::Mir</code> but I think you meant <code>tcx.borrowck_mode() != BorrowckMode::Mir</code>). Where the <code>rustc_typeck</code> logic would previously have did the check for a type to be <code>Copy</code>, now it's getting to the Mir type check to do that, which I assume had a pre-existing bug for this case that just wasn't surfacing. I've not had time to really dig into this one.</p>\n<hr>\n<p><strong><code>ui/issues/issue-17913.rs</code></strong></p>\n<div class=\"codehilite\"><pre><span></span><span class=\"gd\">-       error: the type `[&amp;usize; N]` is too big for the current architecture</span>\n<span class=\"gi\">+       error[E0080]: it is undefined behavior to use this value</span>\n<span class=\"gi\">+         --&gt; $DIR/issue-17913.rs:11:1</span>\n<span class=\"gi\">+          |</span>\n<span class=\"gi\">+       LL | / fn main() {</span>\n<span class=\"gi\">+       LL | |     let n = 0_usize;</span>\n<span class=\"gi\">+       LL | |     let a: Box&lt;_&gt; = box [&amp;n; 0xF000000000000000_usize];</span>\n<span class=\"gi\">+       LL | |     println!(&quot;{}&quot;, a[0xFFFFFF_usize]);</span>\n<span class=\"gi\">+       LL | | }</span>\n<span class=\"gi\">+          | |_^ type validation failed: encountered a pointer at .&lt;deref&gt;, but expected initialized plain (non-pointer) bytes</span>\n<span class=\"gi\">+          |</span>\n<span class=\"gi\">+          = note: The rules on what exactly is undefined behavior aren&#39;t clear, so this check might be overzealous. Please open an issue on the rust compiler repository if you believe it should not be considered undef</span>\nined behavior\n2\n3       error: aborting due to previous error\n4\n\n<span class=\"gi\">+       For more information about this error, try `rustc --explain E0080`.</span>\n5\n</pre></div>\n\n\n<p>I've not had time to dig into this error at all.</p>\n<hr>\n<p><strong><code>ui/nll/type-check-pointer-coercions.rs</code></strong></p>\n<div class=\"codehilite\"><pre><span></span>50      LL |     x\n51         |     ^ returning this value requires that `&#39;a` must outlive `&#39;b`\n52\n<span class=\"gd\">-       error: lifetime may not live long enough</span>\n<span class=\"gd\">-         --&gt; $DIR/type-check-pointer-coercions.rs:24:5</span>\n<span class=\"gd\">-          |</span>\n<span class=\"gd\">-       LL | fn array_elem&lt;&#39;a, &#39;b&gt;(x: &amp;&#39;a i32) -&gt; *const &amp;&#39;b i32 {</span>\n<span class=\"gd\">-          |               --  -- lifetime `&#39;b` defined here</span>\n<span class=\"gd\">-          |               |</span>\n<span class=\"gd\">-          |               lifetime `&#39;a` defined here</span>\n<span class=\"gd\">-       ...</span>\n<span class=\"gd\">-       LL |     y</span>\n<span class=\"gd\">-          |     ^ returning this value requires that `&#39;a` must outlive `&#39;b`</span>\n<span class=\"gd\">-</span>\n<span class=\"gd\">-       error: lifetime may not live long enough</span>\n<span class=\"gd\">-         --&gt; $DIR/type-check-pointer-coercions.rs:30:5</span>\n<span class=\"gd\">-          |</span>\n<span class=\"gd\">-       LL | fn array_coerce&lt;&#39;a, &#39;b&gt;(x: &amp;&#39;a i32) -&gt; *const [&amp;&#39;b i32; 3] {</span>\n<span class=\"gd\">-          |                 --  -- lifetime `&#39;b` defined here</span>\n<span class=\"gd\">-          |                 |</span>\n<span class=\"gd\">-          |                 lifetime `&#39;a` defined here</span>\n<span class=\"gd\">-       ...</span>\n<span class=\"gd\">-       LL |     y</span>\n<span class=\"gd\">-          |     ^ returning this value requires that `&#39;a` must outlive `&#39;b`</span>\n<span class=\"gd\">-</span>\n<span class=\"gd\">-       error: lifetime may not live long enough</span>\n<span class=\"gd\">-         --&gt; $DIR/type-check-pointer-coercions.rs:36:5</span>\n<span class=\"gd\">-          |</span>\n<span class=\"gd\">-       LL | fn nested_array&lt;&#39;a, &#39;b&gt;(x: &amp;&#39;a i32) -&gt; *const [&amp;&#39;b i32; 2] {</span>\n<span class=\"gd\">-          |                 --  -- lifetime `&#39;b` defined here</span>\n<span class=\"gd\">-          |                 |</span>\n<span class=\"gd\">-          |                 lifetime `&#39;a` defined here</span>\n<span class=\"gd\">-       ...</span>\n<span class=\"gd\">-       LL |     y</span>\n<span class=\"gd\">-          |     ^ returning this value requires that `&#39;a` must outlive `&#39;b`</span>\n<span class=\"gd\">-</span>\n<span class=\"gd\">-       error: aborting due to 8 previous errors</span>\n<span class=\"gi\">+       error: aborting due to 5 previous errors</span>\n87\n88\n</pre></div>\n\n\n<p>I've also not had time to dig into this.</p>",
+        "id": 167115348,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559469751
+    },
+    {
+        "content": "<p>Sorry for the gigantic braindump.</p>",
+        "id": 167115352,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559469772
+    },
+    {
+        "content": "<p>So, I can confirm that my theorized fix for the first issue fixes the problems with <code>ui/nll/type-check-pointer-coercions.rs</code> and <code>ui/huge-array.rs</code>.</p>",
+        "id": 167116027,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559471012
+    },
+    {
+        "content": "<p>yeah <code>_1 = _1</code> is just broken</p>",
+        "id": 167174375,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557038
+    },
+    {
+        "content": "<p>the argument locals <em>should</em> already be marked as not implicitly promotable, I thought we even had bugs fixed that were like this (cc <span class=\"user-mention\" data-user-id=\"124288\">@oli</span>)</p>",
+        "id": 167174474,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557089
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> hang on, we do have this: <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L650-L652\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L650-L652\">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L650-L652</a></p>",
+        "id": 167174555,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557170
+    },
+    {
+        "content": "<p>Should I add <code>IsNotImplicitlyPromotable</code> in  that conditional?</p>",
+        "id": 167174583,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559557200
+    },
+    {
+        "content": "<p>no</p>",
+        "id": 167174811,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557327
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> I misspoke in the suggestions</p>",
+        "id": 167174814,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557333
+    },
+    {
+        "content": "<p>It should be checking for <code>IsNotPromotable</code>? Rather than <code>IsNotImplicitlyPromotable</code>?</p>",
+        "id": 167174829,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559557354
+    },
+    {
+        "content": "<p>this is what it looks like for implicit promotion <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L758-L760\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L758-L760\">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/qualify_consts.rs#L758-L760</a></p>",
+        "id": 167174836,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557358
+    },
+    {
+        "content": "<p>you should be checking <em>both</em></p>",
+        "id": 167174839,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557362
+    },
+    {
+        "content": "<p>Alright, that's building now.</p>",
+        "id": 167175163,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559557578
+    },
+    {
+        "content": "<p>and you were right about the <code>==</code></p>",
+        "id": 167175720,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557953
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> I've edited <a href=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\">https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914</a></p>",
+        "id": 167175723,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557960
+    },
+    {
+        "content": "<p>That fixed one of the other ICEs too.</p>",
+        "id": 167175732,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559557965
+    },
+    {
+        "content": "<p>note that where I suggested to put <code>Rvalue::Repeat</code> handling in <code>qualify_consts</code> was wrong</p>",
+        "id": 167175764,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559557998
+    },
+    {
+        "content": "<p>since <code>Rvalue::Ref</code> is handled in <code>assign</code>, so should this</p>",
+        "id": 167175787,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558023
+    },
+    {
+        "content": "<p>Cool, I'll make that change.</p>",
+        "id": 167175862,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559558046
+    },
+    {
+        "content": "<p>so glad you're working on this :D</p>",
+        "id": 167175871,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558054
+    },
+    {
+        "content": "<p>This is the only failure that remains: <a href=\"https://gist.github.com/davidtwco/7c891eaf0030bd2cde80af37511d09ac\" target=\"_blank\" title=\"https://gist.github.com/davidtwco/7c891eaf0030bd2cde80af37511d09ac\">https://gist.github.com/davidtwco/7c891eaf0030bd2cde80af37511d09ac</a></p>",
+        "id": 167175935,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559558107
+    },
+    {
+        "content": "<p>so that is weird</p>",
+        "id": 167175967,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558133
+    },
+    {
+        "content": "<p>That being a test I added with every enumeration of copy/non-copy/const/non-const/etc.</p>",
+        "id": 167175970,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559558137
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L519-L523\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L519-L523\">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L519-L523</a></p>",
+        "id": 167176108,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558233
+    },
+    {
+        "content": "<p>this should already kick in if a <code>Copy</code> impl has lifetime bounds that can't be satisfied</p>",
+        "id": 167176127,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558257
+    },
+    {
+        "content": "<p>in fact I can prove it rly quickly</p>",
+        "id": 167176135,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558263
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a4d57cddcb7e118e1c241f6f7d328119\" target=\"_blank\" title=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a4d57cddcb7e118e1c241f6f7d328119\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=a4d57cddcb7e118e1c241f6f7d328119</a></p>",
+        "id": 167176615,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558697
+    },
+    {
+        "content": "<p>note that if you switch the edition to 2015 you'll get no error</p>",
+        "id": 167176652,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558743
+    },
+    {
+        "content": "<p>and this is where it is emitted from <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L501\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L501\">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L501</a></p>",
+        "id": 167176718,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558808
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> hang on, 2015 and 2018 on nightly are the same, so my instructions are wrong!</p>",
+        "id": 167176739,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559558842
+    },
+    {
+        "content": "<p>or not wrong, since you would still need <code>#![feature(nll)]</code> which would make those hard errors...</p>",
+        "id": 167176996,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559559158
+    },
+    {
+        "content": "<p>anyway I added a paragraph to step 1. in <a href=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\">https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914</a></p>",
+        "id": 167177000,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559559175
+    },
+    {
+        "content": "<p>To clarify, you expect this not to ICE with full NLL?</p>",
+        "id": 167177093,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559559306
+    },
+    {
+        "content": "<p>yeah, it should error properly</p>",
+        "id": 167177557,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559559793
+    },
+    {
+        "content": "<p>That test has <code>#![feature(nll)]</code>.</p>",
+        "id": 167177711,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559559954
+    },
+    {
+        "content": "<p>It fails with NLL.</p>",
+        "id": 167177765,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559559972
+    },
+    {
+        "content": "<p>Works fine with my AST check (as in, it works the way I’d expect, and doesn’t ICE).</p>",
+        "id": 167177790,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1559560003
+    },
+    {
+        "content": "<p>hmmm</p>",
+        "id": 167177923,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559560197
+    },
+    {
+        "content": "<p>oooh <a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=3b14136c6338d0fbad6ddf6817cdf00e\" target=\"_blank\" title=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=3b14136c6338d0fbad6ddf6817cdf00e\">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=3b14136c6338d0fbad6ddf6817cdf00e</a></p>",
+        "id": 167177990,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559560241
+    },
+    {
+        "content": "<p>hang on...</p>",
+        "id": 167177993,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559560244
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> right, I'm an idiot, what the MIR borrowck does is not what one might think it does</p>",
+        "id": 167178020,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559560282
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> added paragraph to 2. <a href=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\">https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914</a></p>",
+        "id": 167178374,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559560635
+    },
+    {
+        "content": "<p>so the solution is to do the typeck check, wait... I misread it. ugh, time to edit again</p>",
+        "id": 167178455,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559560692
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> yeah so you need something like this <a href=\"https://github.com/rust-lang/rust/blob/c57ed9d9478dcd12c854a0ef4e83c7f384ade060/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L1876-L1890\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/c57ed9d9478dcd12c854a0ef4e83c7f384ade060/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L1876-L1890\">https://github.com/rust-lang/rust/blob/c57ed9d9478dcd12c854a0ef4e83c7f384ade060/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L1876-L1890</a></p>",
+        "id": 167179010,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559561145
+    },
+    {
+        "content": "<p>I posted the correct check.. wait, I screwed up again aaaaa</p>",
+        "id": 167179099,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559561187
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> sorry for the back&amp;forth, you can now re-review steps 1. and 2. <a href=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914\">https://github.com/rust-lang/rust/issues/49147#issuecomment-494745914</a></p>",
+        "id": 167179913,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559561753
+    },
+    {
+        "content": "<p>I don't know how to emit a proper trait error from NLL typeck, maybe <span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span> does?</p>",
+        "id": 167179969,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559561769
+    },
+    {
+        "content": "<p>but we can discuss that on the PR, a simple hard error would suffice to submit the first version</p>",
+        "id": 167179986,
+        "sender_full_name": "eddyb",
+        "timestamp": 1559561783
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> Didn't have much time to work on this in the last week, got back to it today. I've found that changing the code to a hard error like you suggested didn't quite work. It appeared to cause an error in cases that were previously accepted, I worked around it by also checking <code>type_is_copy_modulo_regions</code> before emitting an error, but I suspect that isn't correct. </p>\n<p>After that, the only remaining failure I've been running into is another <code>could not prove Binder(TraitPredicate(&lt;State as std::marker::Copy&gt;))</code> error from broken MIR, this time in <code>run-pass/issues/issue-23898.rs</code>.</p>",
+        "id": 167715437,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560111569
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span>error: internal compiler error: broken MIR in DefId(0:17 ~ issue_23898[317d]::main[0]) (NoSolution): could not prove Binder(TraitPredicate(&lt;State as std::marker::Copy&gt;))\n  --&gt; /home/david/projects/rust/rust0/src/test/run-pass/issues/issue-23898.rs:9:5\n   |\nLL |     [State::ST_NULL; (State::ST_WHITESPACE as usize)];\n   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n</pre></div>",
+        "id": 167715489,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560111617
+    },
+    {
+        "content": "<p>I believe it is <a href=\"https://github.com/rust-lang/rust/blob/07c3967de9027735bfbf9c739f6a8ca14312c22d/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L499-L525\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/07c3967de9027735bfbf9c739f6a8ca14312c22d/src/librustc_mir/borrow_check/nll/type_check/mod.rs#L499-L525\">from these lines</a>.</p>",
+        "id": 167715500,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560111663
+    },
+    {
+        "content": "<p>interesting, I would've expected <code>Operand::Copy</code> to be generated when the MIR is built but I guess that's not a given</p>",
+        "id": 167735437,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560146158
+    },
+    {
+        "content": "<p>those lines apply when you have <code>Operand::Copy</code>, which should've already passed <code>type_is_copy_modulo_regions</code></p>",
+        "id": 167735563,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560146291
+    },
+    {
+        "content": "<blockquote>\n<p>those lines apply when you have <code>Operand::Copy</code>, which should've already passed <code>type_is_copy_modulo_regions</code></p>\n</blockquote>\n<p>Do you mean the lines I replaced w/ a hard error or the lines I think the current error is coming from?</p>",
+        "id": 167737643,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560149609
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> (in case you missed the above question)</p>",
+        "id": 167826775,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560238707
+    },
+    {
+        "content": "<p>the latter</p>",
+        "id": 167826783,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560238728
+    },
+    {
+        "content": "<p>you shouldn't be seeing <code>Operand::Copy</code> if the type doesn't at least <em>appear to</em> implement <code>Copy</code></p>",
+        "id": 167826809,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560238750
+    },
+    {
+        "content": "<p>if you do, it would be interesting to see where it might be coming from</p>",
+        "id": 167826816,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560238763
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span>error: repeated expression does not implement `std::marker::Copy`\n  --&gt; /home/david/projects/rust/rust0/src/test/ui/static/static-vec-repeat-not-constant.rs:3:24\n   |\nLL | static a: [isize; 2] = [foo(); 2];\n   |                        ^^^^^^^^^^ the trait `std::marker::Copy` is not implemented for `isize`\n   |\n   = note: the `std::marker::Copy` trait is required because the repeated element will be copied\n</pre></div>\n\n\n<div class=\"codehilite\"><pre><span></span><span class=\"gi\">+       error: repeated expression does not implement `std::marker::Copy`</span>\n<span class=\"gi\">+         --&gt; $DIR/type-check-pointer-coercions.rs:34:14</span>\n<span class=\"gi\">+          |</span>\n<span class=\"gi\">+       LL |     let z = &amp;[[x; 2]; 3];</span>\n<span class=\"gi\">+          |              ^^^^^^^^^^^ the trait `std::marker::Copy` is not implemented for `[&amp;i32; 2]`</span>\n<span class=\"gi\">+          |</span>\n<span class=\"gi\">+          = note: the `std::marker::Copy` trait is required because the repeated element will be copied</span>\n</pre></div>\n\n\n<div class=\"codehilite\"><pre><span></span><span class=\"gi\">+       error: repeated expression does not implement `std::marker::Copy`</span>\n<span class=\"gi\">+         --&gt; $DIR/issue-17913.rs:13:25</span>\n<span class=\"gi\">+          |</span>\n<span class=\"gi\">+       LL |     let a: Box&lt;_&gt; = box [&amp;n; 0xF000000000000000_usize];</span>\n<span class=\"gi\">+          |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::marker::Copy` is not implemented for `&amp;usize`</span>\n<span class=\"gi\">+          |</span>\n<span class=\"gi\">+          = note: the `std::marker::Copy` trait is required because the repeated element will be copied</span>\n</pre></div>\n\n\n<p><span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> some examples of the errors I get when I stop checking for <code>type_is_copy_modulo_regions</code> where I'm emitting the hard error.</p>",
+        "id": 167827149,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560239129
+    },
+    {
+        "content": "<p>that makes sense, <code>Operand::Move</code> on <code>Copy</code> types is totally plausible</p>",
+        "id": 167827223,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560239176
+    },
+    {
+        "content": "<p>There are some instances where it's a generic type <code>T</code> and not a <code>usize</code>, <code>i32</code>, etc.</p>",
+        "id": 167827227,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560239182
+    },
+    {
+        "content": "<p>like, it's presumably some temporary into which a value was constructed</p>",
+        "id": 167827239,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560239212
+    },
+    {
+        "content": "<p>it would make sense for that to be moved</p>",
+        "id": 167827245,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560239221
+    },
+    {
+        "content": "<p>so my initial suggestion of checking for <code>Operand::Move</code> is silly, your check is correct</p>",
+        "id": 167827262,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560239238
+    },
+    {
+        "content": "<p>I just don't know why you'd get any ICEs</p>",
+        "id": 167827267,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560239245
+    },
+    {
+        "content": "<p>Well, we replaced the <code>prove_trait_ref</code> with the hard error in this case (conditional on <code>type_is_copy_modulo_regions</code> and <code>Operand::Move</code>, but it's the only other remaining <code>prove_trait_ref</code>for <code>ConstraintCategory::CopyBound</code> that is being hit now.</p>",
+        "id": 167827340,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560239315
+    },
+    {
+        "content": "<p>If I wrap the other check in a <code>type_is_copy_modulo_regions</code> (so we only run <code>prove_trait_ref</code> for types that are <code>Copy</code> (modulo regions)) then the test that was failing now passes. If you reckon that's the correct thing to do, I can tidy up my commits and throw a PR up shortly.</p>",
+        "id": 167827927,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560239983
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> it just means something is generating an <code>Operand::Copy</code> and shouldn't</p>",
+        "id": 167828025,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560240081
+    },
+    {
+        "content": "<p>So I should be working out how to stop that happening instead of adding a condition?</p>",
+        "id": 167828035,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560240109
+    },
+    {
+        "content": "<p>yes</p>",
+        "id": 167828094,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560240143
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> if you search for <code>Operand::Copy</code> in <code>librustc_mir/build</code> you'll find that at least one of the places checks literally <code>is_copy_modulo_regions</code> before picking that</p>",
+        "id": 167828149,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560240218
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span>  <code>Operand::Copy</code> is being created by another change I've made, <span aria-label=\"face palm\" class=\"emoji emoji-1f926\" role=\"img\" title=\"face palm\">:face_palm:</span>. In particular, when doing the actual promotion in the <code>promote_consts</code> pass, I am creating a <code>Operand::Copy(promoted_place(ty, span))</code>. </p>\n<p>If I change it to <code>Operand::Move</code> then I get an error when compiling <code>libstd</code>:</p>\n<div class=\"codehilite\"><pre><span></span>error[E0507]: cannot move out of static item `promoted`\n  --&gt; src/libstd/sys/unix/os.rs:99:19\n   |\n99 |     let mut buf = [0 as c_char; TMPBUF_SZ];\n   |                   ^^^^^^^^^^^^^^^^^^^^^^^^ move occurs because `promoted` has type `i8`, which does not implement the `Copy` trait\n</pre></div>\n\n\n<p>I'm unsure if the correct fix is to modify where we're calling <code>prove_trait_ref</code> so that it doesn't consider promoted places, or if I should be using <code>Operand::Move</code> when promoting and that I need to make a change elsewhere to avoid the error we're seeing in <code>libstd</code>.</p>",
+        "id": 167864677,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560269417
+    },
+    {
+        "content": "<p>ohnoes</p>",
+        "id": 167871763,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560274434
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124288\">@oli</span> ^^ this is an instance where promoteds being places doesn't help :(</p>",
+        "id": 167871820,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560274455
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> so, what I would've expected is to not do any promotion to start off with</p>",
+        "id": 167871850,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560274498
+    },
+    {
+        "content": "<p>and make sure stuff isn't broken</p>",
+        "id": 167871855,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560274503
+    },
+    {
+        "content": "<p>the fact that you couldn't use <code>Operand::Const</code>, like I thought you could, is a big warning sign</p>",
+        "id": 167871875,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560274527
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124288\">@oli</span> maybe we need to go back to non-place-based promotion and, uhh, promote <code>&amp;base_local</code> and then do <code>&amp;(*promoted)[runtime_index]</code> if we have something like that to deal with :/</p>",
+        "id": 167871957,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560274591
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> for now, one thing you could do is ignore promoted places in that \"must implement Copy\" part of NLL borrowck type_check</p>",
+        "id": 167872105,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560274695
+    },
+    {
+        "content": "<p>I can do that.</p>",
+        "id": 167872123,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560274715
+    },
+    {
+        "content": "<p>and open an issue about resolving the discordance between promotion for <code>&amp;expr</code> and <code>[expr; n]</code></p>",
+        "id": 167872160,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560274744
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> I've submitted <a href=\"https://github.com/rust-lang/rust/issues/61749\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/61749\">#61749</a> with what I have, resolving the merge conflicts shortly. Haven't filed that issue yet.</p>",
+        "id": 167890176,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560286861
+    },
+    {
+        "content": "<p>@eddyb I'm not sure how that would help? you'd just end up with a move out of borrowed context error</p>",
+        "id": 167920117,
+        "sender_full_name": "oli",
+        "timestamp": 1560321941
+    },
+    {
+        "content": "<p>instead what we can do is to allow moving out of promoteds similarly to how we allow \"moving out of constants\"</p>",
+        "id": 167920160,
+        "sender_full_name": "oli",
+        "timestamp": 1560321963
+    },
+    {
+        "content": "<p>well, not quite, since constants are their own <code>Operand</code></p>",
+        "id": 167920178,
+        "sender_full_name": "oli",
+        "timestamp": 1560322021
+    },
+    {
+        "content": "<p>yes, \"moving out of\" only makes sense for places, and I'm saying promoteds not being places would make that go away</p>",
+        "id": 167920249,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322087
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 167920257,
+        "sender_full_name": "oli",
+        "timestamp": 1560322103
+    },
+    {
+        "content": "<p>I mean adding a new <code>Operand</code> variant is trivial</p>",
+        "id": 167920264,
+        "sender_full_name": "oli",
+        "timestamp": 1560322120
+    },
+    {
+        "content": "<p>like, you'd have a promoted of type <code>&amp;T</code> for <code>&amp;expr</code> and a promoted of type <code>T</code> for <code>[expr; n]</code></p>",
+        "id": 167920265,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322122
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 167920270,
+        "sender_full_name": "oli",
+        "timestamp": 1560322139
+    },
+    {
+        "content": "<p>I'm pretty much talking of going back to how things were before you changed them</p>",
+        "id": 167920274,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322143
+    },
+    {
+        "content": "<p>a new <code>Operand</code> variant seems interesting, in that it wouldn't add onto <code>Constant</code></p>",
+        "id": 167920292,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322166
+    },
+    {
+        "content": "<p>I'd really prefer that</p>",
+        "id": 167920296,
+        "sender_full_name": "oli",
+        "timestamp": 1560322177
+    },
+    {
+        "content": "<p>I mean my changes are easy to revert</p>",
+        "id": 167920298,
+        "sender_full_name": "oli",
+        "timestamp": 1560322186
+    },
+    {
+        "content": "<p>but iirc they cleaned up a few things nicely</p>",
+        "id": 167920302,
+        "sender_full_name": "oli",
+        "timestamp": 1560322194
+    },
+    {
+        "content": "<p>yeah I'm a bit torn</p>",
+        "id": 167920383,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322259
+    },
+    {
+        "content": "<p>how about we go with the <code>Operand</code> version and I solemly promise that if at some point you're still unhappy enough with promoteds being places, and want them changed, then I'll do the revert myself.</p>",
+        "id": 167920699,
+        "sender_full_name": "oli",
+        "timestamp": 1560322547
+    },
+    {
+        "content": "<p>uhm</p>",
+        "id": 167920704,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322561
+    },
+    {
+        "content": "<p>the <code>Operand</code> version would mean promoteds <em>stop</em> being places</p>",
+        "id": 167920753,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322569
+    },
+    {
+        "content": "<p>well</p>",
+        "id": 167920755,
+        "sender_full_name": "oli",
+        "timestamp": 1560322574
+    },
+    {
+        "content": "<p>if they're places we use <code>Operand::Copy</code></p>",
+        "id": 167920756,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322578
+    },
+    {
+        "content": "<p>they'd be places and not</p>",
+        "id": 167920758,
+        "sender_full_name": "oli",
+        "timestamp": 1560322579
+    },
+    {
+        "content": "<p>you need them to be places for taking a reference</p>",
+        "id": 167920769,
+        "sender_full_name": "oli",
+        "timestamp": 1560322591
+    },
+    {
+        "content": "<p>by \"being a place\" I mean specifically <code>Place</code> being able to represent them</p>",
+        "id": 167920773,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322596
+    },
+    {
+        "content": "<p><code>PlaceBase::Promoted</code> can't go away</p>",
+        "id": 167920781,
+        "sender_full_name": "oli",
+        "timestamp": 1560322610
+    },
+    {
+        "content": "<p>like I said, you can take the reference <em>in</em> the promoted MIR, I think it's how it used to work</p>",
+        "id": 167920797,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322627
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124288\">@oli</span> then in that case changing <code>Operand</code> is a net negative</p>",
+        "id": 167920802,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322636
+    },
+    {
+        "content": "<p>right, that's not what I want :D</p>",
+        "id": 167920803,
+        "sender_full_name": "oli",
+        "timestamp": 1560322638
+    },
+    {
+        "content": "<p>how so?</p>",
+        "id": 167920808,
+        "sender_full_name": "oli",
+        "timestamp": 1560322646
+    },
+    {
+        "content": "<p>because <code>Operand::{Copy,Move}</code> can still take promoteds</p>",
+        "id": 167920823,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322671
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 167920825,
+        "sender_full_name": "oli",
+        "timestamp": 1560322676
+    },
+    {
+        "content": "<p>true</p>",
+        "id": 167920827,
+        "sender_full_name": "oli",
+        "timestamp": 1560322677
+    },
+    {
+        "content": "<p>like, that's my entire point :P</p>",
+        "id": 167920873,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322685
+    },
+    {
+        "content": "<p>you either move them from being places to a new Constant/Operand, or work around the problem in other ways</p>",
+        "id": 167920882,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322701
+    },
+    {
+        "content": "<p>I mean, <code>Operand::Move</code> can move out of boxes, why not out of promoteds?</p>",
+        "id": 167920887,
+        "sender_full_name": "oli",
+        "timestamp": 1560322705
+    },
+    {
+        "content": "<p>one concept I wanted to play around with is splitting places into \"operands can refer to them\" and \"Rvalue::Ref can borrow them\" and the latter would be more flexible, including indexing and whatnot</p>",
+        "id": 167920901,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322731
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124288\">@oli</span> I don't want some weird accidents, I'd rather abuse <code>Operand::Copy</code> instead</p>",
+        "id": 167920920,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560322756
+    },
+    {
+        "content": "<p>yes, this goes in hand with cleaning up projections</p>",
+        "id": 167920924,
+        "sender_full_name": "oli",
+        "timestamp": 1560322759
+    },
+    {
+        "content": "<p>ok, so I think it would be ok to move back to having some promoteds being <code>&amp;T</code> and some being <code>T</code> and all of them being a custom <code>Operand::Promoted</code>.</p>",
+        "id": 167921008,
+        "sender_full_name": "oli",
+        "timestamp": 1560322836
+    },
+    {
+        "content": "<p>For the feature gate test, <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span>, what would be the best way in a ui test to observe if a rvalue has been promoted?</p>",
+        "id": 167928944,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560331373
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> other than the fact that it doesn't error when non-Copy?</p>",
+        "id": 167929384,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560331772
+    },
+    {
+        "content": "<p>you could add a MIR test <em>shrug</em></p>",
+        "id": 167929395,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560331785
+    },
+    {
+        "content": "<p>I'm struggling to find an example that doesn't compile w/out the feature gate and does with the feature gate.</p>",
+        "id": 167929975,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560332262
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> <code>[None::&lt;String&gt;; 2]</code></p>",
+        "id": 167930054,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560332318
+    },
+    {
+        "content": "<p>Huh, I don't know why I didn't come up with that, thanks.</p>",
+        "id": 167930419,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560332606
+    },
+    {
+        "content": "<p>I mean... it's pretty much the thing we want to enable, isn't it :P? I thought your tests already included examples like this, but maybe I didn't look close enough</p>",
+        "id": 167930523,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560332660
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> not sure what you mean in <a href=\"https://github.com/rust-lang/rust/pull/61749#issuecomment-501190070\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/61749#issuecomment-501190070\">https://github.com/rust-lang/rust/pull/61749#issuecomment-501190070</a></p>",
+        "id": 167932925,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560334867
+    },
+    {
+        "content": "<p>I ran the same example that I added a test for, but with a build of master w/out my changes and that's the output.</p>",
+        "id": 167932948,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560334912
+    },
+    {
+        "content": "<p>(It might not have been exactly master, but it would have been a commit from a maximum of  24 hours ago)</p>",
+        "id": 167933000,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560334934
+    },
+    {
+        "content": "<p>I also pasted that output</p>",
+        "id": 167933132,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560335061
+    },
+    {
+        "content": "<p>my point was that the change in diagnostic output is not in the PR diff</p>",
+        "id": 167933150,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560335079
+    },
+    {
+        "content": "<p>because the test is not in-tree before the PR</p>",
+        "id": 167933153,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560335091
+    },
+    {
+        "content": "<p>I understood what you meant. I wasn't sure there was much I could do about that (outside of landing another PR before this one), but for some reason I thought that your output might have been from stable and that's why you had said that so I wanted to check what it was on master, my bad.</p>",
+        "id": 167933248,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560335180
+    },
+    {
+        "content": "<p>ah I see, that makes sense</p>",
+        "id": 167933256,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560335202
+    },
+    {
+        "content": "<p>yeah I was thinking maybe we should land such a test. seems odd we don't have anything like this</p>",
+        "id": 167933262,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560335216
+    },
+    {
+        "content": "<p>If you want to then we can do that, I think that we could just compare against nightly's output and that'd probably be sufficient though.</p>",
+        "id": 167933460,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560335415
+    },
+    {
+        "content": "<p>we can manually compare, but it's not in the PR diff</p>",
+        "id": 167933508,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560335468
+    },
+    {
+        "content": "<p>which may give the wrong impression that the output didn't change</p>",
+        "id": 167933520,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560335479
+    },
+    {
+        "content": "<p>So far it hasn't?</p>",
+        "id": 167933713,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560335663
+    },
+    {
+        "content": "<p>Now that I've switched to using <code>report_selection_error</code>.</p>",
+        "id": 167933729,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560335682
+    },
+    {
+        "content": "<p>Unless I missed a change somewhere.</p>",
+        "id": 167933740,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560335692
+    },
+    {
+        "content": "<p>Oh, you're right, it did.</p>",
+        "id": 167933762,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560335718
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><span class=\"gi\">+   = help: the following implementations were found:</span>\n<span class=\"gi\">+            &lt;Foo&lt;T&gt; as std::marker::Copy&gt;</span>\n<span class=\"gd\">-   = note: required because of the requirements on the impl of `std::marker::Copy` for `Foo&lt;std::string::String&gt;`</span>\n</pre></div>",
+        "id": 167933785,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560335759
+    },
+    {
+        "content": "<p><span aria-label=\"face palm\" class=\"emoji emoji-1f926\" role=\"img\" title=\"face palm\">:face_palm:</span></p>",
+        "id": 167933852,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560335823
+    },
+    {
+        "content": "<p>yeah, getting the right error with the \"trace\" is what I don't know how to do</p>",
+        "id": 167933858,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560335824
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> in your tests I believe you meant <code>ignore-compare-mode-nll</code> instead of <code>ignore-compile-mode-nll</code> :)</p>",
+        "id": 167938133,
+        "sender_full_name": "lqd",
+        "timestamp": 1560340025
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116113\">@lqd</span> oops, I suspect I did. Will fix in a bit. Thanks.</p>",
+        "id": 167938158,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1560340060
+    },
+    {
+        "content": "<p>np</p>",
+        "id": 167938163,
+        "sender_full_name": "lqd",
+        "timestamp": 1560340071
+    }
+]

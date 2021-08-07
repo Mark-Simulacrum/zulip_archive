@@ -1,0 +1,158 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116015\">@Alex Crichton</span> mentions in <a href=\"https://github.com/rust-lang/rust/pull/83763#issuecomment-837469655\">https://github.com/rust-lang/rust/pull/83763#issuecomment-837469655</a> that it's not clear</p>\n<blockquote>\n<p>how <code>externref</code> could be added natively, if ever, to Rust.</p>\n</blockquote>",
+        "id": 242726287,
+        "sender_full_name": "oli",
+        "timestamp": 1623761069
+    },
+    {
+        "content": "<p>I always thought we'd go some way via extern blocks, potentially with a custom ABI. Since llvm <em>basically</em> supports externref nowadays via specific addrspace ids</p>\n<div class=\"codehilite\" data-code-language=\"LLVM\"><pre><span></span><code><span class=\"nv\">%extern</span> <span class=\"p\">=</span> <span class=\"k\">type</span> <span class=\"k\">opaque</span>\n<span class=\"nv\">%externref</span> <span class=\"p\">=</span> <span class=\"k\">type</span> <span class=\"nv\">%extern</span> <span class=\"k\">addrspace</span><span class=\"p\">(</span><span class=\"m\">10</span><span class=\"p\">)*</span>\n</code></pre></div>\n<p>I was wondering if we could start experimenting with making references to such extern types be <code>externref</code> or at least with adding a <code>funcref</code> ABI for extern functions that we could use for <code>funcref</code> (<code>addrspace(20)</code>).</p>",
+        "id": 242726711,
+        "sender_full_name": "oli",
+        "timestamp": 1623761292
+    },
+    {
+        "content": "<p>what do the specific addrspace values mean?</p>",
+        "id": 242727977,
+        "sender_full_name": "nagisa",
+        "timestamp": 1623761944
+    },
+    {
+        "content": "<p>i am unsure , but considering that there is parsing code in the wasm backend  for types named externref and funcref i think the ids are bogus</p>",
+        "id": 242728976,
+        "sender_full_name": "oli",
+        "timestamp": 1623762365
+    },
+    {
+        "content": "<p>Whether or not we can add externref to Rust imo depends on how you want to add it. To me it boils down to how is <code>&amp;(u32, externref)</code> represented. In talks oh-so-long-ago fitzgen and I figured that if we want to <em>truly</em> support externref then that pointer type is actually a fat pointer. The fat pointer is a pointer into two different address spaces, one in linear memory (the <code>&amp;u32</code>) and another in \"externref memory\" (the <code>&amp;externref</code>).</p>\n<p>An alternate representation is for <code>&amp;(u32, externref)</code> to just be a normal pointer, where <code>externref</code> is itself inherently a pointer into an <code>externref</code> table. That brings up all sorts of questions about how the indices are managed, though, without clear canonical answers.</p>\n<p>FWIW I don't think the limiting factor is LLVM in supporting externref, but rather how we want to deal with it at a language level in Rust. LLVM I'm sure will add enough support at some point that if you feed it any ill-shaped IR it just panics or doesn't support it, but it's Rust's challenge to figure out how to represent externref such that we never feed LLVM any ill-formed IR</p>",
+        "id": 242737328,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623765951
+    },
+    {
+        "content": "<p>why the u32?</p>",
+        "id": 242739984,
+        "sender_full_name": "oli",
+        "timestamp": 1623766989
+    },
+    {
+        "content": "<p>can't all the logic on top of raw externref be done in userspace instead of having the lang do anything?</p>",
+        "id": 242740245,
+        "sender_full_name": "oli",
+        "timestamp": 1623767096
+    },
+    {
+        "content": "<p>the <code>u32</code> there is just a placeholder for anything in linear memory. If you're true to wasm's semantics an <code>externref</code> can never live in linear memory. If, however, you're defining <code>struct externref(u32)</code> then that simplifies one problem but brings up other problems. If <code>externref</code> doesn't live in linear memory then <code>&amp;(u32, externref)</code> has to be dealt with somehow at the Rust-language level, and if <code>externref</code> can't live in linear memory I think that type has to be represented by two pointers</p>",
+        "id": 242744559,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623768742
+    },
+    {
+        "content": "<p>What is the problem with defining the externref representing type a u32 index into a table just like function pointers are u32 indexes into a funcref table.</p>",
+        "id": 242745462,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1623768975
+    },
+    {
+        "content": "<p>function pointers, as they are today, cannot be dynamically allocated at runtime. Every time a function is called from the wasm module boundary, though, you might have to allocate a new slot for an <code>externref</code> value if one of the parameters is an externref. Then you're faced with questions like:</p>\n<ul>\n<li>What index is chosen to place the <code>externref</code> value at?</li>\n<li>When does that index get deallocated and/or set to <code>ref.null extern</code>?</li>\n</ul>\n<p>All these same questions come up with <code>funcref</code>, but none of the questions come up today because the <code>table</code> that represents indirect function pointers is frozen at compile time and can't change</p>",
+        "id": 242746770,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623769284
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116015\">Alex Crichton</span> <a href=\"#narrow/stream/213817-t-lang/topic/wasm's.20externref.20and.20funcref/near/242744559\">said</a>:</p>\n<blockquote>\n<p>If you're true to wasm's semantics an <code>externref</code> can never live in linear memory. [...] If <code>externref</code> doesn't live in linear memory then <code>&amp;(u32, externref)</code> has to be dealt with somehow at the Rust-language level, and if <code>externref</code> can't live in linear memory I think that type has to be represented by two pointers</p>\n</blockquote>\n<p>that's the part that I don't understand. why don't we have something like</p>\n<div class=\"codehilite\"><pre><span></span><code>extern &quot;wasm&quot; {\n    type Foo;\n}\n</code></pre></div>\n<p>and then a <code>&amp;Foo</code> type is translated to literally <code>externref</code>, so there are no integer addresses or anything, there's just the <code>externref</code>. Though of course one could convert that to <code>*const Foo</code> and cast it to <code>*const u8</code> and offset that, which isn't really possible in wasm. Is that why you say we need a <code>u32</code>? as an offset?</p>",
+        "id": 242748791,
+        "sender_full_name": "oli",
+        "timestamp": 1623770021
+    },
+    {
+        "content": "<p>Sorry I may be discussing things like 3 steps ahead and it may be confusing. I'm not super familiar with <code>type Foo</code> in <code>extern</code> blocks, but if you want to represent <code>&amp;Foo</code> there as <code>externref</code>, there's nothing in Rust preventing someone from storing <code>&amp;Foo</code> in memory. That's an illegal wasm operation because you can't store that <code>&amp;Foo</code> anywhere. Basically <code>externref</code> and its requirement that it never lives in linear memory doesn't really jive well with Rust (afaik). I'd love to be wrong about this, though, I could just never figure out a way to rationalize this all in the past.</p>",
+        "id": 242754988,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623772340
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 242755218,
+        "sender_full_name": "oli",
+        "timestamp": 1623772432
+    },
+    {
+        "content": "<p>ok, that makes sense</p>",
+        "id": 242755236,
+        "sender_full_name": "oli",
+        "timestamp": 1623772438
+    },
+    {
+        "content": "<p>that was the missing part that I never understood</p>",
+        "id": 242755308,
+        "sender_full_name": "oli",
+        "timestamp": 1623772459
+    },
+    {
+        "content": "<p>we can only have registers/locals of externref, but never values in memory</p>",
+        "id": 242755353,
+        "sender_full_name": "oli",
+        "timestamp": 1623772479
+    },
+    {
+        "content": "<p>So... if we disallowed taking references to \"wasm\" ABI extern types (and aggregating them into other types for that matter), then we could use the unsized locals feature to actually allow you to have locals of \"wasm\" ABI extern type. We could \"simply\" not expose those types as something the user can declare, but instead have a single FuncRef and a single ExternRef type in the wasm arch module in core. Users could use these types to declare variables and statics, but not take references to them. We have precedent for disallowing the taking of references, e.g. for possibly-unaligned values.</p>",
+        "id": 242755982,
+        "sender_full_name": "oli",
+        "timestamp": 1623772720
+    },
+    {
+        "content": "<p>We talked a bit about this at some point and this was one of our routes of thought, completely disallowing references. At the time we agreed it was a good MVP, but I thought it was going to be too complicated because there's no precedent. If there's precedent though that's great and I'm happy to be wrong lol</p>\n<p>This would also pave the way for various intrinsics in like a <code>std::arch::wasm32</code> or something to deal with externref and tables.</p>\n<p>One thing we also talked about though is that even if references were disallowed it means that almost nothing works with <code>externref</code> and all you'll end up doing anyway  is instantly inserting it into a table anyway (and at that point why bother giving you a reference?). In the long run we do want something like <code>Vec&lt;externref&gt;</code> to work (or <code>Option&lt;externref&gt;</code>), but that's all a long way off...</p>",
+        "id": 242758838,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623773667
+    },
+    {
+        "content": "<p>In any case I think it would still make sense to have an initial implementation where you just can't take a reference. That allows codegen and enables generating of wasm modules that actually have <code>externref</code> in their ABI. It also enables experimentation with other possible things as necessary, and if we really need at some point to enable <code>Vec&lt;externref&gt;</code>, which I suspect we'll never do, then we can do that.</p>",
+        "id": 242758989,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623773737
+    },
+    {
+        "content": "<p>One question I would have, though, about the precedent of forbdidding references, is that we would presumably represent <code>Option&lt;externref&gt;</code> as a pair of values as we would <code>Option&lt;u8&gt;</code>, but I don't think we disallow <code>&amp;Option&lt;SomethingWithUnaligneddFields&gt;</code> but we would have to disallow <code>&amp;Option&lt;externref&gt;</code>. Basically <code>externref</code> can't show up <em>anywhere</em> with an indirection in it (and this is something we would only know at monomorphization time I think)</p>",
+        "id": 242759189,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623773814
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116015\">Alex Crichton</span> <a href=\"#narrow/stream/213817-t-lang/topic/wasm's.20externref.20and.20funcref/near/242759189\">said</a>:</p>\n<blockquote>\n<p>One question I would have, though, about the precedent of forbdidding references, is that we would presumably represent <code>Option&lt;externref&gt;</code> as a pair of values as we would <code>Option&lt;u8&gt;</code>, but I don't think we disallow <code>&amp;Option&lt;SomethingWithUnaligneddFields&gt;</code> but we would have to disallow <code>&amp;Option&lt;externref&gt;</code>. Basically <code>externref</code> can't show up <em>anywhere</em> with an indirection in it (and this is something we would only know at monomorphization time I think)</p>\n</blockquote>\n<p>that's why I mentioned forbidding aggregation, too. No precedent, but extern types are not fully figured out yet anyway. wrt monomorphization: yea, that seems a bit harder, but not more than extern types in general .</p>",
+        "id": 242760473,
+        "sender_full_name": "oli",
+        "timestamp": 1623774351
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116015\">Alex Crichton</span> <a href=\"#narrow/stream/213817-t-lang/topic/wasm's.20externref.20and.20funcref/near/242758838\">said</a>:</p>\n<blockquote>\n<p>One thing we also talked about though is that even if references were disallowed it means that almost nothing works with <code>externref</code> and all you'll end up doing anyway  is instantly inserting it into a table anyway (and at that point why bother giving you a reference?). In the long run we do want something like <code>Vec&lt;externref&gt;</code> to work (or <code>Option&lt;externref&gt;</code>), but that's all a long way off...</p>\n</blockquote>\n<p>it is very useful even without references. you can't use vec, but you can still create your own veclike data structures that handle the externref messiness properly. in a project i worked on we used f32 and f64 as fake externref and translated all float locals to externref behaviour at wasm consumption time. it's rather fragile though, as llvm and wasm_opt want to move stuff tomemory every now and then</p>",
+        "id": 242761516,
+        "sender_full_name": "oli",
+        "timestamp": 1623774849
+    },
+    {
+        "content": "<p>Does wasm have infinite registers? Like, what happens if you have (or pass as an argument) a couple hundred of externrefs?</p>",
+        "id": 242762109,
+        "sender_full_name": "nagisa",
+        "timestamp": 1623775122
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124288\">@oli</span> ah ok makes sense yeah, and yeah if we disallow aggregates, while that's quite restrictive, I think that could still be a valuable MVP</p>",
+        "id": 242764663,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623776251
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> effectively, yes, wasm has infinite registers</p>",
+        "id": 242764693,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623776264
+    },
+    {
+        "content": "<p>reasonable limits are placed on modules by engines, though</p>",
+        "id": 242764706,
+        "sender_full_name": "Alex Crichton",
+        "timestamp": 1623776272
+    }
+]

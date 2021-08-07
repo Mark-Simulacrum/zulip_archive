@@ -1,0 +1,478 @@
+<html>
+<head><meta charset="utf-8"><title>TAIT lifetime error #86218 · wg-traits · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/index.html">wg-traits</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html">TAIT lifetime error #86218</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="243056018"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/243056018" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#243056018">(Jun 17 2021 at 17:46)</a>:</h4>
+<p>I've been looking into <a href="https://github.com/rust-lang/rust/issues/86218">#86218</a>. This might be a blocker for TAITs.</p>
+<p>This is an example without the dependency on future-util:</p>
+<div class="codehilite"><pre><span></span><code>#![feature(min_type_alias_impl_trait)]
+
+
+trait X {
+    type Item;
+}
+
+struct S&lt;T&gt;{
+    a: T,
+}
+
+impl&lt;T&gt; X for S&lt;T&gt; {
+    type Item = T;
+}
+
+type Boxed&lt;&#39;a, T&gt; = Box&lt;dyn X&lt;Item = T&gt; + &#39;a&gt;;
+
+impl&lt;&#39;a, T&gt; X for Boxed&lt;&#39;a, T&gt; {
+    type Item = T;
+}
+
+fn bar&lt;&#39;a&gt;(val: &amp;&#39;a i32) -&gt; Boxed&lt;&#39;a, i32&gt; {
+    Box::new(S {a: 12})
+}
+
+trait Y&lt;T&gt; {
+    type Inner&lt;&#39;s&gt;: X&lt;Item = i32&gt; + &#39;s;
+
+    fn foo&lt;&#39;s&gt;(val: &amp;&#39;s i32, add_val: T) -&gt; Self::Inner&lt;&#39;s&gt;;
+}
+
+/*
+// This compiles. Because we don&#39;t introduce a lifetime in the impl
+
+struct Intermediate(());
+struct Bar;
+
+impl Y&lt;Intermediate&gt; for Bar{
+    type Inner&lt;&#39;s&gt; = impl X&lt;Item = i32&gt; + &#39;s;
+
+    fn foo&lt;&#39;s&gt;(val: &amp;&#39;s i32, add_val: Intermediate) -&gt; Self::Inner&lt;&#39;s&gt; {
+        bar(val)
+    }
+}
+*/
+
+// This errors
+
+struct Intermediate&lt;&#39;a&gt;(&amp;&#39;a ());
+struct Bar;
+
+impl&lt;&#39;a&gt; Y&lt;Intermediate&lt;&#39;a&gt;&gt; for Bar{
+    type Inner&lt;&#39;s&gt; = impl X&lt;Item = i32&gt; + &#39;s;
+
+    fn foo&lt;&#39;s&gt;(val: &amp;&#39;s i32, add_val: Intermediate&lt;&#39;a&gt;) -&gt; Self::Inner&lt;&#39;s&gt; {
+        bar(val)
+    }
+}
+
+fn main() {}
+</code></pre></div>
+<p>What happens here is that during the regionck of the tyalias we call <a href="https://github.com/rust-lang/rust/blob/0ef2b4a29bf70e8984d0d2febb7a546856c554a0/compiler/rustc_infer/src/infer/outlives/obligations.rs#L256-L269"><code>type_must_outlive</code></a> with <code>impl X</code> and <code>EarlyBound('s)</code>. <code>type_must_outlive</code> calls  <a href="https://github.com/rust-lang/rust/blob/673d0db5e393e9c64897005b470bfeb6d5aec61b/compiler/rustc_middle/src/ty/outlives.rs#L50-L58"><code>push_outlives_components</code></a>. When we compute the components we walk through the parent of the OpaqueTy, which is Inner, but Inner contains the lifetime <code>'a</code> in its substs, which we then constrain to outlive <code>'s</code>. </p>
+<p>I'm not completely sure that this is a bug, but the example above that compiles, kind of suggests that imo. If it is a bug, I think we must somehow change the way we come up with the substs here. Any thoughts?</p>
+
+
+
+<a name="243060655"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/243060655" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#243060655">(Jun 17 2021 at 18:16)</a>:</h4>
+<p>Hmm</p>
+
+
+
+<a name="243061125"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/243061125" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#243061125">(Jun 17 2021 at 18:19)</a>:</h4>
+<p>I added to the project board for now</p>
+
+
+
+<a name="244910777"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/244910777" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#244910777">(Jul 05 2021 at 09:01)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span>  Currently we implement the lifetime bound in <code>impl X + 's</code> as an <code>Outlives(lifetime(HirId { owner: DefId(0:36 ~ issue_86218[317d]::{impl#2}::Inner::{opaque#0}), local_id: 6 }: 's))</code> bound and register the predicate <code>OutlivesPredicate(impl X, ReEarlyBound(1, 's))</code> in <code>check_type_bounds</code>. I'm not sure if this is correct, shouldn't the bound only be checked when we actually check for the concrete type?</p>
+
+
+
+<a name="246623778"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/246623778" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#246623778">(Jul 20 2021 at 17:33)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> I need some help with this issue. We need this Outlives bound later when looking for a concrete type, but I'm not sure whether the predicate <code>OutlivesPredicate(impl X, ReEarlyBound(1, 's))</code> actually makes sense, to me it makes more sense that a lifetime bound <code>impl X + 's</code> expresses that <code>impl X</code> is guaranteed to outlive <code>'s</code> and that we only have to check this bound on the concrete type.</p>
+
+
+
+<a name="246627023"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/246627023" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#246627023">(Jul 20 2021 at 17:59)</a>:</h4>
+<p><span class="user-mention" data-user-id="328097">@BN</span> maybe you can schedule a slot in my <a href="https://calendly.com/nikomatsakis/office-hours">office hours calendly</a> ?</p>
+
+
+
+<a name="246627497"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/246627497" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#246627497">(Jul 20 2021 at 18:02)</a>:</h4>
+<p>Sure. Would you mind if we do the sync here instead of in zoom?</p>
+
+
+
+<a name="246698150"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/246698150" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#246698150">(Jul 21 2021 at 09:44)</a>:</h4>
+<p><span class="user-mention" data-user-id="328097">@BN</span> not at all; I should add a clarification to the calendly about that, as it's come up before</p>
+
+
+
+<a name="246698406"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/246698406" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#246698406">(Jul 21 2021 at 09:48)</a>:</h4>
+<p>(done)</p>
+
+
+
+<a name="247466609"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247466609" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247466609">(Jul 28 2021 at 14:29)</a>:</h4>
+<p>To summarize this issue: </p>
+<p>We store lifetime bounds on opaque types in <code>GenericBounds</code> and create <code>OutlivesPredicate</code>s for those bounds. When we region check opaque type items, we have a problem when we use opaque types in type aliases, because we use the substs of the type alias as parent substs for the opaque type. If we have lifetime references for an impl item, those lifetimes occur in the substs of the type alias and hence in the substs of the opaque type. So if we would have:</p>
+<div class="codehilite"><pre><span></span><code>impl&lt;&#39;a&gt; X for Foo&lt;&#39;a&gt; {
+  type Inner&lt;&#39;s&gt; = impl Y + &#39;s;
+}
+</code></pre></div>
+<p>we would get an outlives error because <code>'s</code> doesn't outlive <code>'a</code>.</p>
+<p>We later need those outlives bounds when we constrain the concrete opaque types <a href="https://github.com/rust-lang/rust/blob/eba3228b2a9875d268ff3990903d04e19f6cdb0c/compiler/rustc_trait_selection/src/opaque_types.rs#L415">here</a>.</p>
+
+
+
+<a name="247466775"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247466775" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247466775">(Jul 28 2021 at 14:30)</a>:</h4>
+<p>I don't think that we actually want to generate an <code>OutlivesPredicate</code> on the impl trait if we have a lifetime bound on it. My understanding of lifetime bounds on impl traits is that they are sort of a guarantee that whatever the concrete type really is, we know that the opaque type is guaranteed to outlive the lifetime bound.</p>
+
+
+
+<a name="247466857"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247466857" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247466857">(Jul 28 2021 at 14:30)</a>:</h4>
+<p><span aria-label="wave" class="emoji emoji-1f44b" role="img" title="wave">:wave:</span></p>
+
+
+
+<a name="247466899"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247466899" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247466899">(Jul 28 2021 at 14:31)</a>:</h4>
+<p>I think what we want here is to store the lifetime bounds in a field in <code>OpaqueTy</code> seperately</p>
+
+
+
+<a name="247466918"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247466918" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247466918">(Jul 28 2021 at 14:31)</a>:</h4>
+<p>Hi</p>
+
+
+
+<a name="247467063"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467063" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467063">(Jul 28 2021 at 14:32)</a>:</h4>
+<p>But maybe I'm misunderstanding the meaning of lifetime bounds on opaque types</p>
+
+
+
+<a name="247467329"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467329" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467329">(Jul 28 2021 at 14:34)</a>:</h4>
+<p>I'm having a hard time understanding this :/</p>
+
+
+
+<a name="247467390"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467390" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467390">(Jul 28 2021 at 14:34)</a>:</h4>
+<p>I don't <em>quite</em> see why we wind up having to prove that <code>'s: 'a</code></p>
+
+
+
+<a name="247467452"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467452" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467452">(Jul 28 2021 at 14:35)</a>:</h4>
+<p>your understanding of what a lifetime bound on impl trait means sounds correct</p>
+
+
+
+<a name="247467475"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467475" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467475">(Jul 28 2021 at 14:35)</a>:</h4>
+<p>in what way is the current setup inconsistent with that?</p>
+
+
+
+<a name="247467572"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467572" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467572">(Jul 28 2021 at 14:36)</a>:</h4>
+<p>ok</p>
+
+
+
+<a name="247467576"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467576" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467576">(Jul 28 2021 at 14:36)</a>:</h4>
+<p>maybe i'm starting to understand</p>
+
+
+
+<a name="247467687"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467687" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467687">(Jul 28 2021 at 14:37)</a>:</h4>
+<p>so <code>impl Y + 's</code> winds up desugared into something like</p>
+<div class="codehilite"><pre><span></span><code>opaque type InnerItem&lt;&#39;a, &#39;s&gt;: Y + &#39;s
+</code></pre></div>
+
+
+
+<a name="247467764"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467764" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467764">(Jul 28 2021 at 14:37)</a>:</h4>
+<p>We wind up with that constraint because thats the way we handle lifetime bounds in the lexical region resolver. What actually creates the constraint is <a href="https://github.com/rust-lang/rust/blob/673d0db5e393e9c64897005b470bfeb6d5aec61b/compiler/rustc_middle/src/ty/outlives.rs#L50-L58"><code>push_outlives_components</code></a></p>
+
+
+
+<a name="247467766"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467766" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467766">(Jul 28 2021 at 14:37)</a>:</h4>
+<p>and I guess we wind up proving that <code>InnerItem&lt;'a, 's&gt;: Y + 's</code>... as part of the impl well formedness?</p>
+
+
+
+<a name="247467812"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467812" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467812">(Jul 28 2021 at 14:37)</a>:</h4>
+<p>No not as part of well formedness</p>
+
+
+
+<a name="247467862"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467862" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467862">(Jul 28 2021 at 14:38)</a>:</h4>
+<p>the question is why <em>that</em> code is being called</p>
+
+
+
+<a name="247467871"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467871" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467871">(Jul 28 2021 at 14:38)</a>:</h4>
+<p>I don't think the flaw is in that code itself</p>
+
+
+
+<a name="247467932"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247467932" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247467932">(Jul 28 2021 at 14:38)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/blob/0ef2b4a29bf70e8984d0d2febb7a546856c554a0/compiler/rustc_infer/src/infer/outlives/obligations.rs#L256-L269"><code>type_must_outlive</code></a> is called when we region_check items</p>
+
+
+
+<a name="247468006"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468006" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468006">(Jul 28 2021 at 14:39)</a>:</h4>
+<p>and it calls <code>push_outlives_components</code> which creates the constraint based on the <code>substs</code> of that item and the bound on the lifetime</p>
+
+
+
+<a name="247468036"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468036" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468036">(Jul 28 2021 at 14:39)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="328097">BN</span> <a href="#narrow/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218/near/247467932">said</a>:</p>
+<blockquote>
+<p><a href="https://github.com/rust-lang/rust/blob/0ef2b4a29bf70e8984d0d2febb7a546856c554a0/compiler/rustc_infer/src/infer/outlives/obligations.rs#L256-L269"><code>type_must_outlive</code></a> is called when we region_check items</p>
+</blockquote>
+<p>where?</p>
+
+
+
+<a name="247468067"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468067" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468067">(Jul 28 2021 at 14:39)</a>:</h4>
+<p>iirc it is called in response to some other obligations</p>
+
+
+
+<a name="247468216"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468216" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468216">(Jul 28 2021 at 14:40)</a>:</h4>
+<p>ah yes, actually I think you're right. This is done during well-formedness checking, when all the registered region obligations are checked</p>
+
+
+
+<a name="247468237"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468237" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468237">(Jul 28 2021 at 14:41)</a>:</h4>
+<p>ok</p>
+
+
+
+<a name="247468256"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468256" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468256">(Jul 28 2021 at 14:41)</a>:</h4>
+<p>I have a hunch that the WF code for <code>impl Trait</code> is wrong</p>
+
+
+
+<a name="247468317"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468317" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468317">(Jul 28 2021 at 14:41)</a>:</h4>
+<p>ok, haven't looked into that. Also not that familiar with that code</p>
+
+
+
+<a name="247468376"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468376" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468376">(Jul 28 2021 at 14:42)</a>:</h4>
+<p>I'm pulling up some rust sources :)</p>
+
+
+
+<a name="247468388"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468388" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468388">(Jul 28 2021 at 14:42)</a>:</h4>
+<p>ok</p>
+
+
+
+<a name="247468580"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468580" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468580">(Jul 28 2021 at 14:43)</a>:</h4>
+<p>in any case, the question would be I guess when the code gets <em>registered</em></p>
+
+
+
+<a name="247468651"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468651" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468651">(Jul 28 2021 at 14:44)</a>:</h4>
+<p>something like rr can be useful for this</p>
+
+
+
+<a name="247468710"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468710" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468710">(Jul 28 2021 at 14:44)</a>:</h4>
+<p>what is rr?</p>
+
+
+
+<a name="247468792"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468792" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468792">(Jul 28 2021 at 14:45)</a>:</h4>
+<p>reverse debugger</p>
+
+
+
+<a name="247468803"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468803" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468803">(Jul 28 2021 at 14:45)</a>:</h4>
+<p>it lets you attach "timestamps" to each log output</p>
+
+
+
+<a name="247468815"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468815" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468815">(Jul 28 2021 at 14:45)</a>:</h4>
+<p>and then jump back in time to a specific timestamp and do a bt etc</p>
+
+
+
+<a name="247468830"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468830" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468830">(Jul 28 2021 at 14:45)</a>:</h4>
+<p>what is your test case exactly?</p>
+
+
+
+<a name="247468877"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468877" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468877">(Jul 28 2021 at 14:46)</a>:</h4>
+<p>e.g., you showed me</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">impl</span><span class="o">&lt;'</span><span class="na">a</span><span class="o">&gt;</span><span class="w"> </span><span class="n">X</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Foo</span><span class="o">&lt;'</span><span class="na">a</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">type</span> <span class="nc">Inner</span><span class="o">&lt;'</span><span class="na">s</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">impl</span><span class="w"> </span><span class="n">Y</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="o">'</span><span class="na">s</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="247468920"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468920" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468920">(Jul 28 2021 at 14:46)</a>:</h4>
+<p>but what is the definition of the trait <code>X</code>?</p>
+
+
+
+<a name="247468923"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247468923" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247468923">(Jul 28 2021 at 14:46)</a>:</h4>
+<p><a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=2a15487abba6702ba625cad93bb483eb">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=2a15487abba6702ba625cad93bb483eb</a></p>
+
+
+
+<a name="247469085"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247469085" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247469085">(Jul 28 2021 at 14:47)</a>:</h4>
+<p>That's the code from the github issue. Not as minimized as it could be, sorry</p>
+
+
+
+<a name="247469259"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247469259" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247469259">(Jul 28 2021 at 14:49)</a>:</h4>
+<p>does it -- yes, that</p>
+
+
+
+<a name="247469264"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247469264" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247469264">(Jul 28 2021 at 14:49)</a>:</h4>
+<p>I was wodnering if it had to be so complex :)</p>
+
+
+
+<a name="247469553"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247469553" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247469553">(Jul 28 2021 at 14:51)</a>:</h4>
+<p>I think there is a related async issue</p>
+
+
+
+<a name="247469720"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247469720" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247469720">(Jul 28 2021 at 14:52)</a>:</h4>
+<p>Actually I'm not sure whether this is actually well-formedness related. In <code>regionck_item</code> we call <code>rcx.visit_region_obligations(item_id);</code> <a href="https://github.com/rust-lang/rust/blob/eba3228b2a9875d268ff3990903d04e19f6cdb0c/compiler/rustc_typeck/src/check/regionck.rs#L135">here</a></p>
+
+
+
+<a name="247469758"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247469758" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247469758">(Jul 28 2021 at 14:53)</a>:</h4>
+<p>I think thats where the error originates</p>
+
+
+
+<a name="247469865"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247469865" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247469865">(Jul 28 2021 at 14:54)</a>:</h4>
+<p>this seems like a fairly minimal repo:</p>
+
+
+
+<a name="247469871"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247469871" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247469871">(Jul 28 2021 at 14:54)</a>:</h4>
+<p><a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=b15f690a74aa0dfef0dd6d215a6cd527">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=b15f690a74aa0dfef0dd6d215a6cd527</a></p>
+
+
+
+<a name="247470022"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247470022" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247470022">(Jul 28 2021 at 14:55)</a>:</h4>
+<p>Thanks</p>
+
+
+
+<a name="247470097"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247470097" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247470097">(Jul 28 2021 at 14:55)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/issues/42940">https://github.com/rust-lang/rust/issues/42940</a></p>
+
+
+
+<a name="247470113"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247470113" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247470113">(Jul 28 2021 at 14:56)</a>:</h4>
+<p><span class="user-mention" data-user-id="328097">@BN</span> do you think this bug <span aria-label="point up" class="emoji emoji-1f446" role="img" title="point up">:point_up:</span> is related?</p>
+
+
+
+<a name="247470258"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247470258" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247470258">(Jul 28 2021 at 14:56)</a>:</h4>
+<p>(I do)</p>
+
+
+
+<a name="247470539"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247470539" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247470539">(Jul 28 2021 at 14:59)</a>:</h4>
+<p>hm not sure. I think its not related</p>
+
+
+
+<a name="247471427"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247471427" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247471427">(Jul 28 2021 at 15:05)</a>:</h4>
+<p>Still not sure whether that's actually the same error, but the way we handle lifetime bounds on opaque types definitely seems to be wrong</p>
+
+
+
+<a name="247471454"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247471454" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247471454">(Jul 28 2021 at 15:05)</a>:</h4>
+<p>How much time do you have left?</p>
+
+
+
+<a name="247471814"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247471814" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247471814">(Jul 28 2021 at 15:08)</a>:</h4>
+<p>The way I thought we could handle this problem is to maybe add the lifetime bounds as a field to <code>OpaqueTy</code> and not include them in all generic bounds. Since to my knowledge we only need the lifetime bounds later when we constrain the concrete type.</p>
+
+
+
+<a name="247472702"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/TAIT%20lifetime%20error%20%2386218/near/247472702" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/TAIT.20lifetime.20error.20.2386218.html#247472702">(Jul 28 2021 at 15:15)</a>:</h4>
+<p>and store the lifetime bounds for opaque ty defids, when we need to use them for other outlives constraints such as in the other issue you posted.</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

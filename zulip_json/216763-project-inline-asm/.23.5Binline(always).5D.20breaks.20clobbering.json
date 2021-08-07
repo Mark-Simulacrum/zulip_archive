@@ -1,0 +1,200 @@
+[
+    {
+        "content": "<p>Hi everyone! I'm trying to port a simplified version of this stack switching llvm_asm!: <a href=\"https://github.com/edef1c/libfringe/blob/master/src/arch/x86_64.rs#L185\">https://github.com/edef1c/libfringe/blob/master/src/arch/x86_64.rs#L185</a> to the new asm! macro. This is what I have so far: <a href=\"https://gist.github.com/bkolobara/bc3ac7296c302cf3dcbd3c17aa83328f\">https://gist.github.com/bkolobara/bc3ac7296c302cf3dcbd3c17aa83328f</a>.</p>\n<p>For the most part it works ok, except if I add an <code>#[inline(always)]</code> attribute on top of the function. In this case the <code>rdi</code> register of the wrapping function is overridden. From what I understand the <code>inout(\"rdi\") arg =&gt; ret_val</code> statement should mark it as clobbered. But it looks like I'm missing something.</p>",
+        "id": 204662485,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595423277
+    },
+    {
+        "content": "<p><a href=\"https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html\">https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html</a> section \"6.47.2.6 Clobbers and Scratch Registers\":</p>\n<blockquote>\n<p>Another restriction is that the clobber list should not contain the stack pointer register. This is because the compiler requires the value of the stack pointer to be the same after an asm statement as it was on entry to the statement.</p>\n</blockquote>\n<p>It is UB to change the stack pointer without restoring it back before the end of the asm block.</p>",
+        "id": 204662745,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1595423411
+    },
+    {
+        "content": "<p>Oh yea, that's definitely a big no-no.</p>",
+        "id": 204662814,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595423453
+    },
+    {
+        "content": "<p>Redox OS did exactly this kind of questionable things. It broke debug mode kernels.</p>",
+        "id": 204662839,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1595423466
+    },
+    {
+        "content": "<p>What you should do is call a separate function which runs on the new stack.</p>",
+        "id": 204662852,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595423473
+    },
+    {
+        "content": "<p>In fact this is specifically mentioned in the RFC: <a href=\"https://github.com/rust-lang/rfcs/blob/master/text/2873-inline-asm.md#rules-for-inline-assembly\">https://github.com/rust-lang/rfcs/blob/master/text/2873-inline-asm.md#rules-for-inline-assembly</a></p>",
+        "id": 204662997,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595423542
+    },
+    {
+        "content": "<blockquote>\n<p>The stack pointer must be restored to its original value before leaving the asm block.</p>\n</blockquote>",
+        "id": 204663016,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595423562
+    },
+    {
+        "content": "<p><a href=\"https://gitlab.redox-os.org/redox-os/kernel/-/merge_requests/138\">https://gitlab.redox-os.org/redox-os/kernel/-/merge_requests/138</a> is the PR fixing this.</p>",
+        "id": 204663232,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1595423700
+    },
+    {
+        "content": "<p>It has a helper macro to define a function in assembly using <code>global_asm!</code>: <a href=\"https://gitlab.redox-os.org/redox-os/kernel/-/merge_requests/138/diffs#f7036b2dc7edebc1000582b897070a55d9def88c_0_210\">https://gitlab.redox-os.org/redox-os/kernel/-/merge_requests/138/diffs#f7036b2dc7edebc1000582b897070a55d9def88c_0_210</a></p>",
+        "id": 204663305,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1595423740
+    },
+    {
+        "content": "<p>Thanks <span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> and <span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span> for the input. I will research more, still new to the whole \"how to implement context switches and generators\" thing.</p>",
+        "id": 204664232,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595424292
+    },
+    {
+        "content": "<p>You can probably use <a href=\"https://github.com/rust-lang/stacker/\"><code>psm</code></a> instead of hand rolling your own stack switching implementation. It supports a lot of platforms out of the box.</p>",
+        "id": 204664481,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1595424424
+    },
+    {
+        "content": "<p>I was not aware of this library, I will have a look .</p>",
+        "id": 204664859,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595424609
+    },
+    {
+        "content": "<p>After thinking about it a bit more I have realised that the stack pointer will actually be set back to the original value. Here is a flow of events:</p>\n<ol>\n<li><code>lea {tmp}, [rip + 10]</code> pushes the instruction after the asm! block on the stack</li>\n<li>The stack pointer is changed to another stack and a function address is popped from the top of the new stack</li>\n<li>The function is called</li>\n<li>This function will again call the <code>swap()</code> implementation, but now passing our original stack pointer as an argument.</li>\n<li>We will again pop it and jump to the instruction from step 1</li>\n</ol>\n<p>Even there is a lot of stuff happening in-between, at the end of the asm! block we have the same stack pointer we started with. This should be ok?</p>\n<p>The only issue I'm running into is when I pass the arguments to the function being called using the <code>rdi</code> register. It overrides the surrounding function's register when inlined. Without #[inline(always)] all my tests work as expected.</p>",
+        "id": 204678272,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595430416
+    },
+    {
+        "content": "<p>What do you mean by \" It overrides the surrounding function's register\"</p>",
+        "id": 204678511,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595430518
+    },
+    {
+        "content": "<p><code>fn a(arg1) {  swap();  arg1 != original_arg1 }</code><br>\n<code>inline fn swap() { asm!{} }</code><br>\nThe arg1 changes inside the function a, even I think I marked all the registers as clobbered inside the asm!{} code.<br>\nThe issue goes away if I remove the inline attribute on swap().</p>",
+        "id": 204680663,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595431392
+    },
+    {
+        "content": "<p>Can you paste your full code somewhere?</p>",
+        "id": 204680738,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595431434
+    },
+    {
+        "content": "<p>I have a gist of the swap function here: <a href=\"https://gist.github.com/bkolobara/bc3ac7296c302cf3dcbd3c17aa83328f\">https://gist.github.com/bkolobara/bc3ac7296c302cf3dcbd3c17aa83328f</a><br>\nI have multiple functions it's called from, but all of them have similar issues, just with different variables.</p>",
+        "id": 204681106,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595431580
+    },
+    {
+        "content": "<p>This code is incorrect since it is exiting the asm with a different rsp than it entered with.</p>",
+        "id": 204681348,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595431691
+    },
+    {
+        "content": "<p>Oh wait nevermind, I misread it.</p>",
+        "id": 204681429,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595431730
+    },
+    {
+        "content": "<p>Have you tried disassembling the function to see where the problem is?</p>",
+        "id": 204681753,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595431859
+    },
+    {
+        "content": "<p>How can I do this?</p>",
+        "id": 204681794,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595431875
+    },
+    {
+        "content": "<p>objdump -d &lt;binary&gt; then search for the function name</p>",
+        "id": 204681827,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595431891
+    },
+    {
+        "content": "<p>The playground and godbolt also both offer ways of seeing the assembly</p>",
+        "id": 204681877,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1595431913
+    },
+    {
+        "content": "<p>Ok. I will investigate. It's a bit complicated implementation of a generator with some jumping around, but I would love to make it work. If just for the sake of learning.</p>",
+        "id": 204682102,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595432005
+    },
+    {
+        "content": "<p>You are missing some clobbers compared to libfringe</p>",
+        "id": 204682134,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595432019
+    },
+    {
+        "content": "<p>Maybe try adding those?</p>",
+        "id": 204682153,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595432026
+    },
+    {
+        "content": "<p>specifically rbx and r12-r15</p>",
+        "id": 204682258,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595432057
+    },
+    {
+        "content": "<p>Also you need to preserve rbp</p>",
+        "id": 204682336,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595432089
+    },
+    {
+        "content": "<p>I was using the \"caller-saved\" ones from the example in the RFC: <a href=\"https://github.com/Amanieu/rfcs/blob/inline-asm/text/0000-inline-asm.md#symbol-operands\">https://github.com/Amanieu/rfcs/blob/inline-asm/text/0000-inline-asm.md#symbol-operands</a></p>",
+        "id": 204682689,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595432278
+    },
+    {
+        "content": "<p>That won't work if the function on the new stack uses <code>swap</code> to switch back to the new stack.</p>",
+        "id": 204682778,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595432307
+    },
+    {
+        "content": "<p>That's a great point. I will start there.</p>",
+        "id": 204682870,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595432352
+    },
+    {
+        "content": "<p>I would strongly recommend using the same code as libfringe (disclaimer: I wrote it).</p>",
+        "id": 204682882,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1595432359
+    },
+    {
+        "content": "<p>Thanks for the great work! It's really helpful.</p>",
+        "id": 204683375,
+        "sender_full_name": "Bernard Kolobara",
+        "timestamp": 1595432558
+    }
+]

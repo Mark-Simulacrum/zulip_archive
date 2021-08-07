@@ -1,0 +1,98 @@
+[
+    {
+        "content": "<p>Context: Using <code>ManuallyDrop</code> causes <code>alloca</code>s and <code>memcpy</code>s that LLVM cannot remove, <a href=\"https://github.com/rust-lang/rust/issues/79914\">https://github.com/rust-lang/rust/issues/79914</a></p>\n<p>Since you folks know more about LLVM than I do, does this seem like something that should be fixed in Mir-&gt;LLVM or in LLVM itself (or would somewhere else be better)?</p>\n<p>I was pondering if I should try making the <code>%\"std::mem::ManuallyDrop&lt;_&gt;\"</code> types never show up in the LLVM output, for example, to try to make the <code>alloca</code>s easier to remove, as there'd be need to SRoA them first, hopefully.  (Or maybe even do that for <em>all</em> <code>repr(transparent)</code> type?)</p>",
+        "id": 219535104,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1607635069
+    },
+    {
+        "content": "<p>it seems weird for debuginfo at least, if <code>ManuallyDrop</code> or other transparent wrappers are absent</p>",
+        "id": 219539232,
+        "sender_full_name": "cuviper",
+        "timestamp": 1607637309
+    },
+    {
+        "content": "<p>I don't know much about metadata -- how much does the type name in the IR matter, vs the <code>!DICompositeType</code> metadata?</p>",
+        "id": 219547769,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1607642388
+    },
+    {
+        "content": "<p>I don't know</p>",
+        "id": 219549945,
+        "sender_full_name": "cuviper",
+        "timestamp": 1607644130
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"125270\">@scottmcm</span> I'd be curious to know the scope of this problem. Is it truly something originating from <code>ManuallyDrop</code> alone? Or is it an artifact of some other aspect of <code>ManuallyDrop</code>, such as (as you may be pointing out), <code>#[repr(transparent)]</code>. (Which would be weird, but who knows.)</p>",
+        "id": 220062857,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1608077969
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116083\">@pnkfelix</span> As you say, I think it's a problem with anything where one needs a by-value newtype.  If it didn't need by-value then I could just do pointer-casts, but for moving out of things I couldn't find a way to hack around it.</p>\n<p>And it's also a problem for other things, but those would be much harder to solve -- for example <code>array::IntoIter</code> can be awkward to use to consume an array parameter because it copies the whole contents into the local, but that one does need the extra state so I wanted to try to limit the bug to the simpler case for now.</p>",
+        "id": 220064374,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1608079147
+    },
+    {
+        "content": "<p>Said otherwise, it might be a problem for any <code>T</code> where the ABI \"by value\" passing passes it as a <code>T*</code>.</p>",
+        "id": 220065097,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1608079747
+    },
+    {
+        "content": "<p>Hopefully NRVO will be able to optimize it out for <code>_0</code>, at least.</p>",
+        "id": 220065130,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1608079771
+    },
+    {
+        "content": "<p>We could have a peephole MIR optimisation somewhere late in the pipeline that just replaces #[repr(transparent)] types with their contents</p>",
+        "id": 220067468,
+        "sender_full_name": "nagisa",
+        "timestamp": 1608081890
+    },
+    {
+        "content": "<p>but overall yeah the problem is more general</p>",
+        "id": 220067491,
+        "sender_full_name": "nagisa",
+        "timestamp": 1608081920
+    },
+    {
+        "content": "<p>ABI is in an interesting spot here because by-val types if passed by pointer are still byval</p>",
+        "id": 220067565,
+        "sender_full_name": "nagisa",
+        "timestamp": 1608082003
+    },
+    {
+        "content": "<p>that is, there must be a copy somewhere so that caller mutating the… pointer, wouldn't mutate the actual original value.</p>",
+        "id": 220067587,
+        "sender_full_name": "nagisa",
+        "timestamp": 1608082028
+    },
+    {
+        "content": "<p>by value arguments, esp. the larger ones, rely on inlining more than anything else to achieve any semblance of efficiency.</p>",
+        "id": 220067682,
+        "sender_full_name": "nagisa",
+        "timestamp": 1608082145
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"123586\">nagisa</span> <a href=\"#narrow/stream/187780-t-compiler.2Fwg-llvm/topic/Hiding.20ManuallyDrop.20from.20LLVM.3F/near/220067587\">said</a>:</p>\n<blockquote>\n<p>that is, there must be a copy somewhere so that caller mutating the… pointer, wouldn't mutate the actual original value.</p>\n</blockquote>\n<p>Moving out isn't a mutation, though, right?  So at least for the <code>[T; N]</code> -&gt; <code>ManuallyDrop&lt;[T; N]&gt;</code> -&gt; move-out-items use it feels like it shouldn't need a copy, and could just use the ABI value directly.</p>",
+        "id": 220081229,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1608099190
+    },
+    {
+        "content": "<p>Currently the code generation for byval types, using indirect ABI, and passed with <code>Operand::Move</code>, will avoid copy and possibly mutate them in place. At the same time, the built MIR will likely contain a temporary copy before the call, like in the original example.</p>",
+        "id": 220097438,
+        "sender_full_name": "tm",
+        "timestamp": 1608113451
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"125270\">@scottmcm</span> </p>\n<blockquote>\n<p>Moving out isn't a mutation, though, right?</p>\n</blockquote>\n<p>Well, <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Use-after-move\">some people are proposing to make it a mutation</a> ;)</p>",
+        "id": 220581245,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1608555960
+    }
+]

@@ -1,0 +1,362 @@
+[
+    {
+        "content": "<p>I always got the impression, especially in C++ land, that SeqCst was intended to be the \"lazy option\" for people who don't want to think about concurrency in the more local sense of establishing relations between reads and writes and instead want a global clock. I don't think I have ever seen anyone use SeqCst ordering after considering all the options carefully; it's always because they don't want to think about relaxed memory and SeqCst is the strongest available ordering, so it's at least as correct as the appropriate ordering.</p>\n<p>Personally I find it hard to believe that concurrency has any \"lazy option\" (where correctness is easy and performance is not great) unless you are in the functional programming / safe rust paradigm where races of all kinds are impossible.</p>",
+        "id": 225429490,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1612644476
+    },
+    {
+        "content": "<p>(The \"lazy option\" I know that seems reasonable is the \"I just wanted a counter of work done, so I <code>.fetch_add(1, SeqCst)</code> in some safe code, and I use the value for logging, not control flow\" kind of thing.)</p>",
+        "id": 225431522,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1612647696
+    },
+    {
+        "content": "<p>I would use <code>Relaxed</code> ordering for something like that. The only thing that has to be ordered in that example is the lines of log themselves, unless you want a property like \"if I see this log line then that piece of work has been committed to disk\" which seems a little unnecessary and hard to establish besides.</p>",
+        "id": 225436490,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1612656301
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125270\">scottmcm</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Converting.20.60.26AtomicFoo.60.20to.20.60.26.5BAtomicU8.3B.20N.5D.60.20and.20using.20it/near/225431522\">said</a>:</p>\n<blockquote>\n<p>(The \"lazy option\" I know that seems reasonable is the \"I just wanted a counter of work done, so I <code>.fetch_add(1, SeqCst)</code> in some safe code, and I use the value for logging, not control flow\" kind of thing.)</p>\n</blockquote>\n<p>if you're only doing safe code, the order doesn't matter -- otherwise we couldnt let safe code use weaker orderings</p>",
+        "id": 225459024,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612696705
+    },
+    {
+        "content": "<p>(FWIW, I once tried to combat the idea of SeqCst as the lazy option, with no success: <a href=\"https://github.com/rust-lang/rfcs/pull/2503\">https://github.com/rust-lang/rfcs/pull/2503</a>)</p>",
+        "id": 225459061,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612696757
+    },
+    {
+        "content": "<p>&lt;long-vaguely-offtopic-comment&gt;<br>\n<span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Converting.20.60.26AtomicFoo.60.20to.20.60.26.5BAtomicU8.3B.20N.5D.60.20and.20using.20it/near/225436490\">said</a>:</p>\n<blockquote>\n<p>I don't think I have ever seen anyone use SeqCst ordering after considering all the options carefully; it's always because they don't want to think about relaxed memory and SeqCst is the strongest available ordering, so it's at least as correct as the appropriate ordering.</p>\n</blockquote>\n<p>So, I have a work-in-progress blog post about \"When do we actually need Ordering::SeqCst?\" so this is a thing I've thought about a lot. (too messy to link even though i linked my other notes below...)</p>\n<p>The main case it comes up is StoreLoad barriers, which can't be directly expressed without SeqCst (and it's not even obvious to me that SeqCst provides a StoreLoad barrier, but apparently it does). The other case is <a href=\"https://gist.github.com/thomcc/6afe4a89ab5eaeb83af51b53fbd4998b\">contrived examples</a>, (although even though this is contrived, I <em>guess</em> I believe that code in the wild is often broken under non-SC).</p>\n<p>Concretely I've hit the \"use SeqCst as a StoreLoad barrier\" case when writing futexy locking system. It was pretty tricky to figure out why <code>relacy</code> ( like loom for c++ but much more effective and thorough IME) was upset. Ultimately, I ended up writing a big comment about why the loaded need SC and why not to try to lower it (it <em>looks</em> like it should just need acquire...</p>\n<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Converting.20.60.26AtomicFoo.60.20to.20.60.26.5BAtomicU8.3B.20N.5D.60.20and.20using.20it/near/225436490\">said</a>:</p>\n<blockquote>\n<p>Personally I find it hard to believe that concurrency has any \"lazy option\" (where correctness is easy and performance is not great)</p>\n</blockquote>\n<p>Hard agree. In C++ at least someone can leave off the argument to mean \"I haven't thought about it\". In Rust I sometimes have a hard time telling if it's \"this code actually needs SeqCst\" vs. \"idk but the docs told me this is least likely to be wrong\".</p>\n<p>This is especially true in cases like <code>libstd</code> which you'd think has thought about this stuff a great deal, but instead uses SeqCst all over the place without thinking nor leaving a comment indicating that a better atomic order than SeqCst is possible (I guess it makes sense that these comments don't exist given the resistance there is to lowering them, though)</p>\n<p>That said, there sorta is a lazy option for imperative code, or at least lazier:  using locks. This is a lot harder to get wrong if you don't know what you're doing than atomics (you still have to worry about deadlocks, but if atomics are a viable alternative, deadlocks are not that likely for your case, and on the whole I'd say atomics have more pitfalls).</p>\n<p>Unfortunately, in Rust using mutex/rwlock from the stdlib:</p>\n<ul>\n<li>forces you to think about poisoning,</li>\n<li>can't be used in a static without wrapping it somehow,</li>\n<li>have a rather high performance overhead if you use the ones from libstd (although fixing the poisoning checks to avoid TLS reads helped move this to more acceptable perf)</li>\n<li>requires libstd (a downside for libraries and such who want to be <code>no_std</code> — note that IME, most users of no_std do have an actual OS, and are either library crates or users trying to slim binary size, which means that using os stuff <em>would</em> be an option for them...)</li>\n<li>makes your type unable to be returned from const fn (if it has a mutex/rwlock field),</li>\n<li>will make clippy yell at you (if it's just guarding a number),</li>\n<li>can't be used on wasm (even though a single-threaded version could be written),</li>\n<li>etc... (I could probably come up with more...)</li>\n</ul>\n<p>(Which, uh, oof! Not really great huh? I think the decisions that lead hear make sense in isolation, but the outcome is very undesirable. And we wonder why people use those spinlock crates which fix so many of these issues (despite being an absolutely terrible idea on any semi-modern OS)... This is <em>really</em> a discussion for another time/place tho... I just... have a bit of a chip on my shoulder about it)</p>\n<p><span class=\"user-mention silent\" data-user-id=\"125270\">scottmcm</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Converting.20.60.26AtomicFoo.60.20to.20.60.26.5BAtomicU8.3B.20N.5D.60.20and.20using.20it/near/225431522\">said</a>:</p>\n<blockquote>\n<p>I just wanted a counter of work done</p>\n</blockquote>\n<p>Echoing that most counters can be Relaxed, but adding that I wouldn't sweat it unless you expect the code to run on PPC or you enjoy sweating it. it will probably have similar cost to a (full) cache miss on non-x86, and be cheap on x86 iff uncontended.</p>\n<p>FWIW <a href=\"https://gist.github.com/thomcc/1ac35d0340bb1a912d3d0350f6d51064\">https://gist.github.com/thomcc/1ac35d0340bb1a912d3d0350f6d51064</a> is my rough notes/outline for a future blog post on how to reason about the perf/hardware impact of atomic operations (including different orderings), if you or anybody else cares.</p>\n<p>&lt;/long-vaguely-offtopic-comment&gt;</p>",
+        "id": 225459210,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612696938
+    },
+    {
+        "content": "<p>(made that SeqCst discussion a separate topic)</p>",
+        "id": 225459505,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612697393
+    },
+    {
+        "content": "<p>regarding SeqCst in libstd, indeed there have been PRs to replace (some of) them by release/acquire, that were rejected on the grounds that we shouldn't needlessly complicate things unless there is a strong expectation or a proof that this will help perf.</p>",
+        "id": 225459567,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612697447
+    },
+    {
+        "content": "<p>I can follow the reasoning behind this: it can certainly not be <em>wrong</em> to use SeqCst, and if it doesnt cost perf then why bother thinking more about it? but at the same time I think that \"not thinking more about it\" when writing fine-grained concurrent code will easily lead to buggy code even when using SeqCst everywhere... but I have no evidence that this is actually true (people that follow the \"SeqCst everywhere\" paradigm seem to be able to write correct concurrent code just fine)</p>",
+        "id": 225459748,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612697652
+    },
+    {
+        "content": "<blockquote>\n<p>In C++ at least someone can leave off the argument to mean \"I haven't thought about it\". In Rust I sometimes have a hard time telling if it's \"this code actually needs SeqCst\" vs. \"idk but the docs told me this is least likely to be wrong\".</p>\n</blockquote>\n<p>That's an interesting point, I had not thought about it this way.</p>",
+        "id": 225459779,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612697732
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/SeqCst.20as.20the.20.22lazy.20option.22.20for.20atomic.20orderings/near/225459567\">said</a>:</p>\n<blockquote>\n<p>regarding SeqCst in libstd, indeed there have been PRs to replace (some of) them by release/acquire, that were rejected on the grounds that we shouldn't needlessly complicate things unless there is a strong expectation or a proof that this will help perf.</p>\n</blockquote>\n<p>I've had pretty good luck with PRs to do this but when I do it i generally expect there's a decent chance that the PR will be rejected unless there's another compelling improvement (getting rid of SeqCst inside the <code>time::Instant</code> code also got rid of a static mut and some unsafe, so it was easy to justify for example).</p>\n<p>So, it's very tempting for me to go into why I disagree with the requirement for benchmarks for overly-strict orderings in directly user callable stuff (having benchmarked a lot of concurrent code, it's just about the hardest thing to get reasonable answers out of — for example: spinlocks and using <code>sched_yield()</code> as a \"smarter <code>hint::spin_loop()</code>\" look like a great ideas in benchmarks but are disastrous in practice), but it's a libs decision and I don't want to upset anybody or fight about it.</p>\n<p>The I will say that the stdlib (std::sync and std::thread in particular for things not coming from libcore/liballoc), already have a fairly justified reputation for bad performance and users going to potentially less-well-tested and robust third party crates, or direct use of OS primitives. (I also get the feeling that there are those on the stdlib that don't actually believe there's a real cost to SeqCst over other orderings, but it's neither here nor there...).</p>\n<blockquote>\n<p>but I have no evidence that this is actually true (people that follow the \"SeqCst everywhere\" paradigm seem to be able to write correct concurrent code just fine)</p>\n</blockquote>\n<p>It definitely depends, I've seen code that has trivial race because it does things like <code>if blah.load(SeqCst) == 0 { blah.store(thing, SeqCst); }</code> IME this kind of thing is quite common (even libstd had it), and especially if you expand it to other cases \"performing actions non-atomically using atomic substeps\". This is the kind of thing why I'd just as much recommend taking a lock (except for the reasons mentioned before...) for code that doesnt need to sweat perf. As another example, there's stuff like std::sync::mpsc which is full of SeqCst and still has issues like <a href=\"https://github.com/rust-lang/rust/issues/39364\">https://github.com/rust-lang/rust/issues/39364</a> which are fairly serious and hard to fix (the amount of complexity is a bit surprising for a queue that is not fully MPMC too)².</p>\n<p>Anyway I'm certainly not saying that SeqCst makes people write buggy code. I'm not hating on SeqCst, I just think concurrency is hard and pushing people to write lockfree code (as aggressively as the various factors in Rust do, unintentionally or not) while telling them that SeqCst is the easy correct choice is uh, well, it's an interesting decision. Concretely I have ideas how to improve this (better documentation, linting to help make the API less footguney)...</p>\n<p>That said I'm unsure how much this is relevant for UCG, if I'm being honest</p>\n<p>² That said, it's not like e.g. crossbeam's channel never had issues, and I'd still caution people against flume due to the use of a very very dodgy spinlock on unix which was likely implemented by following benchmark advice without thinking about why a benchmark might say that (which can even deadlock in some cases, I still need to file this bug though...)</p>",
+        "id": 225462713,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612702230
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> FWIW I'd love to read more blog posts on memory ordering,<br>\nI find llvm/C++ docs on memory ordering pretty complex and boring, so I'm one of those people who just throws SeqCst because I don't feel confident enough to argue otherwise (unlike unsafe code where the docs are pretty good and interesting so I find it easier to reason about and link references to why it is actually safe)</p>",
+        "id": 225486567,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1612735511
+    },
+    {
+        "content": "<p>Well, for me, I basically never use SeqCst and just use Acquire, Release, Relaxed, or AcqRel as appropriate. You can think of them as: if your using the atomic to send data in other variables to other threads, then the act of sending is Release, the act of receiving is Acquire, and if your not using the atomic to send data, then Relaxed is best. AcqRel is for both sending and receiving in the same atomic operation</p>",
+        "id": 225488298,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612737905
+    },
+    {
+        "content": "<blockquote>\n<p>AcqRel is for both sending and receiving in the same atomic operation</p>\n</blockquote>\n<p>which can only happen with RMW operations (read-modify-write, i.e., things like compare_exchange)</p>",
+        "id": 225666717,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612865112
+    },
+    {
+        "content": "<p>Most of the time I use <code>SeqCst</code>it's for stuff like emulating a <code>CountDownLatch</code> from Java or for keeping counters - stuff that could probably be weaker but I don't care enoguh for. I also remember <code>parking_lot</code> being blocked on not using <code>SeqCst</code> and weaker orderings, so I generally follow that safety philosophy in my own code.</p>",
+        "id": 225794342,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1612932670
+    },
+    {
+        "content": "<p>(ugh im sorry for writing so much, i just have a lot of thoughts on <em>this specific topic</em>)</p>\n<blockquote>\n<p>I also remember parking_lot being blocked on not using SeqCst and weaker orderings</p>\n</blockquote>\n<p>Yeah, that was... fairly controversial¹... I also think it's misguided to assume that if you don't trust a concurrent algorithm that it's likely to be made correct by using SeqCst. IME most concurrency bugs are <em>not</em> caused by failure to use SC over another ordering² — in fact, it's very hard to come up with examples of code where SC matters at all compared to AcqRel. There are also non-performance downsides to SeqCst-everywhere:</p>\n<ul>\n<li>Acq/Rel/AcqRel are a lot easier to detect bugs in than SC³. Some race checkers (notably loom — the most popular one in Rust) do not support SeqCst, but even where it is supported, it's usually not checked as exhaustively or take a longer time to reveal issues (as is the case in Relacy, the one I used to use for C++).</li>\n<li>Using SC can mask ordering bugs elsewhere — Often if I tighten up the orderings (or replace a mutex) in one place, and it ends up revealing a bug that was hidden elsewhere in my code.</li>\n<li>Because of that, providing SeqCst in an API and later removing it is kinda a breaking change, unless it was clear that you weren't promising a stronger ordering. And so this is maybe a dodgy thing to do in the stdlib with the rationale that \"we'll lower these later if benchmarks justify it\" (which just seems to me like \"once someone bothers to write benchmarks that measure this / on hardware where it's sufficiently costly\"...)</li>\n<li>More broadly, code that is accidentally relying on SC for correctness is probably very fragile and feels sensitive to breaking in the future (for example, if a new API is added by copying and changing existing internals). This is true of any algorithm with a bug that works for a reason that is not fully known to the maintainers, and it's not like having a bug would be any better, but I don't think slapping SC on things is enough to gain confidence in correctness.</li>\n<li>This also feels harder to maintain, as the orderings also indicate the direction that things flow across threads. Comments could be added indicating what the \"real\" ordering is, but I'm not a fan of these as they're untested and get stale.</li>\n</ul>\n<p>That said, I do agree with aspects of the review: relaxed should require justification on correctness (usually this is straightforward), and acq/rel should at least note which operations it's synchronizing with. I also agree that parking_lot should have more tests, ideally that run under tsan, and ideally some fuzzing. Just \"SC until proven otherwise\" feels like not the play to me. (Oh well)</p>\n<p>Anyway, While all that is at lest <em>vaguely</em> on topic (if a bit of a ramble) for \"SC as lazy option\", I don't actually think it applies to most codebases. I think SC is a totally fine lazy option even in the stdlib, I just think fixes should be accepted and there should be no reason to favor it so heavily. I definitely don't fault people for using it if they don't know better, although I think it's worth knowing if you write concurrent code (especially unsafe!), since understanding what the orderings do will <em>absolutely</em> prevent issues in even SC-only code.</p>\n<hr>\n<p>¹ That review is kinda also what I was referring to when I said \"I also get the feeling that there are those on the stdlib that don't actually believe there's a real cost to SeqCst over other orderings\" above. It still feels very strange to me since it costs so much and is so rarely needed, maybe I'm in the minority of having had issues caused by it though.</p>\n<p>² Ordering bugs do happen for sure, but are almost always relaxed versus acquire-release in one form or another (rather than $any vs SC). And unless the only complex thing about the code is the orderings, for untested concurrent code I tend to be way more worried about stuff like fundamental algorithm bugs, or stuff like mishandling the pointers in the linked lists you often need for this kind of code (or, for parking_lot's case, the hash table code)</p>\n<p>³ This isn't to say that SeqCst fixes these bugs... It's not impossible, but if an algorithm was written under the assumption that you only needed acquire and release for those operations and was incorrect... it's probably still incorrect under SC, as SC's guarantees aren't really that much more useful in practice than what you get from acq/rel.</p>",
+        "id": 225803235,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612943604
+    },
+    {
+        "content": "<p>FWIW I asked about orderings yesterday and of course got the initial response \"just use SeqCst\". I looked into it some more and it turns out there is in fact no ordering strong enough for what I wanted - atomics were the wrong solution and I needed locking instead. So I definitely think \"just use SeqCst\" is not great because it means you're not thinking about what properties you actually need from your program.</p>",
+        "id": 226002065,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1613055362
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> You talked about the cost of SeqCst, but looking at ASM it looks that on x86 only Store uses <code>xchg</code>  and loads just use a mov, does that mean that SeqCst reads are free on x86? or am I missing something and the cache is still invalidated somehow?</p>",
+        "id": 226021251,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1613062219
+    },
+    {
+        "content": "<p>x86_64 is a highly coherent architecture so like you saw atomic and non-atomic loads don't differ in many cases. On other things like ARM there is a significant difference though. And in call cases the atomic orderings also impose restrictions on compiler-level reordering.</p>",
+        "id": 226023500,
+        "sender_full_name": "Steven Fackler",
+        "timestamp": 1613063104
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232545\">@Joshua Nelson</span> can you describe the situation where it was wrong? Did it involve multiple distinct variables?</p>",
+        "id": 226028363,
+        "sender_full_name": "nagisa",
+        "timestamp": 1613064968
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> I didn't have anything to synchronize <em>with</em></p>",
+        "id": 226028387,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1613064982
+    },
+    {
+        "content": "<p>I want to say \"everything between these points sees a certain value\", but you just can't do with atomics</p>",
+        "id": 226028431,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1613065005
+    },
+    {
+        "content": "<p>because another thread can change the value in the middle</p>",
+        "id": 226028484,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1613065026
+    },
+    {
+        "content": "<p><code>xchg</code> isn't free, it's implicitly <code>lock</code>-prefixed when an operand is memory. The loads are free, but only if there's no traffic on that cache line. (Note that compiling them in another way is possible too, where the stores are just normal movs, and the loads are <code>lock xadd 0</code>, <code>mfence; mov</code>...)</p>\n<p>Either way these are not free when theres traffic on the cache line, and the stores are going to take at least 20 cycles even if not.</p>\n<p><span class=\"user-mention silent\" data-user-id=\"232545\">Joshua Nelson</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/SeqCst.20as.20the.20.22lazy.20option.22.20for.20atomic.20orderings/near/226002065\">said</a>:</p>\n<blockquote>\n<p>I looked into it some more and it turns out there is in fact no ordering strong enough for what I wanted</p>\n</blockquote>\n<p>Yeah this is another concern. People often think SeqCst will guarantee properties \"loads see the previously written write\", but it can't. The orderings aren't about the operations themselves, but about the accesses to other memory. A <code>load(SeqCst)</code> won't get there any faster than a <code>load(Relaxed)</code> (this might not be true on all processors, but in the memory model it is)</p>",
+        "id": 226030287,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613065750
+    },
+    {
+        "content": "<p>How do regular movs have different price depending on the traffic in the cache line?<br>\n(the compiler ordering I get, also the stores and the cost of xchg etc.)</p>",
+        "id": 226031030,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1613066013
+    },
+    {
+        "content": "<p>I mean, how does the processor knows these movs are \"atomic\"</p>",
+        "id": 226031163,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1613066047
+    },
+    {
+        "content": "<p>It doesn't, this is true for all movs.</p>",
+        "id": 226031183,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613066057
+    },
+    {
+        "content": "<p>To be pedantic, all aligned movs.</p>",
+        "id": 226038574,
+        "sender_full_name": "comex",
+        "timestamp": 1613069200
+    },
+    {
+        "content": "<blockquote>\n<p>Ordering bugs do happen for sure, but are almost always relaxed versus acquire-release in one form or another (rather than $any vs SC)</p>\n</blockquote>\n<p>Indeed that matches by experience (e.g. the bug in <code>Arc</code> that was found by the weak memory RustBelt project was a relaxed vs release/acquire bug)</p>",
+        "id": 226242618,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1613218953
+    },
+    {
+        "content": "<p>I don't like <code>SeqCst</code> myself, the thing is, yes, it's true, you can replace all usages of other orderings with <code>SeqCst</code> and the code won't become more buggy than it was<br>\nhowever, it doesn't mean that outright wrong code using atomics will somehow become correct if you replace all orderings with <code>SeqCst</code><br>\nand the thing is, <code>SeqCst</code> isn't much more constrained than <code>Acquire</code>/<code>Release</code>/<code>AcqRel</code>, the guarantee provided by <code>SeqCst</code> is very subtle and actually needing it is very very rare</p>",
+        "id": 226478791,
+        "sender_full_name": "Konrad Borowski",
+        "timestamp": 1613458942
+    },
+    {
+        "content": "<p>atomics guarantee much less than many programers would expect, even with sequential consistency, and understanding what orderings do to begin with is IMO necessary to write atomic code correctly</p>",
+        "id": 226478861,
+        "sender_full_name": "Konrad Borowski",
+        "timestamp": 1613459032
+    },
+    {
+        "content": "<p>Maybe the documentation for <code>SeqCst</code> should be updated to say that <code>AcqRel</code> is almost always a better choice?</p>",
+        "id": 226524540,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1613488210
+    },
+    {
+        "content": "<p>It would have to say that one of Acquire/Release/AcqRel is almost always a better choice since according to the docs at least AcqRel is limited to specifically combined load/store operations</p>",
+        "id": 226524884,
+        "sender_full_name": "Steven Fackler",
+        "timestamp": 1613488353
+    },
+    {
+        "content": "<p>maybe <code>AcqRel</code>could be changed to mean <code>Acquire</code> and/or <code>Release</code> and be valid everywhere? So, for just load ops, <code>AcqRel</code> means <code>Acquire</code>, and for just store ops <code>AcqRel</code> means just <code>Release</code></p>",
+        "id": 226529020,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1613490175
+    },
+    {
+        "content": "<p>that way there's a better default option that requires little thought about orderings</p>",
+        "id": 226529090,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1613490214
+    },
+    {
+        "content": "<p>though changing what <code>AcqRel</code> means could be too confusing</p>",
+        "id": 226529242,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1613490290
+    },
+    {
+        "content": "<p>I think <span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> proposed doing that a while ago, but can't remember where it ended up</p>",
+        "id": 226529615,
+        "sender_full_name": "Steven Fackler",
+        "timestamp": 1613490463
+    },
+    {
+        "content": "<p>Yeah that's exactly what I wanted to do with <a href=\"https://github.com/rust-lang/rfcs/pull/2503\">https://github.com/rust-lang/rfcs/pull/2503</a></p>",
+        "id": 226549135,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1613497612
+    },
+    {
+        "content": "<p>but people didn't like it, mostly because \"it's not what C++ does\"</p>",
+        "id": 226549179,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1613497626
+    },
+    {
+        "content": "<p>I think that outcome was unfortunate, but the concern that an AcqRel load would imply a release barrier that isn't actually present on the load... isn't <em>totally</em> unreasonable.</p>\n<p>When I get around to finishing <a href=\"https://github.com/rust-lang/rust/pull/79654\">https://github.com/rust-lang/rust/pull/79654</a> (probably not until next month, sadly) using the wrong value for Acquire/Release will at least be a compiler error.</p>",
+        "id": 226554647,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613499870
+    },
+    {
+        "content": "<p>what about adding a new <code>Ordering::AqOrRl</code> that is either <code>Acquire</code>, <code>Release</code>, or <code>AcqRel</code> depending on the op? That way <code>AcqRel</code> will still be consistent with the C++ version, and you could slowly stabilize it, it wouldn't be insta-stable.</p>",
+        "id": 226574958,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1613508938
+    },
+    {
+        "content": "<p>AFAICT that was in the RFC, at least after the revision</p>",
+        "id": 226578223,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1613510444
+    },
+    {
+        "content": "<p>Yep</p>",
+        "id": 226578347,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613510519
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"198039\">Konrad Borowski</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/SeqCst.20as.20the.20.22lazy.20option.22.20for.20atomic.20orderings/near/226478861\">said</a>:</p>\n<blockquote>\n<p>atomics guarantee much less than many programers would expect, even with sequential consistency, and understanding what orderings do to begin with is IMO necessary to write atomic code correctly</p>\n</blockquote>\n<p>I now feel bad about every atomic code I've written, always used SeqCst in Rust in C++ used the default (SeqCst) and in Go the only ordering they have (I think also SeqCst thought).<br>\nbut I never had a reason for that, I read <span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> gist but it's too bullet-pointy.</p>\n<p>Any recommendations for reads that aren't llvm docs or the C++ standard? I'd really like to understand the different orderings better, and see actual examples of how they differ and how to reason about them</p>",
+        "id": 226584748,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1613513118
+    },
+    {
+        "content": "<p>Well, \"I think SC is a totally fine lazy option\" is a thing I said above so I don't think anybody should feel bad about using it. Sadly, I don't have a lot of great resources. I think <a href=\"https://preshing.com/20120913/acquire-and-release-semantics/\">https://preshing.com/20120913/acquire-and-release-semantics/</a> (and other posts on the same website) are probably okay though</p>",
+        "id": 226585190,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613513252
+    },
+    {
+        "content": "<p>I think it's bad that there is this meaningless choice you have to make about whether to use acquire or release when the operation mostly dictates this (although some operations need more than one ordering setting, like RMW needs two and I think CAS needs three). Also the name is pretty bad, I would prefer something like \"message passing\" for acq/rel generally and <code>Send</code> and <code>Recv</code> instead of <code>Release</code> and <code>Acquire</code>. My best advice for using acq/rel correctly is to think of it as sending a message from point A to point B by reading a write, because that both captures most of the meaning of the ordering constraint and also essentially matches what the underlying cache coherence protocol is doing</p>",
+        "id": 226597960,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1613521081
+    },
+    {
+        "content": "<p>If your problem <em>can't</em> be described in terms of message passing, then probably <code>SeqCst</code> isn't sufficient to give you the ordering behavior that you want anyway and you should use a lock or mutex.</p>",
+        "id": 226598555,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1613521670
+    },
+    {
+        "content": "<p>Right, with the caveat that the thing you're sending/receiving <em>isn't</em> the value itself, but every other change made to memory previously.</p>",
+        "id": 226598655,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613521767
+    },
+    {
+        "content": "<p>well, it isn't <em>just</em> the value, the value itself is also synchronized</p>",
+        "id": 226598767,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1613521842
+    },
+    {
+        "content": "<p>Yeah, although using Acquire/Release (or SeqCst) won't make the value get there any faster than had you used Relaxed for the value is more my point, which is a common misconception</p>",
+        "id": 226606276,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613528814
+    },
+    {
+        "content": "<p>That sounds right, although with a relaxed store, couldn't the CPU decide not to commit the store even if there are other accesses in the vicinity? At least in the C11 model there isn't really anything besides a kind of eventual consistency that requires that value to get committed, while you can basically block on a seqcst or acq/rel write by reading other values that induce an ordering with the write operation. I don't know that any architecture does this but it seems admissible in the spec. That of course doesn't say anything about wall clock time to read the value, though there are some architectural operations outside the C11 memory model that probably do affect wall clock time to write, like non-temporal store in x86</p>",
+        "id": 226607687,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1613530534
+    },
+    {
+        "content": "<blockquote>\n<p>although with a relaxed store, couldn't the CPU decide not to commit the store even if there are other accesses in the vicinity?</p>\n</blockquote>\n<p>I guess. The C++11 standard requires them to eventually show up. Or, rather, it strongly recommends that they eventually show up:</p>\n<blockquote>\n<p>An implementation should ensure that the last value (in modification order) assigned by an atomic or synchronization operation will become visible to all other threads in a finite period of time.</p>\n</blockquote>",
+        "id": 226608040,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613531023
+    },
+    {
+        "content": "<p>Architecturally though, these things often boil down to <code>normal load; fence;</code> (for load) and <code>fence; normal store</code> (or sometimes <code>fence; normal store; fence;</code> for seqcst) on weak arches, which of course won't make the atomic values show up any sooner.</p>\n<p>on x86 the truth is more complicated because of the bus lock the seqcst store will take, but i think it's still largely the same situation.</p>",
+        "id": 226608277,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613531268
+    },
+    {
+        "content": "<p>this is true on really weak things like the (unsupported by rust, but supported by our memory model) alpha too. but to get into the architecture-specific details i'd recommend probably considering things under something like the linux kernel memory model (<a href=\"https://github.com/torvalds/linux/blob/master/Documentation/memory-barriers.txt\">https://github.com/torvalds/linux/blob/master/Documentation/memory-barriers.txt</a> is probably the best starting point), which tries to model these architecture-specific quirks.</p>\n<p>That said, the c++11 model is a lot simpler and probably more coherent too, and the kernel model is only relevant to rust in that it exists as a comparison point.</p>",
+        "id": 226608442,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613531466
+    },
+    {
+        "content": "<p>ARM-v8 has a ld.acq instruction IIRC, it's not always just a fence</p>",
+        "id": 226608454,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1613531494
+    },
+    {
+        "content": "<p>yeah, i'm aware, it's not unique in that (itanium had these too), but i believe they're specified as being equivalent to the fenced load (at least for itanium that was the case)</p>",
+        "id": 226608509,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613531537
+    },
+    {
+        "content": "<p>although maybe that just does the same thing as a fence would anyway; I tried looking at the ARM memory model but it looks like they took a page from C11 instead of having an operational model like x86</p>",
+        "id": 226608513,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1613531555
+    },
+    {
+        "content": "<p>(also for clarity, <code>fence</code> above isn't always the same fence. some arches have different fences. some don't. but the pattern is common)</p>",
+        "id": 226609322,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1613532620
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/SeqCst.20as.20the.20.22lazy.20option.22.20for.20atomic.20orderings/near/226608513\">said</a>:</p>\n<blockquote>\n<p>although maybe that just does the same thing as a fence would anyway; I tried looking at the ARM memory model but it looks like they took a page from C11 instead of having an operational model like x86</p>\n</blockquote>\n<p>AFAIK there is an equivalent operational model but it's hideously complicated^^ Peter Sewell's people did a bunch of work on that</p>",
+        "id": 226796596,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1613647579
+    },
+    {
+        "content": "<p>Just saw this article shared somewhere else (\"An introduction to lockless algorithms\") <a href=\"https://lwn.net/SubscriberLink/844224/7d99201ce72fccbe/\">https://lwn.net/SubscriberLink/844224/7d99201ce72fccbe/</a> although it's pretty much only about Acquire/Release</p>",
+        "id": 227015969,
+        "sender_full_name": "Nick12",
+        "timestamp": 1613763153
+    }
+]

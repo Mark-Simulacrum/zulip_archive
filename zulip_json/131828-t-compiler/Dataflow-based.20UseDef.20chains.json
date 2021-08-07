@@ -1,0 +1,1076 @@
+[
+    {
+        "content": "<p>On a lark, I decided to try implementing a reaching definitions analysis for <code>rustc</code>. The main use cases for this are dataflow-based const-qualification as discussed  in <a href=\"#narrow/stream/146212-t-compiler.2Fconst-eval/topic/dataflow-based.20const.20qualification.20MVP\" title=\"#narrow/stream/146212-t-compiler.2Fconst-eval/topic/dataflow-based.20const.20qualification.20MVP\">https://rust-lang.zulipchat.com/#narrow/stream/146212-t-compiler.2Fconst-eval/topic/dataflow-based.20const.20qualification.20MVP</a> and  better const-propagation during MIR optimization. I'll post a WIP PR when I finish adapting the <code>rustc_peek</code> machinery to my use case.</p>\n<p>I wanted to let people know that someone is working on this, as well as solicit feedback on implementation strategy and other potential use cases.</p>\n<p>The current analysis:<br>\n    - Is field-insensitive (assignments to projections like <code>x.y = ...</code> will not kill any previous assignments to <code>x</code>, even ones like <code>x.y.z = ...</code>. I think this is not too hard to implement correctly, but I need to incorporate code from some other analyses)<br>\n    - Handles pointer aliasing by killing all definitions of a variable whose address is observed at any point whenever a definition goes through a pointer (e.g. <code>*p = ...</code>) (this was proposed by eddyb on github in an issue I can no longer find)<br>\n    - Is context-insensitive and very conservative w.r.t. function calls (it treats function calls just like <code>*p = ...</code>. This is because a function could take a reference (or a raw pointer) to a local as an argument and mutate it).</p>\n<p>I'll post here again when I have a draft PR ready. Also, please be gentle, I've never had a compilers course :).</p>",
+        "id": 168348630,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1560806448
+    },
+    {
+        "content": "<p>cc <span class=\"user-group-mention\" data-user-group-id=\"1162\">@WG-mir-opt</span></p>",
+        "id": 168387893,
+        "sender_full_name": "oli",
+        "timestamp": 1560853955
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> <span class=\"user-mention\" data-user-id=\"116083\">@pnkfelix</span> Why does <code>state_for_location</code> initialize the gen and kill sets to the entry state of the basic block in question? <a href=\"https://github.com/rust-lang/rust/blob/44fb88d25282d9362774536965f2455f677734f3/src/librustc_mir/dataflow/mod.rs#L361-L363\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/44fb88d25282d9362774536965f2455f677734f3/src/librustc_mir/dataflow/mod.rs#L361-L363\">https://github.com/rust-lang/rust/blob/44fb88d25282d9362774536965f2455f677734f3/src/librustc_mir/dataflow/mod.rs#L361-L363</a></p>",
+        "id": 168418850,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1560876183
+    },
+    {
+        "content": "<p>I don't actually know</p>",
+        "id": 168418899,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560876235
+    },
+    {
+        "content": "<p>that might be the thing <span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span> added</p>",
+        "id": 168418949,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560876247
+    },
+    {
+        "content": "<p>also, IIRC <span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> tried  to add a \"reaching definition\" analysis</p>",
+        "id": 168418970,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560876266
+    },
+    {
+        "content": "<p>or something more powerful, I forget</p>",
+        "id": 168418980,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560876276
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"118594\">@Dylan MacKenzie</span> you don't need it for const-qualif though?</p>",
+        "id": 168419012,
+        "sender_full_name": "eddyb",
+        "timestamp": 1560876306
+    },
+    {
+        "content": "<p>No, I'm trying to overload <code>rustc_peek</code> to spit out the set of reaching defs for debugging. AFAICT it's doing its own version of <code>state_for_location</code>, but only looking at assignments since that's the only place that will change the initialization state of a move path.</p>",
+        "id": 168419214,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1560876445
+    },
+    {
+        "content": "<p>Not all fields of <code>BlockSets</code> is used in <code>state_for_location</code>, I think. Also you shouldn't be using <code>state_for_location</code>if you're looking at many or all locations.</p>",
+        "id": 168419955,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1560876957
+    },
+    {
+        "content": "<p>@Zoxc, I'm not sure I quite understand your first point. I think someone is working on a cursor to remove the O(n^2) behavior, but that isn't an issue here since <code>rustc_peek</code> is only needs the state at the end of a block.</p>",
+        "id": 168421470,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1560878006
+    },
+    {
+        "content": "<p>My current inference is that the pattern in question originated here: <a href=\"https://github.com/rust-lang/rust/commit/efc7d46188c6696ae873b2b71ead7e34fc4501ab#diff-e1d33bfc0f6996e6a7d96525162675e4R362\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/commit/efc7d46188c6696ae873b2b71ead7e34fc4501ab#diff-e1d33bfc0f6996e6a7d96525162675e4R362\">PR 44480, fn state_for_location</a></p>",
+        "id": 168509851,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1560953345
+    },
+    {
+        "content": "<p>Note that in particular, that code is creating the <code>IdxSetBuf</code> (<code>entry</code>), and passing a mutable reference to it via the <code>gen_set</code> field.</p>",
+        "id": 168509920,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1560953391
+    },
+    {
+        "content": "<p>it also clones it for the <code>on_entry</code> and <code>kill_set</code> fields, but those clones are discarded by this code.</p>",
+        "id": 168509989,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1560953412
+    },
+    {
+        "content": "<p>the one that is returned is the one referenced by the <code>gen_set</code> field, because that presumably reflects the accumulated intra-basicblock dataflow state up to and including <code>loc</code></p>",
+        "id": 168510061,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1560953466
+    },
+    {
+        "content": "<p>In other words, I <em>think</em> the point is this: We want to compute the intra-block gen-set. We do it by starting with the state at the start of the control flow of the block, and then compute the effect of each statement (as is reflected in the <em>gen-set</em> state that is imperatively modified by <code>statement_effect</code></p>",
+        "id": 168510230,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1560953556
+    },
+    {
+        "content": "<p>The fact that we are also creating valid <code>&amp;mut IdxSetBuf</code> values for <code>on_entry</code> and <code>kill_set</code> is, I assume, to allow <code>statement_effect</code> to maintain or reference state within those bits.</p>",
+        "id": 168510305,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1560953616
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116466\">@Zoxc</span> does the above summary (of how <code>fn state_for_location</code> works) sound approximately correct to you?</p>",
+        "id": 168510427,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1560953688
+    },
+    {
+        "content": "<p>(Now, if you ask me, it probably doesn't make sense for the <code>statement_effect</code> method to actually read the current value of the <code>gen_set</code>/<code>kill_set</code> it receives. If my memory is right, it generally just writes to those arrays. And that may be why it does not matter that we are passing in a clone of <code>entry_set</code> as a value for <code>kill_set</code> here; because, I think, no implementation of <code>statement_effect</code> would read those bits anyway.)</p>",
+        "id": 168510729,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1560953883
+    },
+    {
+        "content": "<p>Sounds approximately correct to me =P</p>",
+        "id": 168516225,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1560957502
+    },
+    {
+        "content": "<p>So does <code>state_at_location</code> just ignore kills?</p>",
+        "id": 168524765,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1560963786
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"118594\">@Dylan MacKenzie</span> well, I suspect it doesn't <em>ignore</em> all kills. In particular, since its computing the cumulative effect of some prefix of the block (starting from the entry set state of that block), it needs to apply the kills for each statement to the state</p>",
+        "id": 168580697,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561023528
+    },
+    {
+        "content": "<p>which is fine; I believe that is indeed part of what happens during the loop</p>",
+        "id": 168580730,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561023551
+    },
+    {
+        "content": "<p>what it <em>does</em> ignore is the final value of the cloned <code>kill-set</code>. It throws that away.</p>",
+        "id": 168580744,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561023571
+    },
+    {
+        "content": "<p>and I believe that any state written to that cloned kill-set does not matter.</p>",
+        "id": 168580765,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561023590
+    },
+    {
+        "content": "<p>I figured out why this works, but it's kind of subtle.</p>",
+        "id": 168605910,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561044499
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">state_for_location</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;tcx</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">T</span>: <span class=\"nc\">BitDenotation</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;tcx</span><span class=\"o\">&gt;&gt;</span><span class=\"p\">(</span><span class=\"n\">loc</span>: <span class=\"nc\">Location</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                                                        </span><span class=\"n\">analysis</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">T</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                                                        </span><span class=\"n\">result</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">DataflowResults</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;tcx</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                                                        </span><span class=\"n\">body</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">Body</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;tcx</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">    </span>-&gt; <span class=\"nc\">BitSet</span><span class=\"o\">&lt;</span><span class=\"n\">T</span>::<span class=\"n\">Idx</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">on_entry</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">result</span><span class=\"p\">.</span><span class=\"n\">sets</span><span class=\"p\">().</span><span class=\"n\">on_entry_set_for</span><span class=\"p\">(</span><span class=\"n\">loc</span><span class=\"p\">.</span><span class=\"n\">block</span><span class=\"p\">.</span><span class=\"n\">index</span><span class=\"p\">()).</span><span class=\"n\">to_owned</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">kill_set</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">on_entry</span><span class=\"p\">.</span><span class=\"n\">to_hybrid</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">gen_set</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">kill_set</span><span class=\"p\">.</span><span class=\"n\">clone</span><span class=\"p\">();</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">sets</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">BlockSets</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">on_entry</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">on_entry</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">kill_set</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">kill_set</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">gen_set</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">gen_set</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"w\">        </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">stmt</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">..</span><span class=\"n\">loc</span><span class=\"p\">.</span><span class=\"n\">statement_index</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">stmt_loc</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">loc</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">stmt_loc</span><span class=\"p\">.</span><span class=\"n\">statement_index</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">stmt</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">analysis</span><span class=\"p\">.</span><span class=\"n\">before_statement_effect</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">sets</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">stmt_loc</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">analysis</span><span class=\"p\">.</span><span class=\"n\">statement_effect</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">sets</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">stmt_loc</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"w\">        </span><span class=\"c1\">// Apply the pre-statement effect of the statement we&#39;re evaluating.</span>\n<span class=\"w\">        </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">loc</span><span class=\"p\">.</span><span class=\"n\">statement_index</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"n\">body</span><span class=\"p\">[</span><span class=\"n\">loc</span><span class=\"p\">.</span><span class=\"n\">block</span><span class=\"p\">].</span><span class=\"n\">statements</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">analysis</span><span class=\"p\">.</span><span class=\"n\">before_terminator_effect</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">sets</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">loc</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">analysis</span><span class=\"p\">.</span><span class=\"n\">before_statement_effect</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">sets</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">loc</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"n\">gen_set</span><span class=\"p\">.</span><span class=\"n\">to_dense</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 168605919,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561044510
+    },
+    {
+        "content": "<p>It's because the <code>kill</code> and <code>kill_all</code> setters for <code>BlockSets</code> remove bits from <code>gen_set</code> that conflict with the newly added kills.</p>",
+        "id": 168606060,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561044606
+    },
+    {
+        "content": "<p>I'd like for someone (possibly me) to replace this API with a cursor which caches the result of the last call of <code>state_for_location</code>. This way accessing statements sequentially won't be <code>O(n^2)</code> (as mentioned above).</p>",
+        "id": 168606696,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561044970
+    },
+    {
+        "content": "<p>Hence all the questions :)</p>",
+        "id": 168606927,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561045152
+    },
+    {
+        "content": "<p>right: computing the cumulative <code>gen-set</code> for the whole block requires combining both the gens <em>and the kills</em> of the statements in the block.</p>",
+        "id": 168624277,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561057300
+    },
+    {
+        "content": "<p>(a critical detail I left out above)</p>",
+        "id": 168624305,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561057318
+    },
+    {
+        "content": "<p>There's <del>a couple more issues</del> another issue I have with the implementation.</p>\n<p><del>First, should <code>state_for_location</code> include <code>before_statement_effect</code> for the given location? Currently it does not.</del> Ignore this, I was wrong :)</p>",
+        "id": 168627461,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561059499
+    },
+    {
+        "content": "<p>Second, when we're building the transfer function by visiting each statement, <code>on_entry</code> is empty (or full if <code>bottom_value == true</code>) at the start of every basic block except <code>START_BLOCK</code> (which has <code>start_block_effect</code> applied to it). If <code>accumulates_intrablock_state</code> is <code>true</code>, each statement gets to observe the effect of all previous statements before it in the same block on the initial <code>on_entry</code> when deciding its transfer function.</p>",
+        "id": 168627747,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561059717
+    },
+    {
+        "content": "<p>However, in <code>state_for_location</code>, <code>on_entry</code> is initialized to the fixpoint instead.</p>",
+        "id": 168627825,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561059755
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116083\">@pnkfelix</span></p>",
+        "id": 168627830,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561059759
+    },
+    {
+        "content": "<p>(assuming dataflow analysis is run before <code>state_for_location</code> is called</p>",
+        "id": 168628016,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561059891
+    },
+    {
+        "content": "<p>I need modify this to support arbitrary transfer functions as described here: <a href=\"#narrow/stream/146212-t-compiler.2Fconst-eval/topic/dataflow-based.20const.20qualification.20MVP/near/168608696\" title=\"#narrow/stream/146212-t-compiler.2Fconst-eval/topic/dataflow-based.20const.20qualification.20MVP/near/168608696\">https://rust-lang.zulipchat.com/#narrow/stream/146212-t-compiler.2Fconst-eval/topic/dataflow-based.20const.20qualification.20MVP/near/168608696</a></p>",
+        "id": 168628336,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561060100
+    },
+    {
+        "content": "<p>Whether or not this is a good idea is TBD :)</p>",
+        "id": 168628422,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561060152
+    },
+    {
+        "content": "<p>What was the question?</p>",
+        "id": 168629752,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061016
+    },
+    {
+        "content": "<p>in the first case, we are computing the transfer function for the whole block, before we know what the fixed point is</p>",
+        "id": 168629783,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061039
+    },
+    {
+        "content": "<p>in the second case, we are taking the fixed point result (which is only saved at the entry point for each block), and using it to compute the precise state within a block</p>",
+        "id": 168629863,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061068
+    },
+    {
+        "content": "<p>To do that, we have to recompute the transfer function for each statement, but we're passing different inputs to the function which determines the transfer function in <code>state_for_location</code> than we are when we initially run dataflow.</p>",
+        "id": 168629952,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561061147
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116083\">@pnkfelix</span>  which I think is incorrect</p>",
+        "id": 168630024,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561061194
+    },
+    {
+        "content": "<p>yeah so that probably prvides evidence that <code>statement_effect</code>should not be reading from the state of <code>on_entry</code> in its calculation, right?</p>",
+        "id": 168630045,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061218
+    },
+    {
+        "content": "<p>When I did the refactor in <a href=\"https://github.com/rust-lang/rust/issues/61787\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/61787\">#61787</a>, I initially removed that parameter since I couldn't see when you would want to read from <code>on_entry</code></p>",
+        "id": 168630088,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561061280
+    },
+    {
+        "content": "<p>someone does want to read from it?</p>",
+        "id": 168630137,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061296
+    },
+    {
+        "content": "<p>but it's currently used  in...</p>",
+        "id": 168630149,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561061305
+    },
+    {
+        "content": "<p>oh maybe its used for something in functions that use <code>accumulates_intrablock_state</code>, let me look</p>",
+        "id": 168630227,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061387
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/blob/f0c2bdf52e0c8bce258f1bbb5652c9691b7f3193/src/librustc_mir/dataflow/impls/borrows.rs#L207\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/f0c2bdf52e0c8bce258f1bbb5652c9691b7f3193/src/librustc_mir/dataflow/impls/borrows.rs#L207\">https://github.com/rust-lang/rust/blob/f0c2bdf52e0c8bce258f1bbb5652c9691b7f3193/src/librustc_mir/dataflow/impls/borrows.rs#L207</a></p>",
+        "id": 168630236,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561061394
+    },
+    {
+        "content": "<p>this function</p>",
+        "id": 168630247,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561061401
+    },
+    {
+        "content": "<p>hmm</p>",
+        "id": 168630317,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061444
+    },
+    {
+        "content": "<p>seems dangerous</p>",
+        "id": 168630346,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061479
+    },
+    {
+        "content": "<p>Updating <code>on_entry</code> when defining the transfer function is the only reason <code>accumulates_intrablock_state</code> exists right?</p>",
+        "id": 168630468,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561061576
+    },
+    {
+        "content": "<p>that was what I was initially thinking, but I think you found a counter example</p>",
+        "id": 168630497,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061618
+    },
+    {
+        "content": "<p>my current guess is that kill_borrows_on_place is reading from <code>on_entry</code>  only as a way to avoid iterating over the whole universe</p>",
+        "id": 168630573,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061657
+    },
+    {
+        "content": "<p>in terms of what is \"correct\" for the API as designed, especially given that we start with empty-sets for <code>on_entry</code>, I would have thought you need to compute the kill-sets there more conservatively</p>",
+        "id": 168630624,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061715
+    },
+    {
+        "content": "<p>cc <span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> ^</p>",
+        "id": 168630633,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061728
+    },
+    {
+        "content": "<p>So right now this \"kill\"s all borrows that <em>occurred earlier in the same basic block</em> that <strong>definitely</strong> conflict with the borrow at the current statment.</p>",
+        "id": 168630755,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561061848
+    },
+    {
+        "content": "<p>right, and that doesn't sound sufficient to me</p>",
+        "id": 168630830,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561061899
+    },
+    {
+        "content": "<p>I last looked at this part of the compiler quite a while ago so I’ll need to bring it back into cache to be useful here.</p>",
+        "id": 168630860,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1561061932
+    },
+    {
+        "content": "<p>(yeah its been a while for me too)</p>",
+        "id": 168631112,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062137
+    },
+    {
+        "content": "<p>one reason why we may not be hitting bugs here as often as you might expect is because we only go into this path for non-<code>Local</code> places.</p>",
+        "id": 168631191,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062224
+    },
+    {
+        "content": "<p>The issue you're discussing is specific to the borrow check analysis though? It's sometimes valid to look at the accumulated state within a block?</p>",
+        "id": 168631267,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561062271
+    },
+    {
+        "content": "<p>And can starting with the fixpoint instead of the empty set (or <code>start_block_effect</code>) in <code>state_for_location</code>  cause errors?</p>",
+        "id": 168631328,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561062334
+    },
+    {
+        "content": "<p>oh sure: what I'm currently saying is that I'm worried that kill_borrows_on_place is buggy.</p>",
+        "id": 168631404,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062378
+    },
+    {
+        "content": "<p>In general ... I would need to review the other cases that read from <code>on_entry</code></p>",
+        "id": 168631450,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062423
+    },
+    {
+        "content": "<p>You've just reviewed all of them :)</p>",
+        "id": 168631479,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561062440
+    },
+    {
+        "content": "<p>namely the ones that motivated the addition of <code>fn accumulates_intrablock_state</code></p>",
+        "id": 168631481,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062442
+    },
+    {
+        "content": "<p>AFAICT</p>",
+        "id": 168631488,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561062447
+    },
+    {
+        "content": "<p>wait, so does <em>no one</em> override <code>fn accumulates_intrablock_state</code> anymore?</p>",
+        "id": 168631573,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062494
+    },
+    {
+        "content": "<blockquote>\n<p>And can starting with the fixpoint instead of the empty set (or <code>start_block_effect</code>) in <code>state_for_location</code>  cause errors?</p>\n</blockquote>\n<p>I do not believe this would cause errors. In fact, I think starting with the fixed point is <em>necessary</em> for the correctness of <code>state_for_location</code></p>",
+        "id": 168631658,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062559
+    },
+    {
+        "content": "<p>I see no one overriding <code>accumulates_intrablock_state</code> (including <code>Borrows</code>, which means the entry set is always empty except in the start block)</p>",
+        "id": 168631788,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561062654
+    },
+    {
+        "content": "<p>I'll try to rephrase, I think a proper implementation of <code>state_for_location</code> should:<br>\n1. Initialize a <code>BitSet</code> to the fixpoint at entry to the basic block.<br>\n2. Pass an <strong>empty</strong> bitset to <code>{statement,terminator}_effect</code> (if <code>accumulates_intrablock_state</code> is <code>false</code>) to get the transfer function.<br>\n3. Apply the transfer function to the fixpoint</p>",
+        "id": 168631940,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561062781
+    },
+    {
+        "content": "<p>that sounds like that would be correct</p>",
+        "id": 168631999,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062841
+    },
+    {
+        "content": "<p>but I think the end effect would be the same as what it does now?</p>",
+        "id": 168632053,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062854
+    },
+    {
+        "content": "<p>Currently step 2 is pass the fixpoint to <code>{statement,terminator}_effect</code> to get the transfer function</p>",
+        "id": 168632094,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561062896
+    },
+    {
+        "content": "<p>Well, it would be the same, depending on whether <code>{statement, terminator}_effect</code> are allowed to change their behavior based on <em>reading from</em> <code>gen-set</code> or <code>kill-set</code>.</p>",
+        "id": 168632145,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062935
+    },
+    {
+        "content": "<p>(i've been assuming they are not allowed to read; only write. And thus, the current implementation uses the fixed-point-computed <code>on_entry</code>, and passes that in as the initial value for <code>gen-set</code>. Then applying the effect of each statement updates <code>gen-set</code> accordingly.)</p>",
+        "id": 168632220,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561062984
+    },
+    {
+        "content": "<p>So the fixpoint is passed to <code>on_entry</code> as well in <code>state_for_location</code>, meaning that reading from <code>on_entry</code> (as is done in <code>Borrows</code>) may also cause a different transfer function to be generated depending on whether we're actually running dataflow or doing <code>state_for_location</code></p>",
+        "id": 168632315,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063074
+    },
+    {
+        "content": "<p>But the implementation you describe sounds like it could be more robust, in terms of not having to follow rules like \"don't ever read from <code>gen-sets</code>/`kill-sets</p>",
+        "id": 168632318,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063077
+    },
+    {
+        "content": "<p>yeah I think the problem here is that I don't think of the <code>gen-set</code> being computed by <code>state_for_location</code> as being the transfer function. It is the <em>result of applying</em> the transfer function to the entry set</p>",
+        "id": 168632417,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063121
+    },
+    {
+        "content": "<p>or, yes, sorry</p>",
+        "id": 168632444,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063147
+    },
+    {
+        "content": "<p>I misread your message</p>",
+        "id": 168632453,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063150
+    },
+    {
+        "content": "<p>I agree, but the question is how do you get the transfer function.</p>",
+        "id": 168632468,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063161
+    },
+    {
+        "content": "<p>reading from <code>on_entry</code>, as is done in <code>Borrows</code>, does seem like it could cause a different transfer function to be computed in the two cases</p>",
+        "id": 168632489,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063176
+    },
+    {
+        "content": "<p>which is exactly what I'm sitting here worried about</p>",
+        "id": 168632501,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063186
+    },
+    {
+        "content": "<p>especially since the transfer function you get from <code>on_entry</code>=null-set seems like it might miss important entries in the kill-set.</p>",
+        "id": 168632572,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063215
+    },
+    {
+        "content": "<p>It seems wrong to me too (especially since <code>accumulate_intrablock_state</code> is <code>false</code>), but I'd have to read more to understand the original intent.</p>",
+        "id": 168632686,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063316
+    },
+    {
+        "content": "<p>oh I now see who was using <code>accumulate_intrablock_state</code></p>",
+        "id": 168632806,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063402
+    },
+    {
+        "content": "<p>Can I go to a PR from a commit hash?</p>",
+        "id": 168632807,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063403
+    },
+    {
+        "content": "<p>it originated from <a href=\"https://github.com/rust-lang/rust/issues/46537\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/46537\">#46537</a></p>",
+        "id": 168632822,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063411
+    },
+    {
+        "content": "<blockquote>\n<p>Can I go to a PR from a commit hash?</p>\n</blockquote>\n<p>I do it via the web interface for github</p>",
+        "id": 168632841,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063430
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/commit/db635fc5664c0a19cdb4063545ca2d2b297f0212\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/commit/db635fc5664c0a19cdb4063545ca2d2b297f0212\">https://github.com/rust-lang/rust/commit/db635fc5664c0a19cdb4063545ca2d2b297f0212</a></p>",
+        "id": 168632925,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063471
+    },
+    {
+        "content": "<p>e.g. if you look at <a href=\"https://github.com/rust-lang/rust/commit/e123117cb7c1b7f8854858721ccbdbca4e918061\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/commit/e123117cb7c1b7f8854858721ccbdbca4e918061\">this commit</a>, you'll see it says \"master (<a href=\"https://github.com/rust-lang/rust/issues/46537\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/46537\">#46537</a>)\" beneath the log message for the commit.</p>",
+        "id": 168632926,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063473
+    },
+    {
+        "content": "<p>Ah, got it</p>",
+        "id": 168632944,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063486
+    },
+    {
+        "content": "<p>okay so first things first</p>",
+        "id": 168632982,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063510
+    },
+    {
+        "content": "<p>lets kill off <code>accumulates_intrablock_state</code></p>",
+        "id": 168632990,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063518
+    },
+    {
+        "content": "<p>before anyone else has \"really bright ideas\" like I did in that old buggy two-phase borrows hack.</p>",
+        "id": 168633023,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063547
+    },
+    {
+        "content": "<p>but also</p>",
+        "id": 168633154,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063644
+    },
+    {
+        "content": "<p>I do have one use case, if we allow transfer functions that copy bits from other locals in the dataflow set (this is one approach to dataflow-based const-qualification, the other is based on reaching definitions). Then we may want to simply gen the qualification bits for <code>_2</code> in code like:</p>\n<div class=\"codehilite\"><pre><span></span>_1 = {something qualified}\n_2 = _1\n</pre></div>",
+        "id": 168633177,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063676
+    },
+    {
+        "content": "<p>do i dare log an issue saying that I need to investigate whether kill_borrows_on_place is secretly buggy...</p>",
+        "id": 168633178,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063677
+    },
+    {
+        "content": "<p>instead of copying the qualifications from <code>_1</code> (which is slow)</p>",
+        "id": 168633232,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063704
+    },
+    {
+        "content": "<p>Also, this particular code landed in <a href=\"https://github.com/rust-lang/rust/issues/56649\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/56649\">#56649</a></p>",
+        "id": 168633266,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063743
+    },
+    {
+        "content": "<p>yeah I was talking about where <code>accumulates_intrablock_state</code> came from</p>",
+        "id": 168633299,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063777
+    },
+    {
+        "content": "<p>(because no one is currently overriding it, so I wanted to see what my movitation  was for adding it in the first place)</p>",
+        "id": 168633385,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063818
+    },
+    {
+        "content": "<p>Ah yes</p>",
+        "id": 168633413,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561063851
+    },
+    {
+        "content": "<p>I agree that <code>kill_borrows_on_place</code> originated with PR <a href=\"https://github.com/rust-lang/rust/issues/56649\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/56649\">#56649</a>; that's why I cc'ed <span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> above.</p>",
+        "id": 168633420,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561063857
+    },
+    {
+        "content": "<p>so, like, the motivating example on the description of issue <a href=\"https://github.com/rust-lang/rust/issues/46589\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/46589\">#46589</a> looks like something that is operating on a local</p>",
+        "id": 168633610,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064012
+    },
+    {
+        "content": "<p>and thus it would not even get into the code here</p>",
+        "id": 168633615,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064021
+    },
+    {
+        "content": "<p>so the challenge for me is to try to construct an example</p>",
+        "id": 168633624,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064032
+    },
+    {
+        "content": "<p>where it is not operating on a local</p>",
+        "id": 168633628,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064040
+    },
+    {
+        "content": "<p>and where the transfer function here</p>",
+        "id": 168633675,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064046
+    },
+    {
+        "content": "<p>computes an insufficient kill-set</p>",
+        "id": 168633680,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064054
+    },
+    {
+        "content": "<p>and thus we end up with incorrect results in our final analysis</p>",
+        "id": 168633690,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064066
+    },
+    {
+        "content": "<p>(but can I accept that challenge at 22:54 at night ...?)</p>",
+        "id": 168633708,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064084
+    },
+    {
+        "content": "<p>XD</p>",
+        "id": 168633765,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064142
+    },
+    {
+        "content": "<p>OR ... oh</p>",
+        "id": 168633861,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064221
+    },
+    {
+        "content": "<p>does this <em>just</em> cause us to reject code</p>",
+        "id": 168633877,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064228
+    },
+    {
+        "content": "<p>that we would otherwise accept ...?</p>",
+        "id": 168633882,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064237
+    },
+    {
+        "content": "<p>/me thinks</p>",
+        "id": 168633884,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064238
+    },
+    {
+        "content": "<p>that could be a reason why no one has filed a bug about this</p>",
+        "id": 168633893,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064247
+    },
+    {
+        "content": "<p>I have about two weeks of experience working with MIR so I'm not gonna be very helpful I'm afraid :</p>",
+        "id": 168633896,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064252
+    },
+    {
+        "content": "<p>consider this example: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=6c1e275769db89f67966969f5bcee308\" target=\"_blank\" title=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=6c1e275769db89f67966969f5bcee308\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=6c1e275769db89f67966969f5bcee308</a></p>",
+        "id": 168633986,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064297
+    },
+    {
+        "content": "<p>(at this point I'm just talking out loud)</p>",
+        "id": 168633999,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064309
+    },
+    {
+        "content": "<p>but I'm gonna try to understand!</p>",
+        "id": 168634005,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064316
+    },
+    {
+        "content": "<p>there are two functions there</p>",
+        "id": 168634019,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064324
+    },
+    {
+        "content": "<p>Since I'm west coast US, and thus currently of sound mind</p>",
+        "id": 168634022,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064326
+    },
+    {
+        "content": "<p><code>to_refs1</code> and <code>to_refs2</code></p>",
+        "id": 168634030,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064330
+    },
+    {
+        "content": "<p>adapted from <a href=\"https://github.com/rust-lang/rust/issues/46589\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/46589\">#46589</a></p>",
+        "id": 168634040,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064339
+    },
+    {
+        "content": "<p>they are almost identical</p>",
+        "id": 168634069,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064359
+    },
+    {
+        "content": "<p><code>to_refs2</code> is just wrapping a unary tuple, <code>(T,)</code>, around the given typee</p>",
+        "id": 168634079,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064375
+    },
+    {
+        "content": "<p>Except you're borrowing a projection instead of a bare local</p>",
+        "id": 168634087,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064382
+    },
+    {
+        "content": "<p>that is a hack to force us to go down the non-local path</p>",
+        "id": 168634092,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064386
+    },
+    {
+        "content": "<p>and the compiler rejects <code>to_refs2</code></p>",
+        "id": 168634095,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064392
+    },
+    {
+        "content": "<p>because, if we <em>under-estimate</em> the kill-set for <code>borrows</code></p>",
+        "id": 168634194,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064444
+    },
+    {
+        "content": "<p>then we end up with a <em>over-approximate</em> fixed point, right?</p>",
+        "id": 168634217,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064460
+    },
+    {
+        "content": "<p>as in, we end up with a fixed point that has more borrows in it than is strictly necessary .... I <em>think</em></p>",
+        "id": 168634252,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064491
+    },
+    {
+        "content": "<p>but I'll definitely need to think more carefully about that</p>",
+        "id": 168634261,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064497
+    },
+    {
+        "content": "<p>(This is definitely getting into the weeds about the particular details of this one specific dataflow analysis)</p>",
+        "id": 168634282,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064512
+    },
+    {
+        "content": "<p>anyway I have enough information now to at least file a bug</p>",
+        "id": 168634335,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064525
+    },
+    {
+        "content": "<p>that I can follow up on in the future</p>",
+        "id": 168634346,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064536
+    },
+    {
+        "content": "<p>I would personally be interested in exploring the refactoring you spoke of earlier</p>",
+        "id": 168634365,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064558
+    },
+    {
+        "content": "<p>where you said you removed the <code>on_entry</code> from the API for <code>statement_effect</code></p>",
+        "id": 168634386,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064570
+    },
+    {
+        "content": "<p>(or at least I think that's what you said)</p>",
+        "id": 168634394,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064576
+    },
+    {
+        "content": "<p>and if this <code>Borrows</code> code is the only thing stopping you</p>",
+        "id": 168634423,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064605
+    },
+    {
+        "content": "<p>Yes, I tried that as part of <a href=\"https://github.com/rust-lang/rust/pull/61787\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/61787\">https://github.com/rust-lang/rust/pull/61787</a></p>",
+        "id": 168634424,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064607
+    },
+    {
+        "content": "<p>right, okay</p>",
+        "id": 168634449,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064629
+    },
+    {
+        "content": "<p>i'd be curious to explore doing it</p>",
+        "id": 168634499,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064646
+    },
+    {
+        "content": "<p>namely, I think an interesting experiment</p>",
+        "id": 168634511,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064656
+    },
+    {
+        "content": "<p>would be to change this <code>Borrows</code> code</p>",
+        "id": 168634523,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064665
+    },
+    {
+        "content": "<p>to stop reading <code>on_entry</code></p>",
+        "id": 168634530,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064668
+    },
+    {
+        "content": "<p>and <em>just</em> act as if <code>on_entry</code> is always the null-set.</p>",
+        "id": 168634537,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064680
+    },
+    {
+        "content": "<p>I'm speaking in particular about <code>kill_borrows_on_place</code></p>",
+        "id": 168634553,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064698
+    },
+    {
+        "content": "<p>But didn't we decide that <code>on_entry</code> <em>will</em> always be the null-set?</p>",
+        "id": 168634586,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064720
+    },
+    {
+        "content": "<p>but I can experiment with that on my own time tomorrow.</p>",
+        "id": 168634588,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064721
+    },
+    {
+        "content": "<blockquote>\n<p>But didn't we decide that <code>on_entry</code> <em>will</em> always be the null-set?</p>\n</blockquote>\n<p>I haven't proven that to myself yet</p>",
+        "id": 168634596,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064729
+    },
+    {
+        "content": "<p>Since <code>accumulates_intrablock_state</code> is <code>false</code></p>",
+        "id": 168634602,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064735
+    },
+    {
+        "content": "<p>I <em>hope</em> its the case</p>",
+        "id": 168634603,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064735
+    },
+    {
+        "content": "<p>except in <code>state_for_location</code> that is XD</p>",
+        "id": 168634616,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064745
+    },
+    {
+        "content": "<p>I'm going to file a bug about this business, and assign it to myself</p>",
+        "id": 168634698,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064775
+    },
+    {
+        "content": "<p>hopefully I will get a chance to look more into it tomorrow.</p>",
+        "id": 168634711,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561064786
+    },
+    {
+        "content": "<blockquote>\n<p>But didn't we decide that <code>on_entry</code> <em>will</em> always be the null-set?</p>\n</blockquote>\n<p>That's a royal we I guess</p>",
+        "id": 168634713,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064787
+    },
+    {
+        "content": "<p>Okay, thanks for having a look</p>",
+        "id": 168634721,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561064799
+    },
+    {
+        "content": "<p>okay, filed <a href=\"https://github.com/rust-lang/rust/issues/62007\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/62007\">#62007</a> as a follow-up issue.</p>",
+        "id": 168635996,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561065862
+    },
+    {
+        "content": "<p>I suppose I should have kept talking in here</p>",
+        "id": 168637518,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561067276
+    },
+    {
+        "content": "<p>since I suspect we're coming to similar conclusions at the same time</p>",
+        "id": 168637561,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561067289
+    },
+    {
+        "content": "<p>I am not at the moment sure exactly what the <code>local_map</code> holds.</p>",
+        "id": 168637587,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561067320
+    },
+    {
+        "content": "<p>but a cursory review of the code makes me think that it actually does cover all places that have a local at their base</p>",
+        "id": 168637593,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561067340
+    },
+    {
+        "content": "<p>(and therefore the idea has merit)</p>",
+        "id": 168637626,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561067390
+    },
+    {
+        "content": "<p>Yeah, all I saw was that it calls <code>base_local</code> which (I believe) iterates through all field projections until it finds the base</p>",
+        "id": 168637629,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561067392
+    },
+    {
+        "content": "<p>I need to hit the sack</p>",
+        "id": 168637687,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561067411
+    },
+    {
+        "content": "<p>(Not sure how derefs are handled)</p>",
+        "id": 168637695,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561067420
+    },
+    {
+        "content": "<p>but I'll try to look at this more tomorrow</p>",
+        "id": 168637697,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561067421
+    },
+    {
+        "content": "<p>I'll make the change I have in mind in the meantime</p>",
+        "id": 168637721,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561067447
+    },
+    {
+        "content": "<blockquote>\n<p>(Not sure how derefs are handled)</p>\n</blockquote>\n<p>currently, they're just another Projection</p>",
+        "id": 168637737,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561067463
+    },
+    {
+        "content": "<p>so they're handled the same way as <code>place.field</code> or <code>place[index]</code></p>",
+        "id": 168637784,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1561067504
+    },
+    {
+        "content": "<p>Okay, well I'll see what fails and maybe that will let you work a bit faster</p>",
+        "id": 168637892,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1561067589
+    },
+    {
+        "content": "<p>I started working on this again and have a functioning prototype in <a href=\"https://github.com/rust-lang/rust/issues/62547\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/62547\">#62547</a>.</p>",
+        "id": 170499692,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1562715601
+    }
+]

@@ -1,0 +1,1262 @@
+[
+    {
+        "content": "<p>So I've been pondering masks again.  Reminder of where the latest iteration stands:</p>\n<ul>\n<li>Operations that use masks use an \"opaque\" mask by default.  The layout is architecture-specific.</li>\n<li>An opt-in trait provides operations for specific mask layouts.</li>\n</ul>\n<p>A few things I don't like about this:</p>\n<ul>\n<li>The API is multiplied by the number of mask types (so at least 3).  Not pretty.</li>\n<li>The trait is a little hacky--is it confusing to import? Does it need to be sealed?</li>\n<li>Which mask layout should I be using?  It's not obvious.</li>\n</ul>\n<p>One thing that I realized (maybe it was obvious) that may help is that converting between masks is probably a very optimization-transparent operation--it's just sign extension!  I believe that if you do a comparison or other mask-producing function, and then immediately cast it to a different layout (e.g. llvm <code>sext</code>) the compiler likely does a good job optimizing it (e.g. using avx512 packed masks).</p>\n<p>My new proposal:</p>\n<ul>\n<li>No traits.  Comparisons etc only produce the \"opaque\" mask.</li>\n<li>Provide a set of layout-specified masks, such as <code>BitMask1&lt;N&gt;</code>, <code>BitMask8&lt;N&gt;</code>, <code>BitMask16&lt;N&gt;</code>.  These are all convertible between each other and the opaque mask.</li>\n<li>Provide masking operations (e.g. <code>BitAnd</code>) for all masks, both opaque and layout-specified.</li>\n</ul>\n<p>I believe this would minimize the API while still allowing weird mixed-layout tricks like avx512 packed masks and SSE movemask.  For example, if you want a packed comparison on x86-64 you may use <code>let mask: BitMask1 = a.lanes_eq(b).into()</code>.  On SSE this would hopefully optimize to cmpeq and movemask, and on avx512 it may choose to use cmpeq_mask.</p>",
+        "id": 224133838,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611715512
+    },
+    {
+        "content": "<p>bump (kinda got drowned out with PR talk yesterday)</p>",
+        "id": 224271664,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611795557
+    },
+    {
+        "content": "<p>From a purely API perspective that sounds like a better approach to me! Fewer traits is good</p>",
+        "id": 224273902,
+        "sender_full_name": "Ashley Mannix",
+        "timestamp": 1611797311
+    },
+    {
+        "content": "<p>Yeah my thoughts exactly.  We need to add a compiler intrinsic for sign extension up and down from packed masks to full masks before we can be positive it optimizes well. (But we need that intrinsic regardless of the API we choose, I think)</p>",
+        "id": 224274494,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611797852
+    },
+    {
+        "content": "<p>I'm optimistic (heh) though, because that's already how the backend produces masks anyway:<br>\n<a href=\"https://github.com/rust-lang/rust/blob/d3163e96553ae8cb1fca0e62084b124e8b98310b/compiler/rustc_codegen_ssa/src/base.rs#L118-L122\">https://github.com/rust-lang/rust/blob/d3163e96553ae8cb1fca0e62084b124e8b98310b/compiler/rustc_codegen_ssa/src/base.rs#L118-L122</a></p>",
+        "id": 224274731,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611798038
+    },
+    {
+        "content": "<p>My mind is somewhat murky at the moment for... reasons... but it seems like a cool idea and aligns with my interests so. <span aria-label=\"eyes\" class=\"emoji emoji-1f440\" role=\"img\" title=\"eyes\">:eyes:</span></p>",
+        "id": 224275854,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611799077
+    },
+    {
+        "content": "<p>A bit of a silly example, but I did confirm that llvm can see through successive <code>sext</code> and <code>trunc</code>: <a href=\"https://gcc.godbolt.org/z/1crd6v\">https://gcc.godbolt.org/z/1crd6v</a></p>",
+        "id": 224279582,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611803396
+    },
+    {
+        "content": "<p>if you remove the <code>--mattr</code> it uses movemask as expected, as well</p>",
+        "id": 224279630,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611803418
+    },
+    {
+        "content": "<p>i certainly like less types and less traits</p>",
+        "id": 224279913,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1611803809
+    },
+    {
+        "content": "<p>Okay, yes. Seeing the compilation work out makes this look plausible. <span aria-label=\"eyes\" class=\"emoji emoji-1f440\" role=\"img\" title=\"eyes\">:eyes:</span><br>\nThis looks pretty close to what I was gunning for in the first place, I think I need to dredge the backlog to see what the closest proposal to it was and what the objections were to it just to make sure those have been settled.</p>",
+        "id": 224390387,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611866822
+    },
+    {
+        "content": "<p>Yeah, I think it's close to what I originally wanted as well, I think it just didn't click that these are fairly transparent operations to the compiler</p>",
+        "id": 224390478,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611866876
+    },
+    {
+        "content": "<p>I think I'll open a PR adding mask pack and unpack intrinsics so we can actually use it</p>",
+        "id": 224390643,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611866949
+    },
+    {
+        "content": "<p>I know that the main objection to all the opaque-mask-centric proposals is generally that we basically have to be able to believe the compiler can handle it correctly, and also that x86, just to mess with us, never decided to consistently use one type of mask, but x86-targeted optimizations are inevitably going to be demanded.</p>",
+        "id": 224394384,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611868916
+    },
+    {
+        "content": "<p>My argument would be that LLVM already requires being able to see through zero extension, since all masks are &lt;N x i1&gt;</p>",
+        "id": 224394590,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611869015
+    },
+    {
+        "content": "<p>Agreed that it's relying heavily on the optimizer though (but what doesn't at this point, I guess)</p>",
+        "id": 224394724,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611869074
+    },
+    {
+        "content": "<p>hypothetical contention: but why CAN'T we specify masks as N x i8 or whatever if we want? :V</p>",
+        "id": 224394754,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611869093
+    },
+    {
+        "content": "<p>All of LLVM's mask instructions take a mask lane as an i1</p>",
+        "id": 224394813,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611869120
+    },
+    {
+        "content": "<p>oh, I see.</p>",
+        "id": 224394821,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611869126
+    },
+    {
+        "content": "<p>...well!</p>",
+        "id": 224394830,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611869131
+    },
+    {
+        "content": "<p>Which honestly makes sense and is really platform-agnostic</p>",
+        "id": 224394845,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611869141
+    },
+    {
+        "content": "<p>It's just weird when it comes to memory layout</p>",
+        "id": 224394878,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611869153
+    },
+    {
+        "content": "<p>I see.<br>\nHow did that not come up in previous discussions?</p>",
+        "id": 224396475,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611870074
+    },
+    {
+        "content": "<p>I'm pretty sure I mentioned (in the thread where I argued for including opaque masks) that LLVM IR operates only on i1 vectors for masks...</p>",
+        "id": 224417269,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1611881132
+    },
+    {
+        "content": "<p>Yeah I think we discussed it, probably just got lost in the discussion</p>",
+        "id": 224418000,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611881756
+    },
+    {
+        "content": "<p>the issue is it's really trivial to come up with examples where the optimizer completely falls on its face to a ridiculous extent with &lt;N x i1&gt; masks. like, whenever stuff isn't fully inlined and a mask is returnd across a function call boundary.</p>",
+        "id": 224425374,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611888787
+    },
+    {
+        "content": "<p>That was definitely a bitcast issue</p>",
+        "id": 224425434,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611888849
+    },
+    {
+        "content": "<p>If you <code>bitcast</code> to u8 or similar the element alignment isn't ambiguous anymore and it gets the layout correct</p>",
+        "id": 224425472,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611888922
+    },
+    {
+        "content": "<p>so basically the issue can be handled but has to be handled in LLVM codegen?</p>",
+        "id": 224430452,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611895380
+    },
+    {
+        "content": "<p>I think it's not just codegen, it's actually in the function signatures.  We don't really want to pass vectors of i1s between functions, we want to pass vectors of u8s that we happen to treat as i1s</p>",
+        "id": 224430513,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611895468
+    },
+    {
+        "content": "<p>i1 has byte alignment (usually?)</p>",
+        "id": 224430531,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611895516
+    },
+    {
+        "content": "<p>LLVM doesn't really make it clear, but it appears that the calling convention is that all vectors regardless of size have at a minimum byte aligned elements</p>",
+        "id": 224430616,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611895637
+    },
+    {
+        "content": "<p>e.g. you could bytecast &lt;2 x i4&gt; to a single i8 but at a call site it's 2 bytes</p>",
+        "id": 224430675,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611895706
+    },
+    {
+        "content": "<p>An alternative way of saying it is at call sites, it treats vectors like any regular array or struct</p>",
+        "id": 224430756,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611895821
+    },
+    {
+        "content": "<p>huh, wild.</p>",
+        "id": 224431514,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611896977
+    },
+    {
+        "content": "<blockquote>\n<p>We don't really want to pass vectors of i1s between functions, we want to pass vectors of u8s that we happen to treat as i1s</p>\n</blockquote>\n<p>I'm kind of skeptical this solves the issue, to be honest (I could be convinced, but need examples). vector-of-u8 still often won't be to be the actual native mask representation, and in practice needs conversion to/from</p>",
+        "id": 224526431,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611950942
+    },
+    {
+        "content": "<p>What do you mean by native mask?</p>",
+        "id": 224526628,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611951042
+    },
+    {
+        "content": "<p>A vector of u8s is negligibly different from some number of k registers in avx512, for example (and llvm does in fact use them when appropriate)</p>",
+        "id": 224526822,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611951131
+    },
+    {
+        "content": "<p>This is still a somewhat contrived example, but this packs two k registers together to produce a packed vector:</p>",
+        "id": 224527834,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611951709
+    },
+    {
+        "content": "<p><a href=\"https://gcc.godbolt.org/z/6K4YYb\">https://gcc.godbolt.org/z/6K4YYb</a></p>",
+        "id": 224527839,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611951711
+    },
+    {
+        "content": "<p>Here is the same example, but without the bitcast:<br>\n<a href=\"https://gcc.godbolt.org/z/9hrPrY\">https://gcc.godbolt.org/z/9hrPrY</a><br>\nLLVM forces each i1 to be byte aligned at the function call boundary</p>",
+        "id": 224528172,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611951874
+    },
+    {
+        "content": "<p>(it's suprisingly good at doing that efficiently, too)</p>",
+        "id": 224528226,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611951905
+    },
+    {
+        "content": "<p>It generated much worse code for non-avx512 though. Most code currently is compiled with default settings, and I think its realistic to assume that will continue, and so whatever we choose needs to work well for the for SSE2-default you get with default-settings x86_64.</p>",
+        "id": 224530285,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611953032
+    },
+    {
+        "content": "<p><a href=\"https://gcc.godbolt.org/z/Ga9c4v\">https://gcc.godbolt.org/z/Ga9c4v</a></p>",
+        "id": 224530463,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611953118
+    },
+    {
+        "content": "<p>Here's the non-avx512 variant</p>",
+        "id": 224530471,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611953126
+    },
+    {
+        "content": "<p>This looks pretty good to me?</p>",
+        "id": 224530479,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611953131
+    },
+    {
+        "content": "<p>It packs all of the results together and movemasks them to produce the packed mask</p>",
+        "id": 224530588,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611953176
+    },
+    {
+        "content": "<p>I doubt there is a better way of doing that?  Remember, this won't be the default mask on x86-64, those will still be full lane-width masks</p>",
+        "id": 224530661,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611953216
+    },
+    {
+        "content": "<p>This is more representative of the default mask mode on x86-64: <a href=\"https://gcc.godbolt.org/z/3hbWhx\">https://gcc.godbolt.org/z/3hbWhx</a></p>",
+        "id": 224530814,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611953292
+    },
+    {
+        "content": "<blockquote>\n<p>Remember, this won't be the default mask on x86-64, those will still be full lane-width masks</p>\n</blockquote>\n<p>I guess I misunderstood what you were saying earlier then</p>",
+        "id": 224530821,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611953297
+    },
+    {
+        "content": "<p>Oh sorry.  On x86-64/arm/aarch64/etc a mask will still be by default lane-width</p>",
+        "id": 224530922,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611953347
+    },
+    {
+        "content": "<p>You only get these if you explicitly use <code>Into::into</code> to get a packed layout mask</p>",
+        "id": 224530982,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611953380
+    },
+    {
+        "content": "<p>You can also use <code>Into::into</code> to get the unpacked layout mask, but that is a nop on x86-64</p>",
+        "id": 224531060,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611953405
+    },
+    {
+        "content": "<p>I feel like, for x86-64, we basically have three actual targets:<br>\nbaseline<br>\nAVX2 (\"any recent processor\")<br>\nAVX512 (\"really recent high-performance things\")</p>",
+        "id": 224538330,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611956890
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281757\">@Jubilee</span> <a href=\"https://www.phoronix.com/scan.php?page=news_item&amp;px=GCC-11-x86-64-Feature-Levels\">https://www.phoronix.com/scan.php?page=news_item&amp;px=GCC-11-x86-64-Feature-Levels</a></p>",
+        "id": 224539064,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611957327
+    },
+    {
+        "content": "<p>You're basically describing the v1, v3, and v4 levels here I think</p>",
+        "id": 224539202,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611957388
+    },
+    {
+        "content": "<p>I think generally we can assume up to sse4.2 even if it's not on by default</p>",
+        "id": 224539337,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1611957478
+    },
+    {
+        "content": "<p>yeah, sse4 and avx are \"extremely common\", avx2 is also \"usual\", though not always present</p>",
+        "id": 224545716,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1611960019
+    },
+    {
+        "content": "<p><span aria-label=\"eyes\" class=\"emoji emoji-1f440\" role=\"img\" title=\"eyes\">:eyes:</span></p>",
+        "id": 224552394,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611964806
+    },
+    {
+        "content": "<p>yeah, I described v3 because most of the computers I've used lately are like... either v3 or verrry late v2, and I mostly use potatos. So honestly I'm not surprised I suddenly had a breakage spree, I just am sad.</p>",
+        "id": 224556331,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1611968228
+    },
+    {
+        "content": "<p>v3 is also important since the currently highest-performance x86 processors (AMD Ryzen 5950X or AMD Threadripper 3990X) both don't support AVX512</p>",
+        "id": 224616482,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612057700
+    },
+    {
+        "content": "<p>Yep! That is Very Much part of the reason I was thinking about AVX2 specifically.</p>",
+        "id": 224619793,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612063859
+    },
+    {
+        "content": "<p>Agreed that v3 is probably where most CPUs are.  I've only used one consumer device with AVX512...</p>",
+        "id": 224619846,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612063926
+    },
+    {
+        "content": "<p>it seems likely to me that avx512 will stay as a server hardware thing tbh. it's been around for a while and hasn't moved over except in rare cases.</p>",
+        "id": 224620949,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612066072
+    },
+    {
+        "content": "<p>Yeah, I expect that whatever comes next, we won't be just going forward into a \"level 5\". Much like certain err, other failed experiments from the past.<br>\nlookin' at you MMX. ( but also there were a few other abortive extensions from AMD as well. )</p>",
+        "id": 224665149,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612127841
+    },
+    {
+        "content": "<p>Another thought on mask layout, do we actually need masks that have particular layouts?  Or should masks just have a few methods like to_int/from_int and to_bits/from_bits</p>",
+        "id": 224665765,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612128700
+    },
+    {
+        "content": "<p>I think within a particular function, mask layout almost doesn't matter since the compiler is allowed to do whatever it wants (e.g. use avx512 k registers even if you're using full-width masks).  It only really matters when you are writing masks to memory (which is probably rare with SIMD, even non-inlined functions are rare)</p>",
+        "id": 224665923,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612128884
+    },
+    {
+        "content": "<p>There would be nothing preventing you from writing a \"mask\" type that has a particular layout if we provide those functions, but we can avoid type bloat that almost no one needs</p>",
+        "id": 224666051,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612129075
+    },
+    {
+        "content": "<p>(and of course they could be added in the future)</p>",
+        "id": 224666105,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612129119
+    },
+    {
+        "content": "<p>From my perspective, it's a sort of weird space between core::arch and core::simd</p>",
+        "id": 224666106,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612129120
+    },
+    {
+        "content": "<p>what we really want to be able to do is allow people to convert it explicitly into the machine mask type.</p>",
+        "id": 224670415,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612133243
+    },
+    {
+        "content": "<p>Agreed, I think</p>",
+        "id": 224670630,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612133534
+    },
+    {
+        "content": "<p>I think that's what to_int and to_bits would do, more or less</p>",
+        "id": 224670775,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612133800
+    },
+    {
+        "content": "<p>to_bits of course is still problematic because of the const bound</p>",
+        "id": 224671009,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612134135
+    },
+    {
+        "content": "<p><a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=a562af6ab4f2284ebb9322971f1cbd12\">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=a562af6ab4f2284ebb9322971f1cbd12</a></p>",
+        "id": 224671594,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612134988
+    },
+    {
+        "content": "<p>I suppose something like this may be okay.  Only the implementation of the trait requires an unstable feature, the trait itself is fairly standard rust</p>",
+        "id": 224671622,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612135050
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"229517\">@Jacob Lifshay</span> question about RISC-V, if you had a non-power of two vector would a mask be some number of bytes with the last byte partially empty (e.g. 2 bytes for a vector of 10 u8s)?</p>",
+        "id": 224966954,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612319894
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"312331\">Caleb Zulawski</span> <a href=\"#narrow/stream/257879-project-portable-simd/topic/Masks.20(take.203.3F.204.3F)/near/224966954\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"229517\">Jacob Lifshay</span> question about RISC-V, if you had a non-power of two vector would a mask be some number of bytes with the last byte partially empty (e.g. 2 bytes for a vector of 10 u8s)?</p>\n</blockquote>\n<p>I don't actually know.</p>",
+        "id": 224977532,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612332692
+    },
+    {
+        "content": "<p>On SimpleV, masks are always 64-bit integers where the bits are matched to vector elements from the LSB to the MSB, the bits past the number of used vector elements are just ignored</p>",
+        "id": 224977654,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612332821
+    },
+    {
+        "content": "<p>Hm, that makes sense</p>",
+        "id": 224977876,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612333012
+    },
+    {
+        "content": "<p>So the issue that I am seeing here is that the memory layout of masks will be inherently architecture specific.  SimpleV uses 64 bits, AVX-512 uses 16 bits, and just to make things more confusing AVX-512BW uses 64 bits</p>",
+        "id": 224978003,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612333121
+    },
+    {
+        "content": "<p>Even if we can manage to get a type that uses a packed representation, I'm not sure it's possible to get the layout correct</p>",
+        "id": 224978034,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612333160
+    },
+    {
+        "content": "<p>So then the question becomes does the memory layout actually matter.  Do we care what a mask looks like in memory rather than a register (and is that a valid question for RISC-V or SimpleV?)</p>",
+        "id": 224978235,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612333338
+    },
+    {
+        "content": "<p>That may sound like a silly question but my point is that the layout only matters in 2 scenarios I can think of, when you run out of SIMD registers and push them to memory (undesirable) or when you push the SIMD registers to regular registers for a function call (also undesirable, I think).  Within a single function LLVM doesn't particularly care what the layout is and will optimize it</p>",
+        "id": 224978388,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612333501
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> curious if you have anything to add about that for x86-64</p>",
+        "id": 224978473,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612333578
+    },
+    {
+        "content": "<blockquote>\n<p>Do we care what a mask looks like in memory rather than a register (and is that a valid question for RISC-V or SimpleV?)</p>\n</blockquote>\n<p>I mean the answer is: yes certain algorithms need certain mask layouts for lookup tables and such, which will be in memory. IDK if you can really fully avoid having to represent both bit masks and wide masks because of this. (Even in SSE2 I've done lots of bitmask stuff, but with the very big caveat that it's wide=&gt;bit and never the reverse)...</p>\n<p>Note that I haven't been following closely, so I'm possibly missing the point here... Are we talking about reducing the number of masks in the API? or what's our problem with it?</p>",
+        "id": 224982996,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612338180
+    },
+    {
+        "content": "<p>So, if <em>is</em> the complexity... well, I do have some thoughts here I kicked around for a while ago. Since I was actively pinged I'll put them down despite them possibly not being on topic (people talking past eachother is normal for the project-portable-simd mask thread anyway). Basically it comes down to this:</p>\n<ol>\n<li>\n<p>The overhead of converting between wide masks and bitmasks on arches/ISAs that can natively use bitmasks was really quite low. Like, IIRC on the order of 1 or 2 fairly cheap instructions or something<br>\n    a. for example, wide=&gt;bit is just comparison vs a constant, and bit=&gt;wide is a masked store or similar. (there are def other ways to do these too, that may be even better)<br>\n    b. That said, perhaps I'm missing something here...</p>\n</li>\n<li>\n<p>Conversely, the overhead of converting between wide masks and bitmasks where native bitmasks <em>aren't</em> supported is... kinda awful.<br>\n    a. Going <em>to</em> a bitmask is not so bad. On x86 has movemask, ppc has some bit permute thing... On Neon it kinda sucks (need to use multiple steps of shift + add or something) but... well, it's still basically straightforward enough (just maybe 10x more costly)<br>\n    b. Sadly, bitmask to wide mask basically needs native bitmask ops to be efficient at all (I suspect there's a few tricks you can do with more obscure x86 or neon instructions to come up with a better techinque for it than \"scalar iteration over each bit\", but honestly it's not coming to mind). That said, nobody's suggesting we make widemask isas work with bitmasks any more than they have to.</p>\n</li>\n<li>\n<p>There's a similar story for going between other representations and your desired mask repr. For example: converting in-memory &lt;i1 x N&gt; to/from a native mask type:<br>\n    a. if native is a bitmask would be essentially the exact same as the operations i noted in 1a.<br>\n    b. if it's not... well, bytemask&lt;=&gt;widemask is a lot more tractable than the bitmask case, but it was still <em>truly terrible</em>, and probably would be everwhere (well, ppc can probably do both directions okay actually).</p>\n</li>\n</ol>\n<p>This just makes me feel like in general it's probably something of a lowest-common-denominator sitch. ISAs that like wide masks <em>really</em> want to keep the masks wide in the exact bit width they started with, and do few (ideally no) conversions.</p>\n<p>ISAs that like bitmasks tend to be able to convert more easily, and I strongly suspect that it's much easier an optimizer (even a naive one) to see through the conversions in this case.</p>\n<p>That said, while I don't think I've covered it this explicitly before, i definitely have said most of these things in one of these threads.</p>",
+        "id": 224983102,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612338274
+    },
+    {
+        "content": "<p>Okay, let me try to clarify what the problem is.</p>\n<p>The first and most fundamental issue is that Rust doesn't provide any good mechanism for making the single bit mask type.  I've played around with it a lot but there just isn't a good solution.  There are ways to just barely get it working but it requires const_evaluatable_checked which seems far from complete.</p>\n<p>The next problem is that even if we do manage to get single-bit masks working, the native mask type is different for different architectures.  A simple <code>[u8; BYTES]</code> is the best we can do.</p>\n<p>One option is to instead of providing multiple mask layouts, simply make masks convertible to and from integers.  We can implement <code>Into</code> for all masks up to 128 width and convert them to all integers up to u128.  If we had arbitrary sized integers it would actually solve this problem, just convert to an integer with the same number of bits as lanes!  But for now this may be the best we can do.</p>\n<p>This would mean that when using AVX-512 or SimpleV, if you let a mask go to memory without converting it to an integer, you will probably not end up with the behavior you want.  However if you call <code>into</code> before going to memory, you should end up with the layout you expect.</p>",
+        "id": 225031482,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612366212
+    },
+    {
+        "content": "<p>If we really wanted to, we could look to see what it would take to get arbitrary sized integers into Rust <span class=\"user-mention\" data-user-id=\"281757\">@Jubilee</span> <span aria-label=\"upside down\" class=\"emoji emoji-1f643\" role=\"img\" title=\"upside down\">:upside_down:</span></p>",
+        "id": 225032084,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612366487
+    },
+    {
+        "content": "<p>How large would the integers need to be? even for 512-bit vectors with 8 bit elements, that's still 64 bits... Or does variable mean dynamically sized?</p>",
+        "id": 225055496,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612375545
+    },
+    {
+        "content": "<p>Well to support common cases we could just do everything that works up to u128.  You can absolutely make vectors larger than that (you could have a vector with 2^15 lanes)</p>",
+        "id": 225056022,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612375766
+    },
+    {
+        "content": "<p>When I say variable, I mean there have been proposed features to make something like u3 or u7 or u19 possible.</p>",
+        "id": 225056463,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612375944
+    },
+    {
+        "content": "<p>That would be very convenient here, if we could just use an integer with the same number of bits as we have lanes</p>",
+        "id": 225056513,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612375970
+    },
+    {
+        "content": "<p>/me twiddles thumbs, hmming.</p>",
+        "id": 225056709,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612376043
+    },
+    {
+        "content": "<p>I guess the summary is that with bitmasks we are trying to push the limits of what const generics support so, we either need to punt on the feature (trying not to preclude them in the future) or implement _something_ new in the compiler</p>",
+        "id": 225057358,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612376325
+    },
+    {
+        "content": "<p>Or compromise on them, like only implementing them for a few integers (and hopefully this doesn't preclude a better implementation in the future)</p>",
+        "id": 225057481,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612376379
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rfcs/pull/2581\">https://github.com/rust-lang/rfcs/pull/2581</a></p>",
+        "id": 225058052,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612376582
+    },
+    {
+        "content": "<p>I think we might have a better reason to add arbitrary-sized integers if we combine SIMD bitmasks and C bitfields as aadditiomal motivating reasons</p>",
+        "id": 225058333,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612376678
+    },
+    {
+        "content": "<p>Well, after your PR lands, we'll only have compiler support for 2^(1..=15) element vectors, which is probably well beyond what we need on any practical level at this red hot second.</p>",
+        "id": 225058334,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612376679
+    },
+    {
+        "content": "<p>My concern is more about making sure the API doesn't preclude a better implementation in the future</p>",
+        "id": 225058466,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612376730
+    },
+    {
+        "content": "<p>Right.</p>",
+        "id": 225058616,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612376781
+    },
+    {
+        "content": "<p>I would also like to try to avoid const_evaluatable_checked at all costs at this point</p>",
+        "id": 225058712,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612376824
+    },
+    {
+        "content": "<p>Particularly because it bleeds into the public API</p>",
+        "id": 225058793,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612376857
+    },
+    {
+        "content": "<blockquote>\n<p><a href=\"https://github.com/rust-lang/rfcs/pull/2581\">https://github.com/rust-lang/rfcs/pull/2581</a></p>\n</blockquote>\n<p>I kind of like the idea of a Bit type mentioned in one of the comments.  Even if we can get that into unstable, we can hide it behind a mask wrapper</p>",
+        "id": 225058996,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612376942
+    },
+    {
+        "content": "<p>what about using the rustc private attributes to make a u1, u2, and u4 that are range-limited newtype around u8, then we'd have all the types we need for up to 128-bit masks assuming lane-counts are powers of 2. When we eventually get built-in arbitrary-sized integers, the u1, u2, and u4 types can then become type aliases of uint&lt;1&gt;, uint&lt;2&gt;, and uint&lt;4&gt;</p>",
+        "id": 225059218,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377017
+    },
+    {
+        "content": "<p>Trying to be realistic for a moment here,<br>\nI need to doublecheck SVE2 but I believe it does enable non-2^N vector sizes, but still has a limiter of 2048 bits wide, which makes having non-2^N vectors more important, relatively speaking, than having ones of indefinite size.</p>",
+        "id": 225059368,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612377075
+    },
+    {
+        "content": "<p>...yep.</p>",
+        "id": 225059388,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612377083
+    },
+    {
+        "content": "<p>except that on SVE, cpus are only guaranteed to support 128 or 256-bits (iirc), all the larger sizes are not guaranteed to be supported</p>",
+        "id": 225059660,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377186
+    },
+    {
+        "content": "<p>Yeah, one issue is non-power-of-two vectors (which right now is only limited because of cranelift)</p>",
+        "id": 225059674,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377191
+    },
+    {
+        "content": "<p>I would also like to use const generics from the start if possible, so we can avoid changing trait implementations in the future</p>",
+        "id": 225059750,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377233
+    },
+    {
+        "content": "<p>Though perhaps we can be careful with it</p>",
+        "id": 225059805,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377243
+    },
+    {
+        "content": "<p>what about just stating that if you want to use SVE, you have to use llvm?</p>",
+        "id": 225059844,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377262
+    },
+    {
+        "content": "<p>Sorry that's not exactly the problem.  What I mean is that in the near future you may be able to use e.g. <code>SimdU8&lt;5&gt;</code> and if we use explicitly sized integers rather than something generic it falls apart there</p>",
+        "id": 225060021,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377341
+    },
+    {
+        "content": "<p>that can be done like array lengths were, have a sealed trait <code>IsSupportedPowerOf2&lt;LEN&gt;</code> impled for <code>()</code> for only 1, 2, 4, 8, 16, 32, 64, and 128.</p>",
+        "id": 225060038,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377354
+    },
+    {
+        "content": "<p>Right but what is the Into trait implemented on</p>",
+        "id": 225060149,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377376
+    },
+    {
+        "content": "<p>Hm</p>",
+        "id": 225060188,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377392
+    },
+    {
+        "content": "<p>Maybe it's fine</p>",
+        "id": 225060215,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377409
+    },
+    {
+        "content": "<p>trait <code>EnoughBitsToConvertTo&lt;Target  BITS&gt;</code></p>",
+        "id": 225060251,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377430
+    },
+    {
+        "content": "<p>I would like our eventual plan to be to expose bitmask conversion from/to built-in uint&lt;N&gt;</p>",
+        "id": 225060609,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377571
+    },
+    {
+        "content": "<p>Yeah, agreed</p>",
+        "id": 225060902,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377666
+    },
+    {
+        "content": "<p>I am at this point convinced that, based on our amount of uncertainty and discussion, breaking our mask API at some point as we rework it is inevitable and in fact almost desirable, and that we should ship the mask API under a separate feature gate, so that shipping core::simd does not depend on the entirety of things being stable.</p>",
+        "id": 225060972,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612377694
+    },
+    {
+        "content": "<p>My only concern with that is that simd is almost unusable without masks, and we'll never stabilize</p>",
+        "id": 225061096,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377731
+    },
+    {
+        "content": "<p>initial arbitrary-sized integer implementation: <a href=\"https://github.com/rust-lang/rfcs/pull/2581#issuecomment-730709707\">https://github.com/rust-lang/rfcs/pull/2581#issuecomment-730709707</a></p>",
+        "id": 225061143,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377760
+    },
+    {
+        "content": "<p>...does linear algebra depend on masking?</p>",
+        "id": 225061272,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612377824
+    },
+    {
+        "content": "<p>the opaque mask type should be stable...just the conversions to bitmasks are unstable</p>",
+        "id": 225061367,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377849
+    },
+    {
+        "content": "<p>Okay, I suppose \"do math fast\" doesn't need it. Which is all I need it for usually. But it's crucial for many applications</p>",
+        "id": 225061420,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377869
+    },
+    {
+        "content": "<p>well we're at 100% unstable right now so that is wishful thinking. :^)</p>",
+        "id": 225061459,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612377883
+    },
+    {
+        "content": "<p>Right, my contention is that atm we should get \"let's do math fast\" on stable. :^)</p>",
+        "id": 225061551,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612377916
+    },
+    {
+        "content": "<p>It's hard to stabilize the opaque mask when were not sure if the type will need bounds or not. Currently with const_evaluatable_checked it needs bounds</p>",
+        "id": 225061552,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612377917
+    },
+    {
+        "content": "<p>that would be at the point where the main simd feature gate is stable but masks are not yet</p>",
+        "id": 225061598,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377933
+    },
+    {
+        "content": "<p>can we have a trait that encapulates those bounds?</p>",
+        "id": 225061755,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612377980
+    },
+    {
+        "content": "<p>Well, my point was more that I'm unsure if the end result will have bounds or not. If we use generic integers it likely will not (or will have very different bounds)</p>",
+        "id": 225061878,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612378031
+    },
+    {
+        "content": "<p>But part of the problem is a lot of the remaining math (like trig) require masks to implement</p>",
+        "id": 225061986,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612378064
+    },
+    {
+        "content": "<p>Right, we'll have a lot of the API blocked by the mask feature gate.</p>",
+        "id": 225062159,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612378121
+    },
+    {
+        "content": "<p>if we turn out to not need bounds we can just impl the encapulating trait for all sizes, which would avoid needing anyone to mention it anymore, but they can if they like</p>",
+        "id": 225062175,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612378127
+    },
+    {
+        "content": "<p>So the problem is that with const_evaluatable_checked a lot of the implementation details leak, so it's not even clear what that trait would look like</p>",
+        "id": 225062294,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612378176
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">trait</span><span class=\"w\"> </span><span class=\"n\">EncapsulatedBounds</span><span class=\"o\">&lt;</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">LEN</span>: <span class=\"kt\">usize</span><span class=\"o\">&gt;</span>: <span class=\"nc\">MustBeTrue</span><span class=\"o\">&lt;</span><span class=\"p\">{</span><span class=\"n\">LEN</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"p\">}</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 225062611,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612378283
+    },
+    {
+        "content": "<p>like C++'s enable_if</p>",
+        "id": 225062687,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612378315
+    },
+    {
+        "content": "<p>I wish the bound was that simple</p>",
+        "id": 225062695,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612378319
+    },
+    {
+        "content": "<p>The problem isn't limiting to a size unfortunately</p>",
+        "id": 225062748,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612378330
+    },
+    {
+        "content": "<p>It's ensuring that a particular implementation detail const fn doesn't panic</p>",
+        "id": 225062807,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612378356
+    },
+    {
+        "content": "<p>the expression can be replaced, the key part is the bound is part of the super-traits so is implicitly added</p>",
+        "id": 225062836,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612378374
+    },
+    {
+        "content": "<p>Yeah, you may be able to do it with a supertrait.</p>",
+        "id": 225062935,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612378423
+    },
+    {
+        "content": "<p>also <span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> you may have said it before but I do appreciate you taking the time to lay it all out again like that, because I think a lot of what we were missing was precisely that kind of synthesis. It's a lot easier to see the obstacles here, now that you've listed them off.</p>",
+        "id": 225064480,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612379012
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"229517\">@Jacob Lifshay</span> here's the bound requirement for making bitmasks: <a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=9308b5824f77cca83b4736a65cee698c\">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=9308b5824f77cca83b4736a65cee698c</a>.  I really can't come up with a way of hiding it behind a trait</p>",
+        "id": 225079742,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612385567
+    },
+    {
+        "content": "<p>would this work:<br>\n<a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=f2817276e475392d89dfa8a4723c9327\">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=f2817276e475392d89dfa8a4723c9327</a></p>",
+        "id": 225085467,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1612387878
+    },
+    {
+        "content": "<p>Unfortunately that doesn't really hide the bound in any way: <a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=09f21b104e7f96da31a0b3c28bd03830\">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=09f21b104e7f96da31a0b3c28bd03830</a></p>",
+        "id": 225086463,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612388307
+    },
+    {
+        "content": "<p>It seems like we should focus on trying to make it easy to use things in accord with the bound rather than trying to obscure the bound?</p>",
+        "id": 225087174,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612388623
+    },
+    {
+        "content": "<p>Well, one issue with the bound is that it crashes rustdoc :)</p>",
+        "id": 225087268,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612388658
+    },
+    {
+        "content": "<p>But I think that's the point, there isn't really any way to make it easier.  There is no way to modify how the bound is exposed afaik</p>",
+        "id": 225087348,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612388699
+    },
+    {
+        "content": "<p>well you mentioned using a const fn bound and oof ow.</p>",
+        "id": 225087930,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612388950
+    },
+    {
+        "content": "<p>Ok, <span class=\"user-mention\" data-user-id=\"229517\">@Jacob Lifshay</span> you inspired me and I got it working with <em>no</em> bounds (!)</p>",
+        "id": 225090508,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390145
+    },
+    {
+        "content": "<p><a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=2ab588032db773ce90e9d2e40ae64703\">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=2ab588032db773ce90e9d2e40ae64703</a></p>",
+        "id": 225090522,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390150
+    },
+    {
+        "content": "<p>Unfortunately this doesn't work:</p>\n<div class=\"codehilite\"><pre><span></span><code>pub struct Mask16&lt;const LANES: usize&gt;(SimdU8&lt;{ MaskHelper::&lt;LANES&gt;::BITMASK_BYTES }&gt;)\nwhere\n    MaskHelper&lt;LANES&gt;: Sized;\n</code></pre></div>",
+        "id": 225090991,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390406
+    },
+    {
+        "content": "<p>wait what</p>",
+        "id": 225091027,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612390441
+    },
+    {
+        "content": "<p>I think I just punted the entire problem by not trying to hide the width of the bitmask</p>",
+        "id": 225091113,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390479
+    },
+    {
+        "content": "<p>And instead providing a helper that tells you how wide it is</p>",
+        "id": 225091133,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390494
+    },
+    {
+        "content": "<p>oh.</p>",
+        "id": 225091135,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612390495
+    },
+    {
+        "content": "<p>we <em>could</em> make a type like <code>struct Mask16&lt;const LANES: usize, const BYTES: usize&gt;(...)</code> if we really wanted</p>",
+        "id": 225091270,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390565
+    },
+    {
+        "content": "<p>and then I think maybe it would work?</p>",
+        "id": 225091287,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390575
+    },
+    {
+        "content": "<p>deranged question: is there a reason to have the \"full mask\" not be a SimdU{8,16, 32...}?</p>",
+        "id": 225091408,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612390624
+    },
+    {
+        "content": "<p>no that would be fine, but obviously the number of bytes changes</p>",
+        "id": 225091877,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390780
+    },
+    {
+        "content": "<p>oh wait I misread</p>",
+        "id": 225091950,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390807
+    },
+    {
+        "content": "<p>well in LLVM they're interpreted as signed, you can always transmute them</p>",
+        "id": 225091971,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390824
+    },
+    {
+        "content": "<p>the reason is that packing and unpacking the masks is sign extension and truncation</p>",
+        "id": 225091997,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390844
+    },
+    {
+        "content": "<p>okay so is this disgusting? you could define masks as</p>",
+        "id": 225092236,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612390966
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>pub struct Mask&lt;const LANE_WIDTH: usize, const BYTES: usize&gt; {\n    mask: SimdU8&lt;BYTES&gt;,\n    _: [(); LANE_WIDTH],\n}\n</code></pre></div>",
+        "id": 225092403,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612391047
+    },
+    {
+        "content": "<p>you could get weird pathological cases like bizarre lane widths, or lane widths larger than the number of bytes in the mask</p>",
+        "id": 225092449,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612391078
+    },
+    {
+        "content": "<p>but you could implement a trait over scalars that tells you the lane width (which on SimpleV etc would always be 1)</p>",
+        "id": 225092904,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612391294
+    },
+    {
+        "content": "<p>treating the (sigh) bitfields?? really??? as I{whatever} would not be the end of the world, even if it's against Rust idiom.</p>",
+        "id": 225093025,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612391374
+    },
+    {
+        "content": "<p>I suppose you could instead of specifying LANE_WIDTH, just specify LANES</p>",
+        "id": 225093179,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612391451
+    },
+    {
+        "content": "<p>it's the same idea</p>",
+        "id": 225093186,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612391453
+    },
+    {
+        "content": "<p>but yeah, it's bit-field-ish</p>",
+        "id": 225093199,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612391460
+    },
+    {
+        "content": "<p>So... A really dumb suggestion, maybe, but solves nearly all of our issues</p>",
+        "id": 225102287,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397357
+    },
+    {
+        "content": "<p>What if we just extremely over-pad packed masks and use [u8; LANES]</p>",
+        "id": 225102326,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397397
+    },
+    {
+        "content": "<p>sure why not.</p>",
+        "id": 225102425,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612397438
+    },
+    {
+        "content": "<p>And maybe push for generic integers in the meantime?</p>",
+        "id": 225102474,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397471
+    },
+    {
+        "content": "<p>Yeah.</p>",
+        "id": 225102495,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612397488
+    },
+    {
+        "content": "<p>alternatively, cap vectors at 128 lanes?</p>",
+        "id": 225102668,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397639
+    },
+    {
+        "content": "<p>and just use u128 always?</p>",
+        "id": 225102717,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397646
+    },
+    {
+        "content": "<p>that's still quite a few lanes</p>",
+        "id": 225102742,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397668
+    },
+    {
+        "content": "<p>or even just cap at 64 lanes, since many architectures seem to use that as the mask size typically</p>",
+        "id": 225102761,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397692
+    },
+    {
+        "content": "<p>Yeah AVX512 pretty explicitly uses that.</p>",
+        "id": 225102800,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612397721
+    },
+    {
+        "content": "<p>AVX-512 is actually only 16 bits</p>",
+        "id": 225102815,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397732
+    },
+    {
+        "content": "<p>oh?</p>",
+        "id": 225102817,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612397735
+    },
+    {
+        "content": "<p>AVX-512BW is 64</p>",
+        "id": 225102820,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397737
+    },
+    {
+        "content": "<p>...I think it might've been the</p>",
+        "id": 225102826,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612397740
+    },
+    {
+        "content": "<p>...yeah that.</p>",
+        "id": 225102830,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612397742
+    },
+    {
+        "content": "<p>So, in keeping with the spirit of poasting about how we should keep in mind what limitations are coming from where,<br>\nI think u64 as our current bitmask type sounds good.<br>\nBut we should probably chase down all the actual different constraints we are encountering, what instructions use what.</p>",
+        "id": 225102985,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612397830
+    },
+    {
+        "content": "<p>I suppose if we make a <code>Mask</code> trait we could just implement it over all integers? Not that I really wanted to use a trait here... but it would work</p>",
+        "id": 225103099,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397885
+    },
+    {
+        "content": "<p>I just don't want to end up in the situation where in the future we want to expand the size of the bitmask, and we break a bunch of existing code by making it really slow</p>",
+        "id": 225103177,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612397971
+    },
+    {
+        "content": "<p>So, limiting to 64 lanes actually worked really well.  Just like arrays pre 1.47, it will be annoying to write traits over masks, but I don't think we need that to start.</p>",
+        "id": 225121466,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612417341
+    },
+    {
+        "content": "<p>PR is up :)</p>",
+        "id": 225121469,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612417347
+    },
+    {
+        "content": "<p>Nice!</p>",
+        "id": 225121482,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612417372
+    },
+    {
+        "content": "<p>So one thing I didn't really account for is that limiting masks to 64 will probably end up limiting checked arithmetic ops to 64 as well</p>",
+        "id": 225121573,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612417527
+    },
+    {
+        "content": "<p>alternatively, we will need to rely on autovectorization for those</p>",
+        "id": 225121585,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612417555
+    },
+    {
+        "content": "<p>(or some other hack)</p>",
+        "id": 225121631,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612417586
+    },
+    {
+        "content": "<p>I think we will see at least one wholesale revision of the API for masks, so at this point I am unafraid to make any decision whatsoever so that we can get it in front of other people and make it a somewhat bigger discussion. :^)</p>",
+        "id": 225121654,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612417639
+    },
+    {
+        "content": "<p>see if anyone shakes out anything we're missing lol</p>",
+        "id": 225121658,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612417649
+    },
+    {
+        "content": "<p>...also an LLVM person just decided to start talking to me spontaneously so I guess I'm going to ask him about i1.</p>",
+        "id": 225191403,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612458893
+    },
+    {
+        "content": "<p>\"ooh, that's a rough corner case.\" haha we're doomed.</p>",
+        "id": 225193222,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612459737
+    },
+    {
+        "content": "<p>Haha</p>",
+        "id": 225193449,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612459831
+    },
+    {
+        "content": "<p>Oops.</p>",
+        "id": 225193477,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612459849
+    },
+    {
+        "content": "<p>OK, but seriously, if you could ask, hypothetically, the LLVM developer group about i1xN, what would you ask?</p>",
+        "id": 225193489,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612459854
+    },
+    {
+        "content": "<p>Are there any gotchas to bitcasting it to a larger width integer</p>",
+        "id": 225193711,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612459944
+    },
+    {
+        "content": "<p>None stood out from reading the mailing lists</p>",
+        "id": 225193749,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612459965
+    },
+    {
+        "content": "<p>Why are i1xN probl3matic? Are those like 1 bit booleans into a 32/64/128/256 bit lane?</p>",
+        "id": 225197405,
+        "sender_full_name": "Miguel Raz Guzmán Macedo",
+        "timestamp": 1612461567
+    },
+    {
+        "content": "<p>Really the only odd thing about them is their alignment.  They align to byte boundaries but only take up 1 bit and can be packed together into a single byte</p>",
+        "id": 225197705,
+        "sender_full_name": "Caleb Zulawski",
+        "timestamp": 1612461667
+    },
+    {
+        "content": "<p>Oh , gotcha.</p>",
+        "id": 225197995,
+        "sender_full_name": "Miguel Raz Guzmán Macedo",
+        "timestamp": 1612461788
+    },
+    {
+        "content": "<p>OK, so, I think I should fully explain the whole \"we're trying to square the circle re: bitmasks and fullmasks\" bit, and then say we're looking primarily at using i1 for that with sign extensions/bitcasting where necessary?</p>",
+        "id": 225208876,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612466565
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"312331\">@Caleb Zulawski</span> I can review your PR once we have a test for mask ops (does not have to be comprehensive or cover every length, etc., just \"please demo the API\").</p>",
+        "id": 225212307,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1612468022
+    }
+]

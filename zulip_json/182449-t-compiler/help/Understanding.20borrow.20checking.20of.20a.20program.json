@@ -1,0 +1,50 @@
+[
+    {
+        "content": "<p>I'm debugging an issue where a program compiles fine, but another version with a very minor change is rejected by the borrow checker.</p>\n<p>In the renumbered MIR there is very minor and expected difference, however I don't understand why that difference makes any difference for borrow checking. Basically, in the working version I have</p>\n<div class=\"codehilite\"><pre><span></span><code>bb1:\n    ...\n    _6 = f(x, y) [return: bb2]\n\nbb2:\n    ...\n    FakeRead(ForLet, _6);\n    ...\n    _10 = &amp;&#39;_#7r (*_6);\n</code></pre></div>\n<p>in the failing version:</p>\n<div class=\"codehilite\"><pre><span></span><code>bb1:\n    ...\n    _7 = f(x, y) [return: bb2]\n\nbb2:\n    ...\n    _6 = &amp;&#39;_#7r (*_7);\n    FakeRead(ForLet, _6);\n    ...\n    _11 = &amp;&#39;_#8r (*_6);\n</code></pre></div>\n<p>In other words, one <code>&amp;*</code> on the return value of the function works, but if I do it twice it fails.</p>\n<p>I'm trying to understand why that is. Any tips on where to start? I've been staring at the borrow checker logs, but no luck so far. For some reason in the working version <code>_10</code> does not borrow from <code>x</code>, but <code>_11</code> in the failing version does. I'm trying to understand why.</p>",
+        "id": 231065780,
+        "sender_full_name": "osa1",
+        "timestamp": 1616177151
+    },
+    {
+        "content": "<p>Can you share the code?</p>",
+        "id": 231066577,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1616177440
+    },
+    {
+        "content": "<p><a href=\"http://lib.rs\">lib.rs</a>:</p>\n<div class=\"codehilite\"><pre><span></span><code>pub struct A(*mut ());\n\nunsafe impl Send for A {}\n\nimpl A {\n    pub fn new() -&gt; &amp;&#39;static mut A {\n        static mut a: A = A(std::ptr::null_mut());\n        unsafe { &amp;mut a }\n    }\n}\n\npub struct B&lt;&#39;a&gt;(pub &amp;&#39;a mut A);\n\nimpl&lt;&#39;a&gt; std::ops::Index&lt;usize&gt; for B&lt;&#39;a&gt; {\n    type Output = ();\n\n    fn index(&amp;self, _idx: usize) -&gt; &amp;() {\n        &amp;()\n    }\n}\n\npub async fn baz(_v: &amp;()) {}\n\npub fn assert_send&lt;T: Send&gt;(_: T) {}\n</code></pre></div>\n<p>Works:</p>\n<div class=\"codehilite\"><pre><span></span><code>use lib::*;\nuse std::ops::Index;\n\npub async fn bar() -&gt; () {\n    let a = B(A::new());\n    let r = a.index(0);\n    baz(r).await;\n}\n\npub fn test() {\n    assert_send(bar())\n}\n</code></pre></div>\n<p>Fails:</p>\n<div class=\"codehilite\"><pre><span></span><code>use lib::*;\n\n\npub async fn bar() -&gt; () {\n    let a = B(A::new());\n    let r = &amp;a[0];\n    baz(r).await;\n}\n\npub fn test() {\n    assert_send(bar())\n}\n</code></pre></div>",
+        "id": 231070056,
+        "sender_full_name": "osa1",
+        "timestamp": 1616178875
+    },
+    {
+        "content": "<p>I would expect that the difference between these two is not in the code that gets executed, but rather in the composition of the generator struct that the compiler generates for <code>async fn bar()</code>. Specifically, I think that <code>a</code> is in both structs (it has to be dropped after the await) but <code>r</code> or one of the temporaries is also in the struct in the failing version, which makes the struct not <code>Send</code> because <code>&amp;B</code> is not <code>Send</code>. Here's another variation on your code that works:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">async</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">bar</span><span class=\"p\">()</span><span class=\"w\"> </span>-&gt; <span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">(</span><span class=\"n\">A</span>::<span class=\"n\">new</span><span class=\"p\">());</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">r</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">a</span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"p\">];</span><span class=\"w\"> </span><span class=\"n\">baz</span><span class=\"p\">(</span><span class=\"n\">r</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">}.</span><span class=\"k\">await</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">test</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">assert_send</span><span class=\"p\">(</span><span class=\"n\">bar</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>I think this is discarding whatever temporaries are involved in the <code>&amp;a[0]</code> expression so that they are not held across the await point.</p>",
+        "id": 231113599,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1616205780
+    },
+    {
+        "content": "<p>Even this causes the issue:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">(</span><span class=\"n\">A</span>::<span class=\"n\">new</span><span class=\"p\">());</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">_p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">a</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// comment this out and it becomes Send</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">r</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"p\">.</span><span class=\"n\">index</span><span class=\"p\">(</span><span class=\"mi\">0</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">baz</span><span class=\"p\">(</span><span class=\"n\">r</span><span class=\"p\">).</span><span class=\"k\">await</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 231113993,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1616206130
+    },
+    {
+        "content": "<p>so it looks like code-wise the reason for the difference is temporary promotion of <code>&amp;a</code> in the expression <code>index(&amp;a, 0)</code> to hoist a declaration of <code>&amp;a</code> into a let-binding that is borrowed from to create <code>r</code></p>",
+        "id": 231114070,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1616206216
+    },
+    {
+        "content": "<p>Apparently <code>drop(_p)</code> is not sufficient to get it out of the generated struct, but scoping it (as in <code>{ let _p = &amp;a; }</code>) is. I should look into what the actual rules for generating the generator struct are - this looks like something that needs a spec</p>",
+        "id": 231114403,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1616206642
+    },
+    {
+        "content": "<p>Hm, so I was thinking that the async/await stuff in this code are just a red herring and the real problem is borrows/loans kept alive for too long, but you seem to think that the problem is actually capturing.. which I think that makes sense.</p>",
+        "id": 231137452,
+        "sender_full_name": "osa1",
+        "timestamp": 1616235503
+    }
+]

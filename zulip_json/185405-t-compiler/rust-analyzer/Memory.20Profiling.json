@@ -1,0 +1,446 @@
+[
+    {
+        "content": "<p>One of the major problems with rust-analyzer is high memory consumption (unlike rustc, rust-analyzer needs to work with the whole workspace).</p>\n<p>I wonder if we can improve visibility into <em>what</em> takes memory?</p>\n<p>Currently, analyzer status shows the total heap size (using jemalloc).</p>\n<p>I think breakdown by the <em>type</em> of heap object in memory would be extremely useful. However, I don't know <em>how</em> can we get those stats?</p>\n<p>Does anyone have an idea?</p>",
+        "id": 167114406,
+        "sender_full_name": "matklad",
+        "timestamp": 1559468333
+    },
+    {
+        "content": "<p>I've been intending to try out <a href=\"https://github.com/nokia/memory-profiler\" target=\"_blank\" title=\"https://github.com/nokia/memory-profiler\">https://github.com/nokia/memory-profiler</a> with RA</p>",
+        "id": 167114994,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1559469135
+    },
+    {
+        "content": "<p>Looks interesting! I've tried using heaptrack, but it wasn't too useful. I think both heaptrack and memory-profiler analyze allocations by call-stack, and what I really want, I thinks, is by object type.</p>",
+        "id": 167115067,
+        "sender_full_name": "matklad",
+        "timestamp": 1559469286
+    },
+    {
+        "content": "<p>Ideally, this should also work in the analysis-status page...</p>",
+        "id": 167115076,
+        "sender_full_name": "matklad",
+        "timestamp": 1559469304
+    },
+    {
+        "content": "<p>as for actually tracking counts of objects... just a random idea, but maybe it'd be possible to have a zero-sized <code>AllocationTracker</code> struct that increments a counter on creation/clone and decrements it on drop? which you'd then put into types you want to track <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 167115088,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1559469359
+    },
+    {
+        "content": "<p>the counter would have to be global by tracked type somehow</p>",
+        "id": 167115136,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1559469401
+    },
+    {
+        "content": "<p>Yeah, might be a good tool to have!</p>",
+        "id": 167115140,
+        "sender_full_name": "matklad",
+        "timestamp": 1559469410
+    },
+    {
+        "content": "<p>I'll also try serveo::heap_size_of. This seems like the right approach overall, but I am not sure if it works in practice</p>",
+        "id": 167115156,
+        "sender_full_name": "matklad",
+        "timestamp": 1559469446
+    },
+    {
+        "content": "<p>Perhaps we should just bite the bullet and add <code>#[derive(DeepSizeOf)]</code> to each type in ra <a href=\"https://docs.rs/deepsize/0.1.1/deepsize/index.html\" target=\"_blank\" title=\"https://docs.rs/deepsize/0.1.1/deepsize/index.html\">https://docs.rs/deepsize/0.1.1/deepsize/index.html</a> ?</p>",
+        "id": 167115419,
+        "sender_full_name": "matklad",
+        "timestamp": 1559469851
+    },
+    {
+        "content": "<p>it's worth a try</p>",
+        "id": 167116110,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1559471152
+    },
+    {
+        "content": "<p>I think I've found semi-effective strategy to figure out where the memory is</p>\n<ul>\n<li>disable auto gc</li>\n<li>collect ALL queries in GC</li>\n<li>use binary search to find the offending query</li>\n</ul>",
+        "id": 167126510,
+        "sender_full_name": "matklad",
+        "timestamp": 1559489260
+    },
+    {
+        "content": "<p><a href=\"/user_uploads/4715/MMMjciGdjY8ELNepMphfYHGv/pasted_image.png\" target=\"_blank\" title=\"pasted_image.png\">pasted image</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/4715/MMMjciGdjY8ELNepMphfYHGv/pasted_image.png\" target=\"_blank\" title=\"pasted image\"><img src=\"/user_uploads/4715/MMMjciGdjY8ELNepMphfYHGv/pasted_image.png\"></a></div>",
+        "id": 167126512,
+        "sender_full_name": "matklad",
+        "timestamp": 1559489264
+    },
+    {
+        "content": "<p>So, looks like macro expansion is by far the largest contributor to the current memory usage of rust-analyzer</p>",
+        "id": 167127010,
+        "sender_full_name": "matklad",
+        "timestamp": 1559490134
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span>        self.query(hir::db::MacroDefQuery).sweep(sweep);\n        self.query(hir::db::MacroArgQuery).sweep(sweep);\n        self.query(hir::db::MacroExpandQuery).sweep(sweep);\n        self.query(hir::db::ParseMacroQuery).sweep(sweep);\n</pre></div>\n\n\n<p>These four queries consume about 1GB for me, from about total 1.5 GB allocated</p>",
+        "id": 167127013,
+        "sender_full_name": "matklad",
+        "timestamp": 1559490165
+    },
+    {
+        "content": "<p>cc <span class=\"user-mention\" data-user-id=\"216201\">@Edwin Cheng</span> I think the biggest contributor here is the syntax trees, and I am working on collecting them better.</p>\n<p>However, other queries occupy quite a bit of space due to <code>tt::Subtree</code> as well. I wonder</p>\n<ul>\n<li>if we have some bug in macro expansion that produces expanded code much bigger that it should be (we have that limit on maximum size of expanded code, could it be the case that we hit it sometimes?)</li>\n<li>I wonder if, for storing macro args in salsa, we should use more compact representation than a real tree of tokens? Perhaps we should allocate the three into a flat array, or allocate the nodes in the arena?</li>\n</ul>",
+        "id": 167127149,
+        "sender_full_name": "matklad",
+        "timestamp": 1559490433
+    },
+    {
+        "content": "<p>First, maybe it is because the current <code>TokenBuffer</code> struct is not optimized, it is basically double up the memory usage but it should be temporarily and not affect the salsa storage. (We still use <code>TokenTree</code> to store it)</p>",
+        "id": 167127337,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559490741
+    },
+    {
+        "content": "<blockquote>\n<p>if we have some bug in macro expansion that produces expanded code much bigger that it should be (we have that limit on maximum size of expanded code, could it be the case that we hit it sometimes?</p>\n</blockquote>\n<p>You can enable <code>RUST_LOG=ra_hir=WARN</code> to see if there is any warning there but i am doubt it is the case.</p>",
+        "id": 167127451,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559490963
+    },
+    {
+        "content": "<blockquote>\n<p>I wonder if, for storing macro args in salsa, we should use more compact representation than a real tree of tokens? Perhaps we should allocate the three into a flat array, or allocate the nodes in the arena?</p>\n</blockquote>\n<p>Should we intern <code>Ident</code> and <code>Literal</code> token in general ?</p>",
+        "id": 167130195,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559495761
+    },
+    {
+        "content": "<p>I don't think so: they store <code>SmolStr</code> inside, and it doesn't allocate for short strings</p>",
+        "id": 167130269,
+        "sender_full_name": "matklad",
+        "timestamp": 1559495874
+    },
+    {
+        "content": "<p>But we are using Vec&lt;TokenTree&gt; to store the leaf of Subtree. so it should be still allocated, right ?? And I can imagine there a tons of duplication tokens which are keywords and identifiers in token tree.</p>",
+        "id": 167130405,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559496105
+    },
+    {
+        "content": "<p>Hm, I think, for something like <code>struct Foo;</code>, all three tokens would be in a single <code>Vec</code>?</p>",
+        "id": 167130476,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496190
+    },
+    {
+        "content": "<p>That is, that <code>Vec</code> allocation is shared among all leaves, so it's not <em>that</em> bad</p>",
+        "id": 167130481,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496205
+    },
+    {
+        "content": "<p>but getting rid of that Vec would definitely be sweet!</p>",
+        "id": 167130487,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496223
+    },
+    {
+        "content": "<p>Do you want to try a <code>smallVec</code> version first ?</p>",
+        "id": 167130536,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559496260
+    },
+    {
+        "content": "<p>Hm, yeah, smallvec could help here.</p>",
+        "id": 167130545,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496291
+    },
+    {
+        "content": "<p>It would be interesting to get statistics  about how long are subtrees ingeneral</p>",
+        "id": 167130558,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496317
+    },
+    {
+        "content": "<p>but, long term, arena-based solution seems best to me</p>",
+        "id": 167130559,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496333
+    },
+    {
+        "content": "<p>Or maybe not :-)</p>",
+        "id": 167130560,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496346
+    },
+    {
+        "content": "<p>I imagine, for macro-by-example situations where you can paste a part of input stream into the output stream, you could take advantage of structural sharing</p>",
+        "id": 167130606,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496379
+    },
+    {
+        "content": "<p>in this case, Art-tree based structure would be more benefitial</p>",
+        "id": 167130608,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496397
+    },
+    {
+        "content": "<p>It'll also work better for recursive macros, which process a bit of <code>$($tt:tt)*</code> at a time</p>",
+        "id": 167130622,
+        "sender_full_name": "matklad",
+        "timestamp": 1559496435
+    },
+    {
+        "content": "<p>Thats true. And if i understand correctly , rustc libprocmacro token handling is handle based: <br>\n<a href=\"https://github.com/rust-lang/rust/blob/dc6db14e1cd60012f25be4fd8d2eb96ea5b4bb68/src/libproc_macro/bridge/handle.rs\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/dc6db14e1cd60012f25be4fd8d2eb96ea5b4bb68/src/libproc_macro/bridge/handle.rs\">https://github.com/rust-lang/rust/blob/dc6db14e1cd60012f25be4fd8d2eb96ea5b4bb68/src/libproc_macro/bridge/handle.rs</a></p>",
+        "id": 167130757,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559496721
+    },
+    {
+        "content": "<p>a <code>Group</code>  is defined as struct Group(Handle)</p>",
+        "id": 167130802,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559496780
+    },
+    {
+        "content": "<p>I just tried to use <code>smallvec</code> instead, but it fail in our case because I forget it is recursive defined :)</p>",
+        "id": 167131217,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559497524
+    },
+    {
+        "content": "<blockquote>\n<p>I'll also try serveo::heap_size_of. This seems like the right approach overall, but I am not sure if it works in practice</p>\n</blockquote>\n<p>I think it can, work, it's the same approach that Firefox uses: <a href=\"https://blog.mozilla.org/nnethercote/2015/06/03/measuring-data-structure-sizes-firefox-c-vs-servo-rust/\" target=\"_blank\" title=\"https://blog.mozilla.org/nnethercote/2015/06/03/measuring-data-structure-sizes-firefox-c-vs-servo-rust/\">https://blog.mozilla.org/nnethercote/2015/06/03/measuring-data-structure-sizes-firefox-c-vs-servo-rust/</a></p>",
+        "id": 167172423,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1559555175
+    },
+    {
+        "content": "<p>(there should be some older blog posts about that, too)</p>",
+        "id": 167172439,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1559555204
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"203546\">@Laurențiu Nicola</span> thanks for that link! That makes me think that we need to ping <span class=\"user-mention\" data-user-id=\"120989\">@nnethercote</span>  :)</p>\n<p><span class=\"user-mention\" data-user-id=\"120989\">@nnethercote</span> we'd love implement something like <code>about:memory</code> for rust-analyzer. Unlike <code>rustc</code>, <code>rust-analyzer</code> is a long-lived process, so we need to get <em>current</em> memory usage of various structs, and not just \"after-the-process exited\" usage. </p>\n<p>I am somewhat hesitant to use the <code>heapsize</code> crate:</p>\n<ul>\n<li>it doesn't seem to be too actively maintained</li>\n<li>documentation is very sparse. In particular, it's unclear how to tweak <code>derive(HeapSizeOf) </code></li>\n<li>in rust-analyzer, a lot of things are behind <code>Arc</code>s, so it's important to support them (I like deepsize's approach to this: <a href=\"https://docs.rs/deepsize/0.1.1/deepsize/struct.Context.html\" target=\"_blank\" title=\"https://docs.rs/deepsize/0.1.1/deepsize/struct.Context.html\">https://docs.rs/deepsize/0.1.1/deepsize/struct.Context.html</a>)</li>\n<li><code>heapsize</code> is jemalloc specific, but ideally there should be an approximate mode that works with any allocator</li>\n</ul>\n<p>Do you think <code>heapsize</code> is a safe bet, long-term?</p>",
+        "id": 167210157,
+        "sender_full_name": "matklad",
+        "timestamp": 1559581386
+    },
+    {
+        "content": "<p>(re-ping <span class=\"user-mention\" data-user-id=\"120989\">@nnethercote</span> b/c matklad can't zullip)</p>",
+        "id": 167210192,
+        "sender_full_name": "matklad",
+        "timestamp": 1559581424
+    },
+    {
+        "content": "<p>Ah, I <em>think</em> <a href=\"https://github.com/servo/servo/tree/master/components/malloc_size_of\" target=\"_blank\" title=\"https://github.com/servo/servo/tree/master/components/malloc_size_of\">https://github.com/servo/servo/tree/master/components/malloc_size_of</a> is what I probably want, but it's in servo :-(</p>",
+        "id": 167210614,
+        "sender_full_name": "matklad",
+        "timestamp": 1559581740
+    },
+    {
+        "content": "<p>I suppose we'd have to instrument <code>salsa</code> as well?</p>",
+        "id": 167210751,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1559581829
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"203546\">@Laurențiu Nicola</span> ideally, yes, but I think just measuring keys/values themselves would be good enough, and that we can do without touching salsa</p>",
+        "id": 167210790,
+        "sender_full_name": "matklad",
+        "timestamp": 1559581877
+    },
+    {
+        "content": "<p>@matklad: I advise against using heapsize. I implemented it in Servo. It was kind of experimental. Some eager beaver (can't remember who) put it on <a href=\"http://crates.io\" target=\"_blank\" title=\"http://crates.io\">crates.io</a>. It has some major problems, such as not handling Arcs.</p>",
+        "id": 167242399,
+        "sender_full_name": "njn",
+        "timestamp": 1559604968
+    },
+    {
+        "content": "<p>malloc_size_of is much better, and fixes most of the problems with heapsize. However, it relies on some mozjemalloc-specific features, such as the ability to get the size of an allocation when you have an interior pointer (i.e. a pointer that points somewhere in the allocation, but not necessarily at the start). I would also still class it as somewhat experimental.</p>",
+        "id": 167242542,
+        "sender_full_name": "njn",
+        "timestamp": 1559605147
+    },
+    {
+        "content": "<p>These comments are worth reading: <a href=\"https://github.com/servo/servo/blob/master/components/malloc_size_of/lib.rs#L11-L47\" target=\"_blank\" title=\"https://github.com/servo/servo/blob/master/components/malloc_size_of/lib.rs#L11-L47\">https://github.com/servo/servo/blob/master/components/malloc_size_of/lib.rs#L11-L47</a> and <a href=\"https://github.com/servo/servo/blob/master/components/malloc_size_of/lib.rs#L102-L105\" target=\"_blank\" title=\"https://github.com/servo/servo/blob/master/components/malloc_size_of/lib.rs#L102-L105\">https://github.com/servo/servo/blob/master/components/malloc_size_of/lib.rs#L102-L105</a></p>",
+        "id": 167242564,
+        "sender_full_name": "njn",
+        "timestamp": 1559605191
+    },
+    {
+        "content": "<p>@Matklad: looks like Webrender has a cut-down fork of malloc_size_of <a href=\"https://github.com/servo/webrender/blob/master/wr_malloc_size_of/lib.rs\" target=\"_blank\" title=\"https://github.com/servo/webrender/blob/master/wr_malloc_size_of/lib.rs\">https://github.com/servo/webrender/blob/master/wr_malloc_size_of/lib.rs</a></p>",
+        "id": 167242643,
+        "sender_full_name": "njn",
+        "timestamp": 1559605247
+    },
+    {
+        "content": "<p>One awkward thing about malloc_size_of is where it sits in the module hierarchy. Ideally it would be a built-in rust thing, and then data structures like HashSet could be built on top of it, rather than it being built on top of HashSet, if you see what I mean.</p>",
+        "id": 167242740,
+        "sender_full_name": "njn",
+        "timestamp": 1559605372
+    },
+    {
+        "content": "<p>In general, live memory measurements are useful, and that's why somebody put heapsize on <a href=\"http://crates.io\" target=\"_blank\" title=\"http://crates.io\">crates.io</a>. But it's also something of a tricky problem given current language constraints. malloc_size_of is good enough for Servo, but not a truly general-purpose solution that's appropriate for putting on <a href=\"http://crates.io\" target=\"_blank\" title=\"http://crates.io\">crates.io</a>, IMO.</p>",
+        "id": 167242936,
+        "sender_full_name": "njn",
+        "timestamp": 1559605604
+    },
+    {
+        "content": "<p>Thanks! I've also found another fork of malloc_size_of on <a href=\"http://crates.io\" target=\"_blank\" title=\"http://crates.io\">crates.io</a>: <a href=\"https://crates.io/crates/graphannis-malloc_size_of\" target=\"_blank\" title=\"https://crates.io/crates/graphannis-malloc_size_of\">https://crates.io/crates/graphannis-malloc_size_of</a></p>",
+        "id": 167243018,
+        "sender_full_name": "matklad",
+        "timestamp": 1559605705
+    },
+    {
+        "content": "<p>Interesting. Maybe graphannis-malloc_size_of might be a good place to start</p>",
+        "id": 167249187,
+        "sender_full_name": "njn",
+        "timestamp": 1559613371
+    },
+    {
+        "content": "<p>Yeah, I guess, I would either use that, or publish <code>ra_malloc_size_of</code> to <a href=\"http://crates.io\" target=\"_blank\" title=\"http://crates.io\">crates.io</a> :-) Thanks again, this all was <strong>super</strong> useful!</p>",
+        "id": 167265844,
+        "sender_full_name": "matklad",
+        "timestamp": 1559633775
+    },
+    {
+        "content": "<p>What's the issue with <code>deepsize</code>?</p>",
+        "id": 167272883,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1559639329
+    },
+    {
+        "content": "<p>at the moment, it doesn't support enums</p>",
+        "id": 167274218,
+        "sender_full_name": "matklad",
+        "timestamp": 1559640428
+    },
+    {
+        "content": "<p>enums?</p>",
+        "id": 167274240,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1559640462
+    },
+    {
+        "content": "<p>yeah, it just panics on <code>SmolStr</code>, because that contains an <code>enum</code> inside</p>",
+        "id": 167274306,
+        "sender_full_name": "matklad",
+        "timestamp": 1559640508
+    },
+    {
+        "content": "<p>is that a fundamental limitation, or is just not implemented?</p>",
+        "id": 167274331,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1559640540
+    },
+    {
+        "content": "<p>just not implemented</p>",
+        "id": 167274345,
+        "sender_full_name": "matklad",
+        "timestamp": 1559640547
+    },
+    {
+        "content": "<p>Like, all of {deepsize,heapsizeof,malloc_size_of} work approximately the same and are not complex in theory</p>",
+        "id": 167274364,
+        "sender_full_name": "matklad",
+        "timestamp": 1559640580
+    },
+    {
+        "content": "<p>The question is, which one is closest to being production ready and safe to use across the crate graph</p>",
+        "id": 167274382,
+        "sender_full_name": "matklad",
+        "timestamp": 1559640600
+    },
+    {
+        "content": "<p>I managed to get some stats for <code>subtree</code> count by inserting <code>dbg(subtree.count)</code> in macro expanding code:</p>",
+        "id": 167501544,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559841514
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span>total = 32234\nmean = 122.89470745175902\nmedian = 64.0\nmax = 34222\nThe first 100 subtree.count :\n\ncount |  occurred\n58    =&gt; 2286\n46    =&gt; 1535\n69    =&gt; 1063\n24    =&gt; 868\n81    =&gt; 867\n0     =&gt; 741\n74    =&gt; 573\n87    =&gt; 564\n23    =&gt; 473\n53    =&gt; 413\n25    =&gt; 406\n18    =&gt; 401\n93    =&gt; 400\n218   =&gt; 398\n57    =&gt; 390\n99    =&gt; 376\n7     =&gt; 344\n21    =&gt; 342\n101   =&gt; 328\n54    =&gt; 312\n32    =&gt; 296\n34    =&gt; 287\n29    =&gt; 279\n105   =&gt; 276\n27    =&gt; 273\n43    =&gt; 265\n28    =&gt; 262\n48    =&gt; 256\n70    =&gt; 256\n15    =&gt; 255\n84    =&gt; 252\n51    =&gt; 246\n22    =&gt; 242\n35    =&gt; 232\n44    =&gt; 227\n39    =&gt; 225\n31    =&gt; 224\n72    =&gt; 223\n111   =&gt; 220\n64    =&gt; 219\n33    =&gt; 218\n63    =&gt; 217\n90    =&gt; 208\n37    =&gt; 203\n50    =&gt; 192\n47    =&gt; 192\n41    =&gt; 191\n26    =&gt; 190\n61    =&gt; 183\n76    =&gt; 181\n117   =&gt; 180\n103   =&gt; 176\n96    =&gt; 165\n91    =&gt; 162\n77    =&gt; 152\n52    =&gt; 150\n17    =&gt; 148\n30    =&gt; 145\n60    =&gt; 143\n79    =&gt; 141\n193   =&gt; 135\n38    =&gt; 132\n302   =&gt; 127\n73    =&gt; 126\n56    =&gt; 124\n55    =&gt; 123\n59    =&gt; 122\n12    =&gt; 120\n42    =&gt; 118\n129   =&gt; 117\n49    =&gt; 117\n45    =&gt; 117\n108   =&gt; 115\n106   =&gt; 113\n115   =&gt; 112\n40    =&gt; 108\n135   =&gt; 107\n16    =&gt; 107\n126   =&gt; 104\n114   =&gt; 104\n102   =&gt; 102\n67    =&gt; 102\n97    =&gt; 99\n88    =&gt; 99\n83    =&gt; 96\n112   =&gt; 95\n123   =&gt; 94\n78    =&gt; 94\n75    =&gt; 92\n94    =&gt; 88\n95    =&gt; 84\n65    =&gt; 84\n62    =&gt; 82\n66    =&gt; 82\n141   =&gt; 80\n147   =&gt; 79\n113   =&gt; 78\n10    =&gt; 78\n80    =&gt; 78\n207   =&gt; 74\n</pre></div>",
+        "id": 167501551,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559841519
+    },
+    {
+        "content": "<p>By running <code>ra-cli anaylsis-stats</code> in ra-analyizer</p>",
+        "id": 167501623,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559841585
+    },
+    {
+        "content": "<blockquote>\n<p>64</p>\n</blockquote>\n<p>That looks like SmallVec wouldn't help much?</p>",
+        "id": 167502091,
+        "sender_full_name": "matklad",
+        "timestamp": 1559841922
+    },
+    {
+        "content": "<p>I think so.</p>",
+        "id": 167502251,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559842063
+    },
+    {
+        "content": "<p>How about <code>TreeArc</code> ?</p>",
+        "id": 167502261,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559842072
+    },
+    {
+        "content": "<p>Hm, <code>TreeArc</code> works only with syntax trees, it's not a general-purpose smart pointer. Some kind of arena-based solution seems best here</p>",
+        "id": 167502412,
+        "sender_full_name": "matklad",
+        "timestamp": 1559842178
+    },
+    {
+        "content": "<p>And forget to write it down : the sum of all count is 3961388</p>",
+        "id": 167502565,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559842277
+    },
+    {
+        "content": "<p>And note that the <code>dbg</code> is inserted in <code>crate::ids::macro_expand_query</code> , so it is basically the number of tokentree stored in salsa</p>",
+        "id": 167502705,
+        "sender_full_name": "Edwin Cheng",
+        "timestamp": 1559842363
+    },
+    {
+        "content": "<p>probably a stupid question, but could we compress some of the data?</p>",
+        "id": 167561072,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1559899180
+    },
+    {
+        "content": "<p>I assume most space is taken by salsa values (not keys), and those are trees more often than not?</p>",
+        "id": 167561157,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1559899251
+    },
+    {
+        "content": "<p>Yeah, most of the space is occupied by the parse trees</p>",
+        "id": 167561697,
+        "sender_full_name": "matklad",
+        "timestamp": 1559899787
+    },
+    {
+        "content": "<p>the recent PR adds an LRU for them, but I wonder if there's a more precise strategy</p>",
+        "id": 167561735,
+        "sender_full_name": "matklad",
+        "timestamp": 1559899803
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-analyzer/rust-analyzer/pull/1463\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/pull/1463\">https://github.com/rust-analyzer/rust-analyzer/pull/1463</a> add <code>--memory-usage</code> flag to <code>analysis-stats</code>:</p>\n<div class=\"codehilite\"><pre><span></span>Analysis: 18.062757431s, 891mb allocated 1263mb resident\n   206mb MacroExpandQuery\n    96mb ParseQuery\n    82mb MacroArgQuery\n    70mb CrateDefMapQuery\n    21mb RawItemsWithSourceMapQuery\n     7mb MacroDefQuery\n     7mb AstIdMapQuery\n     4mb ImplsInModuleWithSourceMapQuery\n  3285kb ImplDatumQuery\n  2947kb GenericParamsQuery\n  2348kb InferQuery\n  1901kb BodyHirQuery\n  1890kb ParseMacroQuery\n  1797kb ImplsForTraitQuery\n  1613kb BodyWithSourceMapQuery\n   651kb FnDataQuery\n   601kb ExprScopesQuery\n   359kb ImplsInCrateQuery\n   244kb GenericPredicatesQuery\n   241kb TypeForDefQuery\n   175kb TypeAliasDataQuery\n   174kb GenericDefaultsQuery\n   153kb CallableItemSignatureQuery\n   144kb StructDatumQuery\n   124kb EnumDataQuery\n    46kb StructDataQuery\n    38kb TraitDatumQuery\n    20kb TraitItemsIndexQuery\n    19kb ModuleLangItemsQuery\n    17kb TypeForFieldQuery\n    15kb LangItemsQuery\n    11kb TraitDataQuery\n     8kb NormalizeQuery\n   4096b ImplementsQuery\n      0b SourceRootCratesQuery\n      0b RawItemsQuery\n      0b ImplsInModuleQuery\n      0b ConstDataQuery\n      0b StaticDataQuery\n      0b LangItemQuery\n      0b DocumentationQuery\n      0b AssociatedTyDataQuery\n</pre></div>",
+        "id": 169336910,
+        "sender_full_name": "matklad",
+        "timestamp": 1561895458
+    },
+    {
+        "content": "<p>the CrateDefMaps are pretty big, maybe interning the names would help there?</p>",
+        "id": 169338883,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1561899029
+    },
+    {
+        "content": "<p>Yeah, I guess we can just <code>intern</code> all <code>Name</code>s via salsa interning and see how it goes</p>",
+        "id": 169340122,
+        "sender_full_name": "matklad",
+        "timestamp": 1561901407
+    }
+]

@@ -1,0 +1,458 @@
+[
+    {
+        "content": "<p>It just occurred to me that we don't really need to care about what types a particular register class accepts, e.g. the SSE register class accepts 128-bit vectors but not i128.</p>",
+        "id": 186458133,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579833706
+    },
+    {
+        "content": "<p>We can just <code>transmute</code> any operand to a type suitable for the backend, in which case we only need to care about the register size, not the actual types.</p>",
+        "id": 186458189,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579833755
+    },
+    {
+        "content": "<p>With that in mind, should we revisit the rules for what types a register class can accept? Currently only integer/float/pointer primitive types are allowed. We could extend that to any type as long as it can fit in the register.</p>",
+        "id": 186458503,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579834212
+    },
+    {
+        "content": "<p>Let's take RISC-V's <code>f</code> register class which only accepts <code>f32</code> and <code>f64</code> as an example: should we allow an <code>i64</code> operand? An <code>i8</code> operand? A <code>(u8, u8, u8)</code> operand?</p>",
+        "id": 186458525,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579834301
+    },
+    {
+        "content": "<p>not a tuple</p>",
+        "id": 186463710,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579842317
+    },
+    {
+        "content": "<p>more generally, anything that you should not <em>actually</em> transmute to the register's real type should not work here.</p>",
+        "id": 186463760,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579842375
+    },
+    {
+        "content": "<p>What about <code>struct S(u16, u16)</code>? Should we allow this to fit in a 32-bit register?</p>",
+        "id": 186498815,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579877885
+    },
+    {
+        "content": "<p>The current RFC does allow smaller values to go into a larger register. The most common case is putting a f32 value into a 64-bit float register which supports both f32 and f64.</p>",
+        "id": 186498865,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579877943
+    },
+    {
+        "content": "<p>Hmm, I'm suddenly having an urge to redesign the register classes...</p>",
+        "id": 186502048,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579879890
+    },
+    {
+        "content": "<p>transmuting an S value to u32 would be UB in normal Rust. I can't see any possible path for allowing it into inline asm without also effectively stabilizing what the transmute would be in other contexts (since those other contexts could just use an inline asm move to do the conversion).</p>\n<p>Any automatic same-size conversion will have to approximately follow the safe-transmute rules. ideally we could start with a few <em>specific</em> auto-conversions (such as f32/u32/i32) and then leave a \"future extension\" note for general \"whatever safe transmute would let you do can now automatically be done here\".</p>\n<p>for different size conversions, having automatic sign extension or f32-&gt;f64 or whatever seems a lot easier to grasp without accidentally affecting other parts of the language. we would still need some restrictions.</p>",
+        "id": 186502074,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579879919
+    },
+    {
+        "content": "<p>The current rule is that if you pass in a smaller type, the upper bits contain an undefined value.</p>",
+        "id": 186502212,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579880005
+    },
+    {
+        "content": "<p>This works well for x86, where instructions that write to <code>al</code> leave the other bits unchanged, while on other architectures it clears the upper bits.</p>",
+        "id": 186502250,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579880040
+    },
+    {
+        "content": "<p>Also we want to be able to pass SIMD vectors into inline asm, for example for SSE registers.</p>",
+        "id": 186502331,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579880083
+    },
+    {
+        "content": "<p>sounds initially fine, and maybe fixable down the line too</p>",
+        "id": 186502382,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579880129
+    },
+    {
+        "content": "<p>Why is transmuting (u16, u16) to u32 UB? Is it just because of the undefined field order? (i.e. it would be fine if it was repr(C))</p>",
+        "id": 186502917,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579880453
+    },
+    {
+        "content": "<p>correct</p>",
+        "id": 186503331,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579880736
+    },
+    {
+        "content": "<p>From an implementation point of view, it feel simpler to just allow arbitrary transmutes and only checking the size of the type during type checking.</p>",
+        "id": 186503342,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579880740
+    },
+    {
+        "content": "<p>yes it would be simpler to implement, but you'd effectively be enabling a lot of accidental UB, so probably that is a poor plan.</p>\n<p>if anything, stick to a restricted list of primitives and relax the restrictions later.</p>",
+        "id": 186503583,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579880885
+    },
+    {
+        "content": "<p>I would go even further and question the wisdom of allowing smaller types and making the highest bits undefined. Experience from C shows that people keep getting it wrong (assuming it's guaranteed to either sign- or zero-extended although neither GCC nor Clang make any guarantees about it) and it appears to work for a long time until the compiler changes and something breaks, forcing people to write patches that explicitly do the intended extension. Just this week I saw another example of this with <a href=\"https://www.openwall.com/lists/musl/2020/01/15/2\" target=\"_blank\" title=\"https://www.openwall.com/lists/musl/2020/01/15/2\">https://www.openwall.com/lists/musl/2020/01/15/2</a></p>",
+        "id": 186506349,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1579882633
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span> Just to confirm, you're suggesting manual transmutes, not automatic conversions, right?</p>",
+        "id": 186521207,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1579891485
+    },
+    {
+        "content": "<p>I think people should be able to transmute u64 to f64, for instance, and feed that in to a floating point register. But by default feeding in a u64 should give a type error, to help reduce common errors.</p>",
+        "id": 186521267,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1579891545
+    },
+    {
+        "content": "<p>This certainly addresses my concern about vector types vs u128 though; I don't mind having to transmute there.</p>",
+        "id": 186521375,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1579891612
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span> Actually I was thinking of allowing any type, as long as it has the same size as the target register.</p>",
+        "id": 186524984,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579894004
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> That's a very good point, but at the same time it can make asm! very unergonomic to use. For example you would have to explicitly cast any integer constants to u64 before passing them into a register (since integer default to i32).</p>",
+        "id": 186525151,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579894111
+    },
+    {
+        "content": "<p>Same with floats: it would suck to have to zero-extend float types to 128 bits to put them in a SSE register</p>",
+        "id": 186525198,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579894143
+    },
+    {
+        "content": "<p>if a register only accepts u64 then the literal in that place should be forced to u64.</p>\n<p>same as</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"kt\">u64</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"p\">;</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>makes 5 be a u64 literal</p>",
+        "id": 186526083,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579894596
+    },
+    {
+        "content": "<p>\"Sizes must match exactly or it's an error\" isn't the only way to resolve this. There could be rules for (register class, type) combinations where it's obvious which extensions is the right one, so that only obscure things like <code>u64</code> in an XMM register need manual extension. There could also be an explicit flag on the operand for opting into the \"upper bits can be anything\" behavior (LLVM calls this <code>anyext</code> which is a good enough name IMO).</p>",
+        "id": 186527311,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1579895339
+    },
+    {
+        "content": "<p>Your point about integer literals defaulting to i32 is even more reason to move away from \"upper bits unspecified\", because those two things together form a huge footgun.</p>",
+        "id": 186527577,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1579895514
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span> I feel like \"size matches\" alone would be too error-prone, and not so common that a transmute is too much to ask.</p>",
+        "id": 186528982,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1579896325
+    },
+    {
+        "content": "<p>If we can offer a bit of type checking, like making sure a value for rax is a u64 or i64 rather than an f64, that seems more likely to catch an error than to flag code that really did want to do that. And one transmute handles the latter case.</p>",
+        "id": 186529225,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1579896477
+    },
+    {
+        "content": "<p>If someone has code that repeatedly has that pattern, they could always make a wrapper macro or a wrapper function.</p>",
+        "id": 186529297,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1579896514
+    },
+    {
+        "content": "<p>in fact f64 and f32 already have such a method <a href=\"https://doc.rust-lang.org/std/primitive.f64.html#method.to_bits\" target=\"_blank\" title=\"https://doc.rust-lang.org/std/primitive.f64.html#method.to_bits\">https://doc.rust-lang.org/std/primitive.f64.html#method.to_bits</a></p>",
+        "id": 186530264,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579897293
+    },
+    {
+        "content": "<p>So how about this then:<br>\n(x86_64)</p>\n<ul>\n<li>For <code>reg</code> we only accept <code>i64</code> (and <code>usize</code> &amp; pointers). You must extend your value to <code>i64</code> if you want to use it in asm.</li>\n<li>For <code>sse_reg</code> we accept <code>f32</code>, <code>f64</code> and 128-bit SIMD types.</li>\n</ul>",
+        "id": 186540478,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579904780
+    },
+    {
+        "content": "<p>Note that for the <code>f32</code> and <code>f64</code> case, the upper bits are undefined.</p>",
+        "id": 186540646,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579904933
+    },
+    {
+        "content": "<p>i hesitate with f32/f64 into simd with unknown high bits. I feel like since the simd types are in core anyway, we should just accept those types</p>",
+        "id": 186542293,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579906409
+    },
+    {
+        "content": "<p>and then people can use intrinsics to get the bits they want</p>",
+        "id": 186542311,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579906434
+    },
+    {
+        "content": "<p>Here's what I think I'm going to go with:</p>\n<ul>\n<li>Allowed types for inline asm are integers, floats, pointers and SIMD vectors.</li>\n<li>You cannot use a type larger than the register size.</li>\n<li>You can use a type smaller than the register size, which will leave upper bits undefined. However the compiler will emit a warning when you do this.</li>\n</ul>",
+        "id": 186550738,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579915400
+    },
+    {
+        "content": "<p>we've worked pretty hard to eliminate undefined data from escaping on accident. Still seems like a potential footgun.</p>",
+        "id": 186550902,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579915585
+    },
+    {
+        "content": "<p>Disallowing it completely could lead to unnecessary zero-extensions.</p>",
+        "id": 186550950,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579915675
+    },
+    {
+        "content": "<p>Hmm there's also the issue of what exact is a SIMD vector. For example this is allowed:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"cp\">#[repr(simd)]</span><span class=\"w\"> </span><span class=\"k\">struct</span> <span class=\"nc\">u8x3</span><span class=\"p\">(</span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">);</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 186551739,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579916876
+    },
+    {
+        "content": "<p>use the core::arch types</p>",
+        "id": 186552141,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1579917514
+    },
+    {
+        "content": "<p>Except it's a bit difficult to check for those from within the compiler...</p>",
+        "id": 186552976,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579918972
+    },
+    {
+        "content": "<p>Hence why I was thinking of simply allowing any type as long as it fit in the register</p>",
+        "id": 186552986,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579919000
+    },
+    {
+        "content": "<p>Warnings about things that require some care but can be 100% OK and desirable are somewhat self-defeating: a project that uses the construct in question (here, relying on anyext of smaller types) more than a couple times is incentivized to disable the warning at module/crate scope, and from that point forward nobody working on the project will see the warning any more.</p>",
+        "id": 186567126,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1579947290
+    },
+    {
+        "content": "<p>If you argue that anyext (instead of zero/sign extension) is useful, then I think it should require an explicit opt-in on the operand in question (as I suggested before), so that you always have a reminder of the pitfall when reading, writing, and modifying code.</p>",
+        "id": 186567205,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1579947435
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> You make a very good point. How about something like this:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"c1\">// By default you must match the reg size</span>\n<span class=\"n\">asm</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"s\">&quot;&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"p\">(</span><span class=\"n\">reg</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"k\">i64</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"c1\">// But you can opt-in to use a smaller subset of the reg</span>\n<span class=\"n\">asm</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"s\">&quot;&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"p\">(</span><span class=\"n\">reg</span>: <span class=\"mi\">8</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"k\">i8</span><span class=\"p\">);</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 186569639,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1579951775
+    },
+    {
+        "content": "<p>IMO that is still too ambiguous about what happens to the upper bits. In C, I see mistaken assumptions about the kind of extension that is implied, rather than using smaller types by mere accident. How about this? (Exact keyword up for bike-shedding, as long as it makes clear it's neither zext nor sext)</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"n\">asm</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"s\">&quot;&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"p\">(</span><span class=\"n\">reg</span><span class=\"w\"> </span><span class=\"n\">anyext</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"k\">i8</span><span class=\"p\">)</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 186569882,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1579952180
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><span class=\"n\">asm</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"s\">&quot;&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"k\">in</span><span class=\"p\">(</span><span class=\"n\">reg</span><span class=\"w\"> </span><span class=\"n\">undefext</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"k\">i8</span><span class=\"p\">)</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 186570078,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1579952550
+    },
+    {
+        "content": "<p>This seems partly caused by our unification of register sizes in register definitions. We don't really seem to distinguish between rax, eax, ax, and al.</p>",
+        "id": 186629080,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580058074
+    },
+    {
+        "content": "<p>On platforms that have a concept of different sizes for registers like that, we don't need to worry as much, I think.</p>",
+        "id": 186629133,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580058129
+    },
+    {
+        "content": "<p>It's expected that if you feed a u16 into ax you should use it as ax, or take care before using it as eax/rax.</p>",
+        "id": 186629159,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580058193
+    },
+    {
+        "content": "<p>I just pushed a big rework of how register classes work. It should also solve this issue.</p>",
+        "id": 186997024,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580397826
+    },
+    {
+        "content": "<p>The basic idea is to allow under-sized values, but then you must use template modifiers to only access the low bits of that register.</p>",
+        "id": 186997106,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580397862
+    },
+    {
+        "content": "<p>Interesting! I'll take a look. The template modifiers will make sure that you substitute in names like \"ax\" or \"al\" instead of \"rax\"?</p>",
+        "id": 187026517,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580415563
+    },
+    {
+        "content": "<p>(And then if you want to use the whole register, you also need to declare a whole-register clobber?)</p>",
+        "id": 187026538,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580415586
+    },
+    {
+        "content": "<p>Presumably you could also <code>as u64</code> if you want, and then Rust will do the movzx or movsx for you?</p>",
+        "id": 187026613,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580415614
+    },
+    {
+        "content": "<p>Yes, you can sign-extend or you can use template modifiers. Either will disable the warning.</p>",
+        "id": 187028024,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580416669
+    },
+    {
+        "content": "<p>*sign/zero-extend manually</p>",
+        "id": 187028172,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580416774
+    },
+    {
+        "content": "<p>Hmm now that I think about it I forgot to take implicit registers into account (those not used in the template string)</p>",
+        "id": 187029875,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580417952
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span> Oh, good point. An implicit <code>eax</code> or <code>al</code>, for instance, where the register isn't named so there's nowhere to apply a modifier?</p>",
+        "id": 187031004,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580418706
+    },
+    {
+        "content": "<p>I am also skeptical that \"apply the default modified on every single use\" is a good way to opt into \"upper bits undefined\" behavior where it's needed (particular for things like scalars in vector registers). It doesn't makes clear what's actually happening, and it seems to make the asm way more annoying to read, write and modify than it has to be.</p>",
+        "id": 187031624,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1580418971
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> It does seem preferable to be able to write the modifier once, on the <code>in</code> or <code>out</code>, rather than repeatedly as a modifier.</p>",
+        "id": 187031966,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580419150
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> What would you suggest instead?</p>",
+        "id": 187033568,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580420076
+    },
+    {
+        "content": "<p>I'm a bit wary of having the syntax become too complicated, especially for these sorts of edge cases that 90% of people won't care about.</p>",
+        "id": 187033648,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580420120
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span> \"input this 32-bit value as a 32-bit register\" doesn't seem like an edge case.</p>",
+        "id": 187034010,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580420348
+    },
+    {
+        "content": "<p>And I would much rather have Rust figure out that it's a 32-bit value and use a 32-bit register automatically, rather than forcing me to specify a modifier explicitly.</p>",
+        "id": 187034066,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580420395
+    },
+    {
+        "content": "<p>Also, if I'm feeding a 32-bit value into a 64-bit register, perhaps because the platform doesn't have a concept of \"32-bit register\", then there should be some way to avoid a gratuitous zero-extension instruction when I'm only going to use the low 32 bits.</p>",
+        "id": 187034216,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580420481
+    },
+    {
+        "content": "<p>Doing so might require some kind of notation, but it shouldn't be <em>difficult</em>...</p>",
+        "id": 187034249,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580420497
+    },
+    {
+        "content": "<p>I can appreciate that you don't want to add more bells and whistles but re-purposing operand modifiers has so many serious problems that it's worth adding a new piece of syntax IMO. It also won't actually affect people who don't have to care about this, unless they specifically go through the reference and try to understand the whole syntax of <code>asm!</code> and chase down what every part of the syntax means. (And those people would be reading the part about size mismatch warnings silenced by explicit modifiers too, if we went that route.)</p>",
+        "id": 187034394,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1580420571
+    },
+    {
+        "content": "<p>I would really prefer if the default register formatting did not depend on the type and instead defaults to the full register width (<code>rax</code> or <code>eax</code> depending on the arch). Similarly, the register formatting does not depend on what name you chose when specifying an explicit register (<code>in(\"rax\") val</code> and <code>in(\"al\") val</code> are treated as equivalent).</p>",
+        "id": 187041167,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580425587
+    },
+    {
+        "content": "<p>In comparison, the GCC behavior when no template modifier is used is to only look at the type passed in. It also ignores the register name chosen for explicit registers.</p>",
+        "id": 187041219,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580425638
+    },
+    {
+        "content": "<p>As far as I can tell nobody proposed anything like that?</p>",
+        "id": 187041398,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1580425799
+    },
+    {
+        "content": "<blockquote>\n<p>And I would much rather have Rust figure out that it's a 32-bit value and use a 32-bit register automatically, rather than forcing me to specify a modifier explicitly.</p>\n</blockquote>",
+        "id": 187041500,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580425902
+    },
+    {
+        "content": "<p>Ah, I missed that part, sorry.</p>",
+        "id": 187041610,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1580426002
+    },
+    {
+        "content": "<p>By the way, here's what the register definitions currently look like in the code: <a href=\"https://github.com/Amanieu/rust/commit/0ca6992771eeb5096ed9d67d4424099067aa378c\" target=\"_blank\" title=\"https://github.com/Amanieu/rust/commit/0ca6992771eeb5096ed9d67d4424099067aa378c\">https://github.com/Amanieu/rust/commit/0ca6992771eeb5096ed9d67d4424099067aa378c</a></p>",
+        "id": 187089367,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1580481821
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span> Defaulting to the full register width seems like it would make any type smaller than the register width awkward to use.</p>",
+        "id": 187101331,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1580489851
+    }
+]

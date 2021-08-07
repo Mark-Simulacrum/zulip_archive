@@ -1,0 +1,236 @@
+[
+    {
+        "content": "<p>As measured in <a href=\"https://github.com/rust-lang/rust/pull/76680\">#76680</a>, most of the query system is monomorphized 500 times.</p>\n<p>I'm trying to make things <code>dyn</code> instead of generic to (hopefully) massively improve bootstrap time, but it's hard.<br>\n<code>rustc_query_system::query::plumbing::get_query_impl()</code> would benefit the most,  but it's generic over both  <code>QueryContext</code> and <code>QueryCache</code> which have multiple associated types that cyclically depend on each other.</p>\n<p>Does someone have ideas on how to approach this?</p>",
+        "id": 213026663,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602502435
+    },
+    {
+        "content": "<p>After a whole day of compile-error driven development, my impression is that the <code>QueryContext</code> trait has to go.<br>\nI've had two ideas:</p>\n<ul>\n<li>Only TyCtxt implements QueryContext, so by merging rustc_query_system into rustc_middle, a lot of things could take TyCtxt directly and wouldn't be generic anymore. But rustc_middle is so big already...</li>\n<li>Make <code>QueryContext</code> a struct with function pointers. Same effect, can keep the crates separate, but it's an even bigger refactoring.</li>\n</ul>",
+        "id": 213026718,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602502452
+    },
+    {
+        "content": "<p>For context: I'm a relatively new contributer (Hi everyone <span aria-label=\"wave\" class=\"emoji emoji-1f44b\" role=\"img\" title=\"wave\">:wave:</span> ) and I have three weeks of free time before university starts again, wich I'd like to spend working on rustc. Specifically improving compile times.</p>",
+        "id": 213027071,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602502761
+    },
+    {
+        "content": "<p>Instead of trying to do the whole thing in one go, are there any individual parts that we could \"dynify\" on their own without affecting the entire system?</p>",
+        "id": 213036059,
+        "sender_full_name": "oli",
+        "timestamp": 1602508474
+    },
+    {
+        "content": "<p>Not much I could find. The <code>&lt;CTX: QueryContext&gt;</code>is almost everywhere, and that one isn't dyn-safe. And it's hard to make it dyn-safe.<br>\nI'll make a PR next with the small things I could find.</p>",
+        "id": 213041039,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602510851
+    },
+    {
+        "content": "<p>instead of making <code>QueryContext</code> object safe, can we make a single component object safe? It looks to me like <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_query_system/dep_graph/trait.DepKind.html\">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_query_system/dep_graph/trait.DepKind.html</a> would just require some closures to get boxed in order to become object safe. Once that is object safe, <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_query_system/dep_graph/trait.DepContext.html\">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_query_system/dep_graph/trait.DepContext.html</a> could be made object safe next... and so on</p>",
+        "id": 213047756,
+        "sender_full_name": "oli",
+        "timestamp": 1602514049
+    },
+    {
+        "content": "<p>each step can be perf-checked as an individual PR</p>",
+        "id": 213047793,
+        "sender_full_name": "oli",
+        "timestamp": 1602514065
+    },
+    {
+        "content": "<p>That sounds easier, thanks!</p>",
+        "id": 213047961,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602514139
+    },
+    {
+        "content": "<p>Another thing that might be worth trying -- not sure if you've looked at it yet -- is trying to split the DepNode enum into a bunch of structs implementing a DepNode trait, and pass them around as either Box&lt;DepNode&gt; or &amp;dyn DepNode (note: no allocations needed for unit structs, and we could potentially smallbox optimize to avoid heap allocations if they end up looking very expensive).</p>\n<p>I think we currently have a lot of functions that are codegen'd as <code>match depnode { ... }</code> and then an exhaustive match that ends up with a lot of code being generated. LLVM has some pretty poor performance on large functions, historically at least, and the match itself seems unlikely to be as good performance wise as a single indirect branch (from a instruction cache etc level)</p>",
+        "id": 213051081,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602515594
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116122\">simulacrum</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Make.20rustc_query_system.20dyn/near/213051081\">said</a>:</p>\n<blockquote>\n<p>I think we currently have a lot of functions that are codegen'd as <code>match depnode { ... }</code> and then an exhaustive match that ends up with a lot of code being generated. LLVM has some pretty poor performance on large functions, historically at least, and the match itself seems unlikely to be as good performance wise as a single indirect branch (from a instruction cache etc level)</p>\n</blockquote>\n<p>maybe a simpler change would be to split the match arms into different functions? not sure whether that's easier or harder though</p>",
+        "id": 213051570,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1602515868
+    },
+    {
+        "content": "<p>each match arm is pretty small, so not sure how helpful that would be. but it's not trivial usually either...</p>",
+        "id": 213051812,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602515986
+    },
+    {
+        "content": "<p>I'm looking at the code. There is the DepKind enum in <code>define_dep_nodes</code> but there is also a DepKind trait in rustc_query_system::dep_graph. Are the two related?</p>",
+        "id": 213052172,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602516111
+    },
+    {
+        "content": "<p>I think sort of</p>",
+        "id": 213052277,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602516164
+    },
+    {
+        "content": "<p>cc <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span></p>",
+        "id": 213052309,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1602516184
+    },
+    {
+        "content": "<p>so specifically what I was thinking of is that we have e.g. <a href=\"https://github.com/Mark-Simulacrum/rust/blob/d8c035abbf534d5e4101c2d4fb804a9e26dd6ccd/compiler/rustc_middle/src/ty/query/mod.rs#L172-L186\">https://github.com/Mark-Simulacrum/rust/blob/d8c035abbf534d5e4101c2d4fb804a9e26dd6ccd/compiler/rustc_middle/src/ty/query/mod.rs#L172-L186</a> which is defined <a href=\"https://github.com/rust-lang/rust/blob/e37c99fa1ca2341d652a1b1859ea9aa2ae993e1e/compiler/rustc_macros/src/query.rs#L549\">https://github.com/rust-lang/rust/blob/e37c99fa1ca2341d652a1b1859ea9aa2ae993e1e/compiler/rustc_macros/src/query.rs#L549</a></p>",
+        "id": 213052352,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602516215
+    },
+    {
+        "content": "<p>the dep node there is the enum, not the trait</p>",
+        "id": 213052381,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602516232
+    },
+    {
+        "content": "<p>but the expansion is basically a (series of) trait method calls anyway:</p>\n<p><a href=\"https://github.com/rust-lang/rust/blob/e37c99fa1ca2341d652a1b1859ea9aa2ae993e1e/compiler/rustc_macros/src/query.rs#L500-L511\">https://github.com/rust-lang/rust/blob/e37c99fa1ca2341d652a1b1859ea9aa2ae993e1e/compiler/rustc_macros/src/query.rs#L500-L511</a></p>",
+        "id": 213052527,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602516308
+    },
+    {
+        "content": "<p>It's strange. There is <code>impl DepKind</code> in the macro that defines the same methods as the trait, but doesn't actually implement the trait.</p>",
+        "id": 213052667,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602516368
+    },
+    {
+        "content": "<p>Maybe it was forgotten at some point?</p>",
+        "id": 213052685,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602516381
+    },
+    {
+        "content": "<p>try removing it and see if things still compile?</p>",
+        "id": 213052716,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1602516396
+    },
+    {
+        "content": "<p>The trait is used within rustc_query_system. Let's see how much i need to remove.</p>",
+        "id": 213053044,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602516542
+    },
+    {
+        "content": "<p>I would rather see us go the other way, fwiw</p>",
+        "id": 213053085,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602516566
+    },
+    {
+        "content": "<p>i.e., it seems like a trait is the better way to do this rather than a bunch of methods expanding to <code>match foo { ... }</code></p>",
+        "id": 213053157,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602516602
+    },
+    {
+        "content": "<p>though <em>this</em> trait may not allow that anyway, I'm not sure</p>",
+        "id": 213053195,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602516614
+    },
+    {
+        "content": "<p>Yes, but it doesn't hurt to see if it's currently used.</p>",
+        "id": 213053208,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602516621
+    },
+    {
+        "content": "<p>(Sidenote: how do you quote in Zulip?)</p>",
+        "id": 213053280,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602516679
+    },
+    {
+        "content": "<p>You can hit \"i\" or click the triple dot (need to mouse over) by the time on the right hand side</p>",
+        "id": 213053313,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1602516708
+    },
+    {
+        "content": "<p>oh 'i' is nice, I didn't know that one</p>",
+        "id": 213053376,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1602516724
+    },
+    {
+        "content": "<p>or press <code>&gt;</code></p>",
+        "id": 213053392,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1602516733
+    },
+    {
+        "content": "<p>Any way on Android? Seems like it should be in the long-press menu, but no...</p>",
+        "id": 213053446,
+        "sender_full_name": "cuviper",
+        "timestamp": 1602516780
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Make.20rustc_query_system.20dyn/near/213053392\">said</a>:</p>\n<blockquote>\n<p>or press <code>&gt;</code></p>\n</blockquote>\n<p><span aria-label=\"tada\" class=\"emoji emoji-1f389\" role=\"img\" title=\"tada\">:tada:</span></p>",
+        "id": 213053470,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602516795
+    },
+    {
+        "content": "<p>There are actually very few exhaustive matches on <code>dep_node</code>, so you may be able to turn them around easily.</p>",
+        "id": 213080364,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1602532879
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"200368\">@Julian-Wollersberger</span>,  it looks like the <code>DepKind</code> trait is implemented for the enum in <code>compiler/rustc_middle/src/dep_graph/mod.rs</code>: <code>impl rustc_query_system::dep_graph::DepKind for DepKind</code></p>",
+        "id": 213080504,
+        "sender_full_name": "Tyson Nottingham",
+        "timestamp": 1602532963
+    },
+    {
+        "content": "<p>Oh. Spooky action at a distance, I see.</p>",
+        "id": 213080842,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602533178
+    },
+    {
+        "content": "<p>I've made <a href=\"https://github.com/rust-lang/rust/pull/77871\">Make fewer types generic over QueryContext #77871</a> now.<br>\nI'll continue tomorrow.</p>",
+        "id": 213085831,
+        "sender_full_name": "Julian-Wollersberger",
+        "timestamp": 1602536284
+    },
+    {
+        "content": "<p>anyone mind if I make an <code>A-query-system</code> label?</p>",
+        "id": 213086872,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1602537002
+    },
+    {
+        "content": "<p>The more the merrier!</p>",
+        "id": 213087434,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1602537463
+    },
+    {
+        "content": "<p>Alternatively, you could do <code>A-queries</code>, but <code>A-query-system</code> is probably clearer</p>",
+        "id": 213087552,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1602537547
+    },
+    {
+        "content": "<p>added A-query-system</p>",
+        "id": 213087826,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1602537745
+    }
+]

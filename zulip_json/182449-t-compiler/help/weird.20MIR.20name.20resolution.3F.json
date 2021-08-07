@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>Background for the first weirdness: the lang item for <code>drop_in_place</code> is <code>ptr::drop_in_place</code>. For historical reasons there exists <code>intrinsics::drop_in_place</code> as a deprecated re-export of <code>ptr::drop_in_place</code>. AFAICT there should be no reason <code>intrinsics::drop_in_place</code> to be emitted anywhere in codegen, since codegen should always be using the lang item. And yet <a href=\"https://github.com/rust-lang/rust/blob/d1206f950ffb76c76e1b74a19ae33c2b7d949454/src/test/mir-opt/inline/inline-shims.rs\">this mir-opt test</a> produces <a href=\"https://github.com/rust-lang/rust/blob/d1206f950ffb76c76e1b74a19ae33c2b7d949454/src/test/mir-opt/inline/inline_shims.drop.Inline.diff#L27\">this output</a>, which clearly refers to <code>intrinsics::drop_in_place</code>.</p>\n<p>Background for the second weirdness: because <code>#[rustc_deprecated]</code> secretly doesn't work when applied to re-exports, <code>intrinsics::drop_in_place</code> was never actually deprecated. So in <a href=\"https://github.com/rust-lang/rust/pull/82122\">https://github.com/rust-lang/rust/pull/82122</a> I turned <code>intrinsics::drop_in_place</code> from a re-export into a wrapper over <code>ptr::drop_in_place</code>. And now, without any other changes, that mir-opt test does suddenly start referring to <code>ptr::drop_in_place</code> <a href=\"https://github.com/rust-lang/rust/pull/82122/files#diff-38ba3313fde9bdfe9b195b4d2099b98f9f359242f93841a65801e1d52799bf47R27\">in its output</a>.</p>\n<p>So the good news is that the two weirdnesses balance each other out, but I'm worried that it might be masking an actual bug. Any thoughts?</p>",
+        "id": 226418053,
+        "sender_full_name": "bstrie",
+        "timestamp": 1613414473
+    },
+    {
+        "content": "<p>I am able to reproduce the first weirdness with this code (<a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=c95aa4ceae9ac88d7c814571e69aef86\">playground</a>):</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">ptr</span>::<span class=\"n\">drop_in_place</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">);</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>To be clear, name resolution happens way before MIR building. I suspect the bug occurs somewhere between name resolution and MIR building since it seems like a pretty extreme and bizarre bug to occur in name resolution.</p>",
+        "id": 226471528,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1613450862
+    },
+    {
+        "content": "<p>I've filed an issue for this at <a href=\"https://github.com/rust-lang/rust/issues/82189\">https://github.com/rust-lang/rust/issues/82189</a></p>",
+        "id": 226549519,
+        "sender_full_name": "bstrie",
+        "timestamp": 1613497777
+    },
+    {
+        "content": "<p>I strongly suspect this is going to be a cosmetic issue, possibly arising due to a particularity of how the lang item is implemented.</p>",
+        "id": 226552373,
+        "sender_full_name": "nagisa",
+        "timestamp": 1613498999
+    },
+    {
+        "content": "<p>so in the pretty-printer somewhere? that's what I was hoping, but a grep for \"intrinsics::drop_in_place\" didn't turn up anything useful in the compiler tree, and I'm unfamiliar with where else to start looking there</p>",
+        "id": 226556445,
+        "sender_full_name": "bstrie",
+        "timestamp": 1613500675
+    },
+    {
+        "content": "<p>well, not that way. More plausible explanation would be that asking for the implementation of the lang item in compiler gives the intrinsic's defid. Which is a valid implementation, especially because nothing after HAIR cares about deprecations etc.</p>",
+        "id": 226557593,
+        "sender_full_name": "nagisa",
+        "timestamp": 1613501238
+    },
+    {
+        "content": "<p>I can see things breaking if the intrinsic itself is _removed_. But deprecation will not change anything.</p>",
+        "id": 226557636,
+        "sender_full_name": "nagisa",
+        "timestamp": 1613501258
+    },
+    {
+        "content": "<p>A curious thing is that if you ask <code>rustc</code> for <code>-Zdump-mir</code> it will also dump the MIR for <code>ptr::drop_in_place</code> for the given example code.</p>",
+        "id": 226557727,
+        "sender_full_name": "nagisa",
+        "timestamp": 1613501292
+    },
+    {
+        "content": "<p>I am vaguely aware of some code that when pretty printing paths prefers to show publicly reachable re-exports, which would be my first suspicion of what is going on here.</p>",
+        "id": 226558396,
+        "sender_full_name": "tm",
+        "timestamp": 1613501606
+    },
+    {
+        "content": "<p>my mild concern here is that after <a href=\"https://github.com/rust-lang/rust/pull/82122\">https://github.com/rust-lang/rust/pull/82122</a> lands and turns the intrinsic from a re-export into a wrapper fn, that it might lead to marginally worse codegen if it's not using the lang item and instead tries to go through the wrapper</p>",
+        "id": 226560529,
+        "sender_full_name": "bstrie",
+        "timestamp": 1613502565
+    },
+    {
+        "content": "<p>The implementation would be in <a href=\"https://github.com/rust-lang/rust/blob/master/compiler/rustc_middle/src/ty/print/pretty.rs#L268\">https://github.com/rust-lang/rust/blob/master/compiler/rustc_middle/src/ty/print/pretty.rs#L268</a></p>",
+        "id": 226563131,
+        "sender_full_name": "tm",
+        "timestamp": 1613503616
+    },
+    {
+        "content": "<p>Yes, the issue here is that <code>std::ptr</code> is a reexport (of <code>core::ptr</code>) so the compiler makes an arbitrary choice of which path to use</p>",
+        "id": 226563382,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613503702
+    }
+]

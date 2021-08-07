@@ -1,0 +1,317 @@
+<html>
+<head><meta charset="utf-8"><title>Pin::static_ref() · t-libs · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/index.html">t-libs</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html">Pin::static_ref()</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="212549677"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212549677" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212549677">(Oct 07 2020 at 12:22)</a>:</h4>
+<p>I think it would be good to add a <code>Pin::static_ref(&amp;'static T) -&gt; Pin&lt;&amp;'static T&gt;</code>. The static lifetime guarantees the Pin requirement of it never moving until destruction (which is never, in this case).</p>
+<p>Context: I want to clean up unsafety a bit in the sys::mutex::Mutex implementations. Everything there is unsafe, mostly because these objects may not be moved. So changing everything to <code>Pin&lt;&amp;Self&gt;</code> there would help. But it's used in a few places (inside std) as a static (through sys_common's StaticMutex), where the 'static lifetime already guarantees it isn't moved. Would be good if that can be used as a pinned (static) reference safely.</p>
+
+
+
+<a name="212549719"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212549719" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212549719">(Oct 07 2020 at 12:22)</a>:</h4>
+<p>Any thoughts? Or important Pin-related UB/requirements that I'm missing?</p>
+
+
+
+<a name="212609587"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212609587" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212609587">(Oct 07 2020 at 19:44)</a>:</h4>
+<p>The problem is that it doesn't guarantee that the memory of <code>&amp;'static T</code> is not repurposed until <code>T</code> is <code>dropped</code>.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">pin</span>::<span class="n">Pin</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">fn</span> <span class="nf">static_pin</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="p">(</span><span class="n">static_ref</span>: <span class="kp">&amp;</span><span class="o">'</span><span class="nb">static</span> <span class="nc">T</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Pin</span><span class="o">&lt;&amp;'</span><span class="nb">static</span><span class="w"> </span><span class="n">T</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">//this is not safe</span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Pin</span>::<span class="n">new_unchecked</span><span class="p">(</span><span class="n">static_ref</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">something</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cm">/*some type needing pining*/</span><span class="nb">String</span>::<span class="n">new</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">leak</span>: <span class="kp">&amp;</span><span class="o">'</span><span class="nb">static</span> <span class="nc">mut</span><span class="w"> </span><span class="nb">String</span><span class="w">  </span><span class="o">=</span><span class="w"> </span><span class="nb">Box</span>::<span class="n">leak</span><span class="p">(</span><span class="nb">Box</span>::<span class="n">new</span><span class="p">(</span><span class="n">something</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">_pinned</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">static_pin</span><span class="p">(</span><span class="o">&amp;*</span><span class="n">leak</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="cm">/*do somthing with Pin&lt;&amp;'static T&gt; which requires the Drop guarantee */</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="c1">//Ups, drop guarantee violated</span>
+<span class="w">    </span><span class="n">std</span>::<span class="n">mem</span>::<span class="n">replace</span><span class="p">(</span><span class="n">leak</span><span class="p">,</span><span class="w"> </span><span class="nb">String</span>::<span class="n">new</span><span class="p">());</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="212609783"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212609783" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212609783">(Oct 07 2020 at 19:45)</a>:</h4>
+<p>Now this would not brake any <code>async</code> based futures as they are based on <code>Pin&lt;&amp;mut Self&gt;</code> but you can have something based on <code>Pin&lt;&amp;Self&gt;</code> which idk uses interior mutability and internal self  references.</p>
+
+
+
+<a name="212614839"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212614839" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212614839">(Oct 07 2020 at 20:27)</a>:</h4>
+<p><span class="user-mention" data-user-id="209646">@Philipp Korber</span> that doesn't compile.</p>
+
+
+
+<a name="212615401"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212615401" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212615401">(Oct 07 2020 at 20:32)</a>:</h4>
+<p>Once you reborrow the <code>&amp;'static mut</code> as a <code>&amp;'static</code>, you can no longer use the <code>&amp;'static mut</code>. This was <span class="user-mention silent" data-user-id="310399">Mara</span>'s whole point I believe. Maybe <span class="user-mention" data-user-id="256759">@boats</span> wants to weigh in?</p>
+
+
+
+<a name="212616182"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212616182" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212616182">(Oct 07 2020 at 20:39)</a>:</h4>
+<p>Yeah that snippet results in <code>error[E0502]: cannot borrow *leak as mutable because it is also borrowed as immutable</code>.  That <code>&amp;'static T</code> is <code>Copy</code> and not attached to any lifetime shorter than <code>'static</code>, so <code>static_pin</code> could keep a copy around and use it forever. So it should be impossible to use any <code>&amp;mut</code> to that T afterwards.</p>
+
+
+
+<a name="212616300"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212616300" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212616300">(Oct 07 2020 at 20:40)</a>:</h4>
+<p>Shes right I somehow missed that (worst I somehow tried it out on play.rust and didn't notice it doesn't compile <span aria-label="thinking" class="emoji emoji-1f914" role="img" title="thinking">:thinking:</span>  while believing it did, no idea what happened there).</p>
+
+
+
+<a name="212616571"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212616571" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212616571">(Oct 07 2020 at 20:42)</a>:</h4>
+<p>And even through you can use the <code>&amp;'static T</code> after the pin you can't repurpuse it.</p>
+<p>And while you could repurpose memory in fields with interior mutability of that <code>T</code> it doesn't matter as <code>Pin</code> only extends to <code>T</code>.</p>
+
+
+
+<a name="212617568"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212617568" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212617568">(Oct 07 2020 at 20:52)</a>:</h4>
+<p>So I guess <code>static_ref</code> is a good idea.</p>
+
+
+
+<a name="212647588"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212647588" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pickfire <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212647588">(Oct 08 2020 at 05:02)</a>:</h4>
+<p>I think it would be better to be named <code>new_static</code>? Right now we don't have <code>ref</code> but people may confuse <code>static_ref</code> with <code>as_ref</code>.</p>
+
+
+
+<a name="212942692"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212942692" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212942692">(Oct 11 2020 at 01:12)</a>:</h4>
+<p>Would the reasoning be valid for &amp;'static mut as well, since you won't be able to reuse the original &amp;mut if its reborrowed for static.</p>
+
+
+
+<a name="212959300"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212959300" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212959300">(Oct 11 2020 at 10:16)</a>:</h4>
+<p>Yeah it would. Not sure how often that one would be useful. a <code>static mut</code> is unsafe anyway. But maybe for something leaked through Box::leak?</p>
+
+
+
+<a name="212959552"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212959552" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212959552">(Oct 11 2020 at 10:24)</a>:</h4>
+<p>Some interrupt handling libs have a <code>#[interrupt]</code> proc-attribute on functions which allows defining and using <code>static mut</code>'s safely inside of a interrupt handler (as due to how interrupts work on those platforms you will not have concurrent access). I don't think this interrupts need <code>Pin</code> normally but they are a good example for some edge cases having safe abstractions over a <code>static mut</code>. <span aria-label="wink" class="emoji emoji-1f609" role="img" title="wink">:wink:</span></p>
+
+
+
+<a name="212960488"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212960488" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212960488">(Oct 11 2020 at 10:52)</a>:</h4>
+<p>hm, but that wouldn't work right? do you get a <code>&amp;'static mut</code> there? because if you do, how would it prevent you from swapping/moving the thing next time the interrupt triggers? you can't relly reborrow that &amp;mut 'forever'</p>
+
+
+
+<a name="212960640"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212960640" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212960640">(Oct 11 2020 at 10:56)</a>:</h4>
+<p>yeah, those aren't static. cortex-m-rt's <code>#[interrupt]</code> gives a <code>&amp;mut</code>, not a <code>&amp;'static mut</code>, to those <code>static mut</code>s.</p>
+
+
+
+<a name="212962735"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212962735" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212962735">(Oct 11 2020 at 12:00)</a>:</h4>
+<p>you can't move out of an <code>&amp;'static T</code> either; this function is sound but I don't see what guarantee it gets you</p>
+
+
+
+<a name="212962762"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212962762" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212962762">(Oct 11 2020 at 12:01)</a>:</h4>
+<p>the mut version does actually restrict your ability to use the <code>&amp;'static mut T</code>, so it is possibly interesting</p>
+
+
+
+<a name="212963034"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/212963034" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> HeroicKatora <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#212963034">(Oct 11 2020 at 12:08)</a>:</h4>
+<p>It's possible to grab a static but mutable variable from any global allocator, not only from <code>Box::leak</code>. In general you could get a <code>&amp;'static mut</code> from a <code>static: UnsafeCell&lt;_&gt;</code> and not only a <code>static mut</code> instance. You might also store such a reference in thread local storage. That's quite interesting and powerful for embedded DMA.</p>
+
+
+
+<a name="213021078"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213021078" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213021078">(Oct 12 2020 at 10:25)</a>:</h4>
+<blockquote>
+<p>but I don't see what guarantee it gets you</p>
+</blockquote>
+<p>See <a href="https://github.com/rust-lang/rust/pull/77726">https://github.com/rust-lang/rust/pull/77726</a> and <a href="https://github.com/rust-lang/rust/pull/77801">https://github.com/rust-lang/rust/pull/77801</a></p>
+
+
+
+<a name="213025444"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213025444" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213025444">(Oct 12 2020 at 11:17)</a>:</h4>
+<p>I've seen the PRs but I haven't looked at them in detail. Can you demonstrate what code becomes an error thanks to using pin?</p>
+
+
+
+<a name="213025516"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213025516" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213025516">(Oct 12 2020 at 11:18)</a>:</h4>
+<p>My opinion is that <code>Pin&lt;&amp;T&gt;</code> is a very useless witness because you can't move out of <code>&amp;T</code> anyway. <code>&amp;'static T</code> is a witness that <code>T</code> will never move all on its own</p>
+
+
+
+<a name="213025894"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213025894" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213025894">(Oct 12 2020 at 11:23)</a>:</h4>
+<p>It seems like the goal is to make the init method take <code>Pin&lt;&amp;mut Self&gt;</code>, but I notice the init method is still unsafe (presumably because it can only be called once?)</p>
+
+
+
+<a name="213026042"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213026042" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213026042">(Oct 12 2020 at 11:25)</a>:</h4>
+<p>I'm somewhat suspicious of <code>get_or_init_pin</code>.. I guess because its a once-cell if you successfully witness a <code>Pin&lt;&amp;mut T&gt;</code> you will never be able to see an <code>&amp;mut T</code></p>
+
+
+
+<a name="213026191"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213026191" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213026191">(Oct 12 2020 at 11:27)</a>:</h4>
+<p>In particular, I'm not convinced this comment is correct (it might be but I don't know the API well enough): <a href="https://github.com/rust-lang/rust/pull/77801/files#diff-22033bdccee7e824822bec8e3cbe15f4R344">https://github.com/rust-lang/rust/pull/77801/files#diff-22033bdccee7e824822bec8e3cbe15f4R344</a></p>
+
+
+
+<a name="213026212"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213026212" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213026212">(Oct 12 2020 at 11:27)</a>:</h4>
+<p>If there's any way to get an <code>&amp;mut T</code> from an <code>&amp;SyncOnceCell&lt;T&gt;</code> after calling this method, then this comment is not true</p>
+
+
+
+<a name="213026426"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213026426" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213026426">(Oct 12 2020 at 11:30)</a>:</h4>
+<p>Since init has other invariants that must be maintained, I'm not really sold that pin is buying a lot, especially since you have to then add on confirming that the various pin abstractions your adding are sound in general.</p>
+
+
+
+<a name="213026544"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213026544" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213026544">(Oct 12 2020 at 11:32)</a>:</h4>
+<p>Is it possible for init to take <code>&amp;'static self</code>?</p>
+
+
+
+<a name="213027240"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213027240" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213027240">(Oct 12 2020 at 11:41)</a>:</h4>
+<p>Okay, looking at SyncOnceCell I'm convinced that get_or_init_pin is sound.</p>
+
+
+
+<a name="213027371"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213027371" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213027371">(Oct 12 2020 at 11:43)</a>:</h4>
+<p>I think it'd be cleaner to just use the <code>'static</code> lifetime in this code and not <code>Pin</code>. For the special internal constructor on <code>SyncOnceCell</code> I'd write as <code>fn(&amp;'static self, f: impl FnOnce() -&gt; T, g: impl FnOnce(&amp;'static T)) -&gt; &amp;'static T</code> and then I'd justify the unsafe call to <code>init</code> with the <code>'static</code> lifetime and the once cell guarantees</p>
+
+
+
+<a name="213056414"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213056414" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213056414">(Oct 12 2020 at 15:59)</a>:</h4>
+<blockquote>
+<p>If there's any way to get an &amp;mut T from an &amp;SyncOnceCell&lt;T&gt; after calling this method, then this comment is not true</p>
+</blockquote>
+<p>but a <code>&amp;'a SyncOnceCell&lt;T&gt;</code> gives you a <code>&amp;'a T</code>, so there will never be any way to get a <code>&amp;mut T</code> from a <code>&amp;SyncOnceCell&lt;T&gt;</code></p>
+
+
+
+<a name="213056803"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213056803" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213056803">(Oct 12 2020 at 16:02)</a>:</h4>
+<blockquote>
+<p>Is it possible for init to take &amp;'static self?</p>
+</blockquote>
+<p>sure. it took a <code>&amp;self</code> before. but with <code>&amp;mut</code> the type can guarantee it's not yet shared with anybody yet. So then the choice is between a <code>&amp;'static</code> that guarantees no-moving but not not-shared-at-this-point, or a <code>&amp;mut</code> that guarantees not-shared-at-this-point but not no-moving. <code>Pin&lt;&amp;mut&gt;</code> would do both.</p>
+
+
+
+<a name="213057102"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213057102" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213057102">(Oct 12 2020 at 16:05)</a>:</h4>
+<p>And yes, 'static will work for ReentrantMutex with how it's currently used (except for the <code>&amp;mut</code> for init()). But if i  do that then we're just going to have the same discussion again later this week when I want to do the same for e.g. the thread local mutex and condvar used in the generic thread parker, or the RwLock used by the panicking logic.</p>
+
+
+
+<a name="213057629"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213057629" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213057629">(Oct 12 2020 at 16:09)</a>:</h4>
+<p>Oh and while <code>sys_common::ReentrantMutex</code> is used only with a static lifetime since recently, <code>sys::ReentrantMutex</code> is used with shorter lifetimes as well. <code>sys_common::Mutex</code> on Windows contains a <code>sys::Mutex</code> containing basically a<code>Box&lt;sys::ReentrantMutex&gt;</code>.</p>
+
+
+
+<a name="213058078"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213058078" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213058078">(Oct 12 2020 at 16:13)</a>:</h4>
+<p>is there any reason you want to avoid Pin here? seems like the perfect fit. it's exactly made for unmovable objects like this, right?</p>
+
+
+
+<a name="213058526"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213058526" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213058526">(Oct 12 2020 at 16:17)</a>:</h4>
+<blockquote>
+<p>My opinion is that Pin&lt;&amp;T&gt; is a very useless witness because you can't move out of &amp;T anyway.</p>
+</blockquote>
+<p>The important difference here is that Pin&lt;&amp;T&gt; guarantees that it won't move until it gets destructed (or forgotten), not just while you have that <code>&amp;T</code>. That's exactly what all the mutex/rwlock/condvar types require. So a <code>Pin</code> explains that much better than a <code>'static</code> lifetime, which would be overly strict (and unusable for the other lock types anyway).</p>
+
+
+
+<a name="213058752"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213058752" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213058752">(Oct 12 2020 at 16:19)</a>:</h4>
+<blockquote>
+<p>I've seen the PRs but I haven't looked at them in detail. Can you demonstrate what code becomes an error thanks to using pin?</p>
+</blockquote>
+<p>This for example: (currently UB) <a href="https://github.com/rust-lang/rust/blob/d6b5ffb5b41579dbc49e651691fa9bb670a39a07/library/std/src/sys_common/remutex/tests.rs#L8-L12">https://github.com/rust-lang/rust/blob/d6b5ffb5b41579dbc49e651691fa9bb670a39a07/library/std/src/sys_common/remutex/tests.rs#L8-L12</a></p>
+
+
+
+<a name="213060008"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213060008" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> boats <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213060008">(Oct 12 2020 at 16:30)</a>:</h4>
+<p>thanks for these responses, its easier to understand your vision thinking about replacing the <code>Box&lt;sys::Mutex&gt;</code> in <code>Mutex</code> with a pinned box</p>
+
+
+
+<a name="213060807"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213060807" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213060807">(Oct 12 2020 at 16:37)</a>:</h4>
+<p>Yeah, sorry, I'm making it all a bit chaotic. ^^' I'm trying to make things more managable by splitting it all in smaller PRs, by not touching <code>sys</code> yet here. But using <code>Pin</code> has a lot more benefit for the types i'm not touching yet in this PR.</p>
+
+
+
+<a name="213060956"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213060956" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213060956">(Oct 12 2020 at 16:39)</a>:</h4>
+<p>In the future it'd be cool if std could specialize on whether <code>sys::Mutex</code> is <code>Unpin</code> or not to decide if it goes in a Box. (Right now that's just an alias <code>type MovableMutex = Box&lt;Mutex&gt;; // or Mutex</code> for every platform.)</p>
+
+
+
+<a name="213061068"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213061068" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213061068">(Oct 12 2020 at 16:40)</a>:</h4>
+<p>If eventually a parking_lot style mutex/condvar/rwlock is introduced, they'll all be Unpin anyway and we could get rid of all of this again, i suppose. But it's hard to say how far away that is.</p>
+
+
+
+<a name="213062132"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213062132" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213062132">(Oct 12 2020 at 16:52)</a>:</h4>
+<p>I can probably find some good examples or show a PR how it works out for the other types, but it'd make it easier if I understand why you'd prefer to avoid Pin. This PR wouldn't really get simpler if i changed the Pin for a 'static.</p>
+
+
+
+<a name="213062827"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213062827" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213062827">(Oct 12 2020 at 16:58)</a>:</h4>
+<blockquote>
+<p>My opinion is that Pin&lt;&amp;T&gt; is a very useless witness because you can't move out of &amp;T anyway.</p>
+</blockquote>
+<p>Here's another example that shows <code>Pin&lt;&amp;T&gt;</code> is very useful over a <code>&amp;T</code>:</p>
+<p><a href="https://github.com/rust-lang/rust/blob/d6b5ffb5b41579dbc49e651691fa9bb670a39a07/library/std/src/sys_common/rwlock.rs#L34-L35">https://github.com/rust-lang/rust/blob/d6b5ffb5b41579dbc49e651691fa9bb670a39a07/library/std/src/sys_common/rwlock.rs#L34-L35</a></p>
+<p>By changing that to <code>self: Pin&lt;&amp;Self&gt;</code>, the function becomes safe. The pinnedness is the only unsafe requirement it has. <code>'static</code> wouldn't work there.</p>
+
+
+
+<a name="213072029"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Pin%3A%3Astatic_ref%28%29/near/213072029" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mara <a href="https://rust-lang.github.io/zulip_archive/stream/219381-t-libs/topic/Pin.3A.3Astatic_ref().html#213072029">(Oct 12 2020 at 18:35)</a>:</h4>
+<p>Demonstration of that: <a href="https://github.com/rust-lang/rust/pull/77865">https://github.com/rust-lang/rust/pull/77865</a></p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

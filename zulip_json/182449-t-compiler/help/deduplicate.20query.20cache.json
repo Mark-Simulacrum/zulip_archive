@@ -1,0 +1,170 @@
+[
+    {
+        "content": "<p>We currently call const eval multiple times while expecting exactly the same result: <a href=\"https://github.com/rust-lang/rust/blob/21cbbdc44de84e3ea99bca239091e5d1c49af654/compiler/rustc_mir/src/const_eval/eval_queries.rs#L245-L262\">https://github.com/rust-lang/rust/blob/21cbbdc44de84e3ea99bca239091e5d1c49af654/compiler/rustc_mir/src/const_eval/eval_queries.rs#L245-L262</a></p>",
+        "id": 226237011,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613209816
+    },
+    {
+        "content": "<p>with <a href=\"https://github.com/rust-lang/rust/issues/81339\">#81339</a> this would get even worse, as the call with <code>Reveal::All</code> now just tries to reuse <code>Reveal::UserFacing</code> which  tries to reuse <code>Reveal::Selection</code>. see <a href=\"https://github.com/rust-lang/rust/pull/81339#issuecomment-778592146\">https://github.com/rust-lang/rust/pull/81339#issuecomment-778592146</a></p>",
+        "id": 226237084,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613210000
+    },
+    {
+        "content": "<p>the same issue also exists for <code>WithOptConstParam</code>, for which we pretty much do the exact same thing</p>",
+        "id": 226237090,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613210022
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/blob/21cbbdc44de84e3ea99bca239091e5d1c49af654/compiler/rustc_mir_build/src/build/mod.rs#L29-L31\">https://github.com/rust-lang/rust/blob/21cbbdc44de84e3ea99bca239091e5d1c49af654/compiler/rustc_mir_build/src/build/mod.rs#L29-L31</a></p>",
+        "id": 226237137,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613210063
+    },
+    {
+        "content": "<p>i think it's not a big issue for the in-memory query cache cause we pretty much always just store interned stuff</p>",
+        "id": 226237169,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613210155
+    },
+    {
+        "content": "<p>but for example <code>eval_to_const_value_raw</code> is also cached on disk which goes through <code>Encodable</code> i think. So we have deep clones there afaict</p>",
+        "id": 226237226,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613210266
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"216206\">lcnr</span> <a href=\"#narrow/stream/182449-t-compiler.2Fhelp/topic/deduplicate.20query.20cache/near/226237226\">said</a>:</p>\n<blockquote>\n<p>but for example <code>eval_to_const_value_raw</code> is also cached on disk which goes through <code>Encodable</code> i think. So we have deep clones there afaict</p>\n</blockquote>\n<p>cc <span class=\"user-group-mention\" data-user-group-id=\"3282\">@wg-incr-comp</span> does one of you have an idea on how we can improve this? Or well, I guess the question is.. is my understanding even correct here ^^</p>",
+        "id": 226237284,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613210371
+    },
+    {
+        "content": "<p>Some queries (typeck) allocate manually their result on an arena, so as to return the same pointer when the result is the same. This helps when the original result takes a lot of memory. However, this does not deduplicate on-disk. For this, an interning scheme is required.</p>",
+        "id": 226243102,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1613219783
+    },
+    {
+        "content": "<p>A few things:</p>\n<ol>\n<li>for <code>const</code> and <code>static</code> items, we should not be storing <code>Reveal::UserFacing</code> and <code>Reveal::Selection</code> at all, as all cross-crate const evaluations of non-generic <code>const</code> items should go through <code>Reveal::All</code> afaict</li>\n<li>even for generic (so, associated or anonymous) constants there may be cases where encoding anything but <code>Reveal::All</code> is necessary at all</li>\n<li>we already deduplicate <code>AllocId</code>s (and thus their <code>Allocation</code>), not sure if we also do this with plain <code>&amp;'tcx Allocation</code>s, so we should look into that.</li>\n<li>Is <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/enum.ConstKind.html\">ConstKind</a> what we need to consider when deciding whether to create an interning scheme for on-disk  serialization? Or should we do that at the <code>&amp;'tcx ty::Const&lt;'tcx&gt;</code> level? The latter has the advantage of  being very cheap to check for duplicates.</li>\n</ol>",
+        "id": 226243258,
+        "sender_full_name": "oli",
+        "timestamp": 1613220047
+    },
+    {
+        "content": "<blockquote>\n<ol>\n<li>for <code>const</code> and <code>static</code> items, we should not be storing <code>Reveal::UserFacing</code> and <code>Reveal::Selection</code> at all, as all cross-crate const evaluations of non-generic <code>const</code> items should go through <code>Reveal::All</code> afaict</li>\n</ol>\n</blockquote>\n<p>hmm, i guess using erroneous concrete constants should always emit an error? Or at least a <code>const_err</code> lint? So you're not supposed to get these consts into associated constants used in generic anon consts?</p>\n<blockquote>\n<ol start=\"2\">\n<li>even for generic (so, associated or anonymous) constants there may be cases where encoding anything but <code>Reveal::All</code> is necessary at all</li>\n</ol>\n</blockquote>\n<p>do you have something <em>concrete</em> in mind here (words <span aria-label=\"sparkles\" class=\"emoji emoji-2728\" role=\"img\" title=\"sparkles\">:sparkles:</span>)</p>\n<blockquote>\n<ol start=\"3\">\n<li>we already deduplicate <code>AllocId</code>s (and thus their <code>Allocation</code>), not sure if we also do this with plain <code>&amp;'tcx Allocation</code>s, so we should look into that.</li>\n</ol>\n</blockquote>\n<p><span aria-label=\"thumbs up\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"thumbs up\">:thumbs_up:</span> </p>\n<blockquote>\n<ol start=\"4\">\n<li>Is <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/enum.ConstKind.html\">ConstKind</a> what we need to consider when deciding whether to create an interning scheme for on-disk  serialization? Or should we do that at the <code>&amp;'tcx ty::Const&lt;'tcx&gt;</code> level? The latter has the advantage of  being very cheap to check for duplicates.</li>\n</ol>\n</blockquote>\n<p>we could just implement <code>DecodeWithShorthand</code> for <code>ConstKind</code> <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 226244154,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613221482
+    },
+    {
+        "content": "<p>that's actually somethingI can just try rn</p>",
+        "id": 226244158,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613221490
+    },
+    {
+        "content": "<p>for 2. I left a comment on the PR</p>",
+        "id": 226244395,
+        "sender_full_name": "oli",
+        "timestamp": 1613221884
+    },
+    {
+        "content": "<p>repeated here: we don't need to encode the value of generic constants, since we can just recompute them</p>",
+        "id": 226244403,
+        "sender_full_name": "oli",
+        "timestamp": 1613221908
+    },
+    {
+        "content": "<p>as their MIR must be encoded anyway</p>",
+        "id": 226244407,
+        "sender_full_name": "oli",
+        "timestamp": 1613221920
+    },
+    {
+        "content": "<p>ah, yeah. we don't <em>have</em> to encode anything that can just be recomputed</p>",
+        "id": 226244674,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613222396
+    },
+    {
+        "content": "<p>we may still <em>want</em> to though <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span> that's where the heuristic comes into play <span aria-label=\"sparkles\" class=\"emoji emoji-2728\" role=\"img\" title=\"sparkles\">:sparkles:</span></p>",
+        "id": 226244719,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613222416
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"216206\">lcnr</span> <a href=\"#narrow/stream/182449-t-compiler.2Fhelp/topic/deduplicate.20query.20cache/near/226244158\">said</a>:</p>\n<blockquote>\n<p>that's actually somethingI can just try rn</p>\n</blockquote>\n<p>tried it in <a href=\"https://github.com/rust-lang/rust/issues/82059\">#82059</a> and it seemed to slightly decrease perf</p>",
+        "id": 226265187,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613248145
+    },
+    {
+        "content": "<p>without a noticeable impact on max-rss</p>",
+        "id": 226265224,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613248176
+    },
+    {
+        "content": "<p>I would not really expect max-rss to change, but the size of metadata to decrease</p>",
+        "id": 226297395,
+        "sender_full_name": "oli",
+        "timestamp": 1613298443
+    },
+    {
+        "content": "<p>but it actually looks like max-rss got worse in incremental builds?</p>",
+        "id": 226297463,
+        "sender_full_name": "oli",
+        "timestamp": 1613298544
+    },
+    {
+        "content": "<p>if we have a slot of small improvements</p>",
+        "id": 226297479,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613298600
+    },
+    {
+        "content": "<p>like when caching <code>ConstKind::Value</code></p>",
+        "id": 226297521,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613298611
+    },
+    {
+        "content": "<p>the gains from the improved encoding are probably overshadowed by the additional cache</p>",
+        "id": 226297535,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613298638
+    },
+    {
+        "content": "<p>I wonder if doing that deduplication at the <code>ty::Const</code> level would make more sense</p>",
+        "id": 226297544,
+        "sender_full_name": "oli",
+        "timestamp": 1613298687
+    },
+    {
+        "content": "<p>as that is already interned</p>",
+        "id": 226297546,
+        "sender_full_name": "oli",
+        "timestamp": 1613298690
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Bash\"><pre><span></span><code>du --summarize --bytes 3158857297417566824631a85c4cb3c0615ec6c2 c10327bae5477ad75e13ebbc684a251969773716\n<span class=\"m\">404573596</span>   3158857297417566824631a85c4cb3c0615ec6c2\n<span class=\"m\">403608352</span>   c10327bae5477ad75e13ebbc684a251969773716\n</code></pre></div>",
+        "id": 226297554,
+        "sender_full_name": "tm",
+        "timestamp": 1613298705
+    },
+    {
+        "content": "<p>so it did have an effect after all, but it's very expensive to get that small gain</p>",
+        "id": 226297605,
+        "sender_full_name": "oli",
+        "timestamp": 1613298749
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/182449-t-compiler.2Fhelp/topic/deduplicate.20query.20cache/near/226297544\">said</a>:</p>\n<blockquote>\n<p>I wonder if doing that deduplication at the <code>ty::Const</code> level would make more sense</p>\n</blockquote>\n<p>that might work</p>",
+        "id": 226297613,
+        "sender_full_name": "lcnr",
+        "timestamp": 1613298770
+    }
+]

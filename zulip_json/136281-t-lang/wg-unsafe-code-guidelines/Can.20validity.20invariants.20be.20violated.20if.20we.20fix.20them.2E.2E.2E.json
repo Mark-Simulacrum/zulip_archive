@@ -1,0 +1,992 @@
+[
+    {
+        "content": "<p>... before anybody can tell?</p>\n<p>So, I have a function which takes a <code>&amp;mut usize</code> which came from <code>transmute::&lt;&amp;mut NonNull&lt;u8&gt;, &amp;mut usize&gt;</code> (or the equivalent). This function needs to be unsafe, since it could cause a NonNull&lt;u8&gt; to have all-bits-zero, which is obviously illegal. I'm wondering if the constraint it has is that it must <em>leave</em> the usize as non-zero when it returns, or if the usize must <em>never</em> be zeroed.</p>\n<p>Specifically, for various reasons (this is a simplified version of my actual case), it's more efficient for me to write a zero, and <em>then</em> check, rather than performing the check first, so I'd like to do that.</p>\n<p>It's not clear if this is legal though. It does mean that 'memory that elsewhere in the code is represented as a NonNull&lt;T&gt;  in an invalid state' -- which on its face sounds like UB, but given that I have an &amp;mut reference to the memory in question, the NonNull shouldn't be \"active\" (there's probably a better term for this), and so maybe it's allowed?</p>\n<p>I mocked up something with (hopefully) equivalent safety properties here: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=4dcac974a42bbe70653eaed6dc11e1f6\" target=\"_blank\" title=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=4dcac974a42bbe70653eaed6dc11e1f6\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=4dcac974a42bbe70653eaed6dc11e1f6</a>, and miri doesn't complain, but that's not actually a guarantee, so I figured I'd ask.</p>\n<p>(Note: I've simplified my actual case, which is in implementing an SSO optimized string, but I can get into details if needed, or even provide code closer to my actual example)</p>",
+        "id": 182872739,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1575773334
+    },
+    {
+        "content": "<p>validity is LLVM-level invariant</p>",
+        "id": 182884330,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1575795639
+    },
+    {
+        "content": "<p>safety is Rust API-level invariant</p>",
+        "id": 182884332,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1575795656
+    },
+    {
+        "content": "<p>Memory is not typed in Rust. A region of memory has to fulfill the validity invariant for <code>T</code>  when (vaguely speaking) something looks at that memory as a <code>T</code>, not at any other times. So your code is fine AFAICT.</p>",
+        "id": 182884473,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1575795925
+    },
+    {
+        "content": "<blockquote>\n<p>I'm wondering if the constraint it has is that it must leave the usize as non-zero when it returns, or if the usize must never be zeroed.</p>\n</blockquote>\n<p>Very good questions! We have an open issue about this: <a href=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/84\" target=\"_blank\" title=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/84\">https://github.com/rust-lang/unsafe-code-guidelines/issues/84</a></p>",
+        "id": 183182584,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1576086976
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> could you add your usecase in that issue? I think so far we didnt really have one.</p>",
+        "id": 183182625,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1576087015
+    },
+    {
+        "content": "<p>We could in principle decide either way, though I see no good way to actually precisely specify things in a way that your code is <em>not</em> legal.</p>",
+        "id": 183182646,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1576087040
+    },
+    {
+        "content": "<p>(of course you need to be careful with panics, but that is a separate concern)</p>",
+        "id": 183182662,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1576087050
+    },
+    {
+        "content": "<p>@RalfJ sorry, I missed this. I'll add a comment to that issue now. Also, good catch, there was a case where a panic was in-principal possible which I hadn't considered. the code looked like:</p>\n<div class=\"codehilite\"><pre><span></span>// secretively read from our first field to see if that was the final byte\n// needed to zero it out..\nif unlikely!(*(self as *const _ as *const usize) == 0) {\n    // oh no! overwrite it with something else quickly then move the string\n    // onto heap allocated storage.\n    *end = 1;\n    self.handle_degenerate_push(c);\n    return\n}\n</pre></div>\n\n\n<p>but the unlikely macro is secretive, in that if <code>cfg(count_branch_hints)</code> is enabled, it records how many times it's taken/missed. that code could have probably paniced! (that said, that's a internal thing i'm doing for profiling, which end users aren't intended to enable).</p>\n<p>i think it's probably possible to manage to use some bitwise int trickery to fold the equivalent to <code>|| c == '\\0'</code> into a slow-path check earlier in the function, which would mean i could be certain this code never has to deal with writing a null, and both eliminate this test and the 'temporary invalid state'. (that said, i still think it's better in general if, as others put it, rust doesn't have typed memory -- in general that makes this kind of unsafe much easier to reason about than in c++ -- the lack of strict-aliasing is &lt;3)</p>",
+        "id": 183228797,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576126253
+    },
+    {
+        "content": "<p>posted, but i'm sorry it's so long (i tried to shorten it ended up longer, and with some parts moved into footnotes...).</p>\n<p>it should give an idea of what i want to do though. even if i fix this issue, essentially i'd like to be able to interpret any memory as any other type of memory, given the constraints of:</p>\n<ul>\n<li>references and dereferenced pointers always have accessed suitable alignment</li>\n<li>reference mutability and aliasing rules are <em>always</em> respected </li>\n<li>validity requirements are <em>ultimately</em> respected for any variable copied/read from/???, but might be very temporarily disrespected while the value is being interpreted (realistically, via a mut borrow) as a different kind of memory.</li>\n</ul>\n<p>The last bit is the relevant one here, and it's error prone, but in hot code my experience has often been that it can be much faster to 'do then check' vs 'check than do' -- the 2nd case has to check both if the thing we're considering doing could cause a problem (for any state -- e.g. c == '\\0'), and that we're currently in a state where it would cause a problem for us (e.g. len == 7 &amp;&amp; first 7 bytes were also NUL -- for a 64 bit system)</p>\n<p>And so i'm glad to hear you don't think there's a reason to disallow it. (now, there are plenty of things i'd like to do that are even dodgier, but that are disallowed, but i guess i can wait until inline assembly stabilizes to, say, read a little past the end of objects for cases where i know a page fault is impossible... :p)</p>",
+        "id": 183231655,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576131377
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> you assume that you can't use an union or an enum</p>",
+        "id": 183254337,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154184
+    },
+    {
+        "content": "<p>go for a struct instead</p>",
+        "id": 183254344,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154191
+    },
+    {
+        "content": "<p>that's what i did</p>",
+        "id": 183254355,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154210
+    },
+    {
+        "content": "<p>run into validity issues, and your post in the ucgs asks whether these are issues or not</p>",
+        "id": 183254359,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154214
+    },
+    {
+        "content": "<p>AFAICT you can just use an enum as long as you give it the right niches</p>",
+        "id": 183254366,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154224
+    },
+    {
+        "content": "<p>so none of this matters</p>",
+        "id": 183254370,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154229
+    },
+    {
+        "content": "<p>i actually need to read from inactive variants.</p>",
+        "id": 183254373,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154239
+    },
+    {
+        "content": "<p>it is hard to tell, since you haven't actually explained what layout you'd like to have, and why you can't have it with an enum or union</p>",
+        "id": 183254378,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154248
+    },
+    {
+        "content": "<p>all variants of an union are always active</p>",
+        "id": 183254388,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154266
+    },
+    {
+        "content": "<p>there is no concept of \"inactive\" variants for an union</p>",
+        "id": 183254394,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154276
+    },
+    {
+        "content": "<p>right, a union would be possible but i'd lose NonNull niche which i deliberately want to keep</p>",
+        "id": 183254445,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154293
+    },
+    {
+        "content": "<p>I don't understand why that is the case</p>",
+        "id": 183254464,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154315
+    },
+    {
+        "content": "<p>you can just give the union a niche</p>",
+        "id": 183254466,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154319
+    },
+    {
+        "content": "<p>and then you get it back</p>",
+        "id": 183254468,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154323
+    },
+    {
+        "content": "<p>so that Option&lt;String&gt; is the same as String. i talked more about what i'm doing and the layout in the issue i was asked to post on</p>",
+        "id": 183254472,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154328
+    },
+    {
+        "content": "<p>this is exactly what i'm telling you</p>",
+        "id": 183254474,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154333
+    },
+    {
+        "content": "<p>hmm</p>",
+        "id": 183254481,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154339
+    },
+    {
+        "content": "<p>you are assuming that this is impossible, but maybe it isn't</p>",
+        "id": 183254484,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154342
+    },
+    {
+        "content": "<p>i can give a union a niche?</p>",
+        "id": 183254493,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154344
+    },
+    {
+        "content": "<p>please, explain what it is that you'd actually want</p>",
+        "id": 183254504,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154352
+    },
+    {
+        "content": "<blockquote>\n<p>i can give a union a niche?</p>\n</blockquote>\n<p>Should be as simple as <code>#[rustc_layout_scalar_valid_range_start(1)]</code></p>",
+        "id": 183254535,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154393
+    },
+    {
+        "content": "<p>and if it isn't, we can just allow it</p>",
+        "id": 183254569,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154403
+    },
+    {
+        "content": "<p>i want <code> union { struct { NonNull&lt;u8&gt;, usize, usize }; [u8; size_of::&lt;usize&gt;() * 3] }</code> while still keeping the NonNull's niche</p>",
+        "id": 183254594,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154423
+    },
+    {
+        "content": "<p>oh i'm not using nightly</p>",
+        "id": 183254596,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154432
+    },
+    {
+        "content": "<p>that does not make sense</p>",
+        "id": 183254604,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154454
+    },
+    {
+        "content": "<p>since the second variant first <code>size_of::&lt;usize&gt;()</code> <code>u8</code> can be null</p>",
+        "id": 183254611,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154463
+    },
+    {
+        "content": "<p>(according to those types)</p>",
+        "id": 183254622,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154487
+    },
+    {
+        "content": "<p>i'm willing to ensure that the nonnull's invariant stays respected</p>",
+        "id": 183254639,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154512
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/13#issuecomment-419140218\" target=\"_blank\" title=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/13#issuecomment-419140218\">https://github.com/rust-lang/unsafe-code-guidelines/issues/13#issuecomment-419140218</a> \"My personal stanza on this is that if someone really wants their union layout optimized, we should provide attributes to let them do that\" that's really what i would want</p>",
+        "id": 183254692,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154535
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><span class=\"k\">union</span> <span class=\"nc\">U</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">heap</span>: <span class=\"p\">(</span><span class=\"n\">NonNull</span><span class=\"o\">&lt;</span><span class=\"kt\">u8</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">sso</span>: <span class=\"p\">(</span><span class=\"n\">NonZeroUsize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"n\">size_of</span>::<span class=\"o\">&lt;</span><span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">()]),</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 183254700,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154554
+    },
+    {
+        "content": "<p>barring that, i can just maintain validity invariant explicitly</p>",
+        "id": 183254702,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154556
+    },
+    {
+        "content": "<p>hmmm</p>",
+        "id": 183254735,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154596
+    },
+    {
+        "content": "<p>i guess that would work</p>",
+        "id": 183254743,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154605
+    },
+    {
+        "content": "<p>That union _might_ have a niche for the first <code>usize</code></p>",
+        "id": 183254748,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154612
+    },
+    {
+        "content": "<p>assuming it does it would work but i'm not sure it buys me anything</p>",
+        "id": 183254761,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154628
+    },
+    {
+        "content": "<p>over just treating the struct like an array when it's sso</p>",
+        "id": 183254810,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154644
+    },
+    {
+        "content": "<p>I'm just giving you what you ask for, you wanted an union with a niche at null, that is it</p>",
+        "id": 183254814,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154648
+    },
+    {
+        "content": "<p>I'm not sure why you can't use an <code>enum</code> though</p>",
+        "id": 183254819,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154655
+    },
+    {
+        "content": "<p>I suppose you have a discriminant somewhere to tell between sso and heap</p>",
+        "id": 183254836,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154673
+    },
+    {
+        "content": "<p>So you could just use an <code>enum</code>, and give that <code>enum</code> a niche</p>",
+        "id": 183254857,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154707
+    },
+    {
+        "content": "<p>my layout a little more suble than that actually. i could use an enum if i had exact control over how descriminants are chosen i guess</p>",
+        "id": 183254868,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154730
+    },
+    {
+        "content": "<p>err, where the bits are placed</p>",
+        "id": 183254874,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154741
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><span class=\"k\">enum</span> <span class=\"nc\">E</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">Heap</span><span class=\"p\">(</span><span class=\"n\">NonNull</span><span class=\"o\">&lt;</span><span class=\"kt\">u8</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">Sso</span><span class=\"p\">(</span><span class=\"n\">NonZeroUsize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"kt\">usize</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"p\">]),</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 183254879,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154756
+    },
+    {
+        "content": "<p>That enum will be 32 bytes on 64-bits, because the discriminant must be stored extra</p>",
+        "id": 183254928,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154775
+    },
+    {
+        "content": "<p>yeah that's a loss.</p>",
+        "id": 183254939,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154787
+    },
+    {
+        "content": "<p>but you'd need to tell Rust that there is a way to store it inside the enum</p>",
+        "id": 183254940,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154788
+    },
+    {
+        "content": "<p>and i mean, it's not that this can't be made to work in an enum without changing my layout</p>",
+        "id": 183254949,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154796
+    },
+    {
+        "content": "<p>it could</p>",
+        "id": 183254952,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154798
+    },
+    {
+        "content": "<p>i'd just lose a couple optimizations</p>",
+        "id": 183254966,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154819
+    },
+    {
+        "content": "<p>as mentioned, if you are able to fit this in an union, it will be because you are storing the discriminant inline</p>",
+        "id": 183254977,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154832
+    },
+    {
+        "content": "<p>you can do that for an enum to</p>",
+        "id": 183254982,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154836
+    },
+    {
+        "content": "<p>it is</p>",
+        "id": 183254983,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154837
+    },
+    {
+        "content": "<p>well</p>",
+        "id": 183254987,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154840
+    },
+    {
+        "content": "<p>but you haven't explained how you would do it for the union</p>",
+        "id": 183255004,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154861
+    },
+    {
+        "content": "<p>there is probably a bit somewhere that's <code>1</code> for SSO and <code>0</code> for heap or viceversa</p>",
+        "id": 183255070,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154885
+    },
+    {
+        "content": "<p>it is</p>",
+        "id": 183255075,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154892
+    },
+    {
+        "content": "<p>So just have two types, one with a niche for 1, and one with a niche for 0</p>",
+        "id": 183255099,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154926
+    },
+    {
+        "content": "<p>there are 2 bits, individually they have specific meanings (heap vs notheap, mutable vs const). small is notheap + mutable</p>",
+        "id": 183255101,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154927
+    },
+    {
+        "content": "<p>and rustc should just make the enum small automatically</p>",
+        "id": 183255105,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576154932
+    },
+    {
+        "content": "<p>no, i have four variants, but my descriminant layout and being consitent in how the others are represented means functions only need to check 1 case generally (small vs non-small) for fast paths</p>",
+        "id": 183255147,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576154977
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><span class=\"k\">enum</span> <span class=\"nc\">E</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">Heap</span><span class=\"p\">(</span><span class=\"n\">NonNull</span><span class=\"o\">&lt;</span><span class=\"kt\">u8</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"n\">size_of</span>::<span class=\"o\">&lt;</span><span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">TagHeap</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">Sso</span><span class=\"p\">(</span><span class=\"n\">NonZeroUsize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"n\">size_of</span>::<span class=\"o\">&lt;</span><span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"o\">-</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">TagSso</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 183255214,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155004
+    },
+    {
+        "content": "<p>And then your <code>TagHeap</code> and <code>TagSso</code> use the <code>#[rustc_layout_scalar_valid_range_start(N)]</code> and <code>#[rustc_layout_scalar_valid_range_end(N)]</code> attributes to encode their ranges of valid values</p>",
+        "id": 183255252,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155055
+    },
+    {
+        "content": "<p>right, the tag bits are in the same byte as the small-string length, and they're the most/least (depends on endian) singificant bits of the heap/arc/static string capacity</p>",
+        "id": 183255266,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155069
+    },
+    {
+        "content": "<p>e.g. </p>\n<div class=\"codehilite\"><pre><span></span><span class=\"cp\">#[repr(transparent)]</span><span class=\"w\"></span>\n<span class=\"cp\">#[rustc_layout_scalar_valid_range_start(2)]</span><span class=\"w\"></span>\n<span class=\"cp\">#[rustc_layout_scalar_valid_range_end(255)]</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">TagSso</span><span class=\"p\">(</span><span class=\"kt\">u8</span><span class=\"p\">);</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 183255291,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155099
+    },
+    {
+        "content": "<p>lol i mean, that seems very stable</p>",
+        "id": 183255302,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155112
+    },
+    {
+        "content": "<p>Once you get something like that working on nightly, with an enum, then the only question would be how to make it work on stable Rust</p>",
+        "id": 183255364,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155146
+    },
+    {
+        "content": "<p>why?</p>",
+        "id": 183255374,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155162
+    },
+    {
+        "content": "<p>A lot of people want to be able to define their own <code>NonZeroXY</code> types, so we might just stabilize a way to do that</p>",
+        "id": 183255385,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155172
+    },
+    {
+        "content": "<p>Like, <code>NonMaxU8</code> where the niche is not at zero, but at 255, for example, and well, everything in between</p>",
+        "id": 183255408,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155205
+    },
+    {
+        "content": "<p>yeah but why are you saying the way i'm doing it now is wrong?</p>",
+        "id": 183255412,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155210
+    },
+    {
+        "content": "<p>fwiw this is just a proof of concept and about 50% exists to prove a bet with someone who claimed rust couldn't do this sort of thing as well as c++.</p>",
+        "id": 183255429,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155227
+    },
+    {
+        "content": "<p>because as you say, you actually want an enum</p>",
+        "id": 183255437,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155233
+    },
+    {
+        "content": "<p>well</p>",
+        "id": 183255445,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155239
+    },
+    {
+        "content": "<p>i <em>really</em> want precise control</p>",
+        "id": 183255490,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155245
+    },
+    {
+        "content": "<p><em>conceptually</em> it's an enum</p>",
+        "id": 183255497,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155256
+    },
+    {
+        "content": "<p>sure, so why shouldn't you be able to tell the enum how the discriminant is stored ?</p>",
+        "id": 183255509,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155274
+    },
+    {
+        "content": "<p>why should you have to drop down to a struct or an union, deal with a lot more unsafe code, validity invariants, etc. ?</p>",
+        "id": 183255544,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155315
+    },
+    {
+        "content": "<p>i feel like by defining the range of the enum i'm not actually telling it how to store things though. it still is kind of up to it whetehr or not it puts it in one place or another</p>",
+        "id": 183255547,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155322
+    },
+    {
+        "content": "<p>i'd feel uncomforatble having unsafe code rely on anything less than a hard guarantee of a specific layout opt. from rustc</p>",
+        "id": 183255566,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155344
+    },
+    {
+        "content": "<p>You can make your enum <code>repr(C)</code>, to get defined layout</p>",
+        "id": 183255595,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155363
+    },
+    {
+        "content": "<p>you can control how many bits the discriminant of an enum takes already as well</p>",
+        "id": 183255632,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155377
+    },
+    {
+        "content": "<p>that disables layout optimizations though no? turns into tagged union</p>",
+        "id": 183255636,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155379
+    },
+    {
+        "content": "<p>yep, but if you do: </p>\n<div class=\"codehilite\"><pre><span></span><span class=\"cp\">#[repr(C)]</span><span class=\"w\"> </span><span class=\"k\">struct</span> <span class=\"nc\">Heap</span><span class=\"p\">(</span><span class=\"n\">NonNull</span><span class=\"o\">&lt;</span><span class=\"kt\">u8</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">...);</span><span class=\"w\"></span>\n<span class=\"cp\">#[repr(C)]</span><span class=\"w\"> </span><span class=\"k\">struct</span> <span class=\"nc\">Sso</span><span class=\"p\">(...);</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">Enum</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">Heap</span><span class=\"p\">(</span><span class=\"n\">Heap</span><span class=\"p\">),</span><span class=\"w\"> </span><span class=\"n\">Sso</span><span class=\"p\">(</span><span class=\"n\">Sso</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>then the layout of the variant fields is fixed</p>",
+        "id": 183255763,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155488
+    },
+    {
+        "content": "<p>anyway i'm not really interested in the most clean way to write it, i think the stdlib's string (and vec+rawvec) is very clean. i'm intersted in seeing what optimizations i can make work in rust to prove a point</p>",
+        "id": 183255776,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155511
+    },
+    {
+        "content": "<p>additionally i'm interested in what kinds of optimizations rust can do that c++ can't, layout optimizations are one of them, but honestly all bitpatterns in this are fully occupited</p>",
+        "id": 183255819,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155563
+    },
+    {
+        "content": "<p>Rust enums have guaranteed layout optimizations, if you have an enum with the right niches, which you can have, then it is possible for <code>Option&lt;SSoString&gt;</code> and <code>SsoString</code> to have the same size</p>",
+        "id": 183255822,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155569
+    },
+    {
+        "content": "<p>yeah. that's true for my current implementation</p>",
+        "id": 183255837,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155588
+    },
+    {
+        "content": "<p>without validity issues, and with the safety of enums</p>",
+        "id": 183255845,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155601
+    },
+    {
+        "content": "<p>If you don't care about that, just write <code>struct SsoString(NonZeroU8, [u8; ...]);</code> and deal with raw bytes, but then you are kind of on your own.</p>",
+        "id": 183255948,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155655
+    },
+    {
+        "content": "<p>i don't have validity issues according to everybody else who's said anything about this. and i could remove the case that's dodgy at the cost of an extra test if it turns out that it's not leglal</p>",
+        "id": 183255978,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155680
+    },
+    {
+        "content": "<p>i mean literally my string is</p>\n<div class=\"codehilite\"><pre><span></span>#[repr(C)]\npub(crate) struct String {\n    data: NonNull&lt;u8&gt;,\n    len: usize,\n    cap_flags: CapFlags,\n}\n</pre></div>\n\n\n<p>as i said in the issue. when it's small i just treat differently</p>",
+        "id": 183256068,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155734
+    },
+    {
+        "content": "<p>As I said, you can do that, in the same way that you can treat all your types as a <code>[u8; N]</code> buffer and disable all type safety.</p>",
+        "id": 183256142,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155815
+    },
+    {
+        "content": "<p>yeah, i mean i didn't say it was great, it's also not actually an issue for most of the code</p>",
+        "id": 183256200,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155854
+    },
+    {
+        "content": "<p>But to me the use case you posted read like an XY problem. You have an enum, that you don't know how to express in Rust. AFAICT it is possible to express it in Rust, so the usecase itself isn't that interesting to me at least, like, you should just be able to use an enum instead.</p>",
+        "id": 183256208,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576155863
+    },
+    {
+        "content": "<p>yeah i can tell you think it's an XY problem. honestly, it's obvious you think i don't know what i'm doing :/. i've written plenty of rust, been following UCG, and done similar things in c++ many times.</p>",
+        "id": 183256294,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576155952
+    },
+    {
+        "content": "<p>i agree that it's not very clean to interpret a struct as a bag of bytes. i'm also not interested in fighting with the compiler to attempt it to lay something out the way i've proven it out on paper</p>",
+        "id": 183256430,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576156049
+    },
+    {
+        "content": "<p>you don't need to talk about SSO at all to ask whether <code>transmute::&lt;&amp;mut NonNull&lt;u8&gt;, &amp;mut usize&gt;</code> allows you to write zero through the <code>&amp;mut usize</code> or not</p>",
+        "id": 183256449,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576156069
+    },
+    {
+        "content": "<p>honestly it was an attempt at heading off suggestions of XY problems :sigh:</p>",
+        "id": 183256504,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576156095
+    },
+    {
+        "content": "<p>but also to give context why it might be useful <em>for my case</em></p>",
+        "id": 183256520,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576156120
+    },
+    {
+        "content": "<p>anyway since i have you here, re:mimallocator (i'm the one that filed the big pr that you don't want to review lol), i could reduce the size of the PR by doing separate things for the heap-local api and the global one, but i'm not sure that would actually make \"does this api seem reasonable\" any easier to answer.</p>",
+        "id": 183256731,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576156317
+    },
+    {
+        "content": "<p>(also if you want to talk in PM or another channel that might better, i guess, )</p>",
+        "id": 183256788,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576156343
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span> rustc_layout_scalar_calid_range_start is for internal use only. It's perma-unstable</p>",
+        "id": 183537741,
+        "sender_full_name": "centril",
+        "timestamp": 1576493114
+    },
+    {
+        "content": "<p>so?</p>",
+        "id": 183537768,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493154
+    },
+    {
+        "content": "<p>Its the only way to specify niches for scalar values</p>",
+        "id": 183537842,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493190
+    },
+    {
+        "content": "<p>If you want a NonMaxU32 its the only feature you can use</p>",
+        "id": 183537854,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493205
+    },
+    {
+        "content": "<p>and that's a very reasonable thing to want</p>",
+        "id": 183537860,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493214
+    },
+    {
+        "content": "<p>I find the Small String optimization is also a very reasonable use case of user-defined niches</p>",
+        "id": 183537889,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493247
+    },
+    {
+        "content": "<p>And I find it more reasonable to use that feature than to workaround it using completely illogical types to try to approximate the same effect</p>",
+        "id": 183538069,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493369
+    },
+    {
+        "content": "<p>You should choose types that give meaning to your bits in memory, and not puzzle types with wrong meanings to get some particular combinations of niches, and then unsafe-code your way out of that situation</p>",
+        "id": 183538146,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493424
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span> I don't think the attribute should be recommended for general use. We might change how it behaves at any time or even remove it entirely</p>",
+        "id": 183538470,
+        "sender_full_name": "centril",
+        "timestamp": 1576493736
+    },
+    {
+        "content": "<p>I'm not recommending it for general use, I'm pointing out that it is the best tool we currently have for the job</p>",
+        "id": 183538535,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493780
+    },
+    {
+        "content": "<p>If you don't agree with that, suggest a better tool</p>",
+        "id": 183538545,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493791
+    },
+    {
+        "content": "<p>Worse tools had already been suggested</p>",
+        "id": 183538591,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493841
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span> I would be happy if you just noted that it was perma-unstable</p>",
+        "id": 183538596,
+        "sender_full_name": "centril",
+        "timestamp": 1576493848
+    },
+    {
+        "content": "<p>When mentioning it</p>",
+        "id": 183538607,
+        "sender_full_name": "centril",
+        "timestamp": 1576493860
+    },
+    {
+        "content": "<p>So if we remove it, how will all NonZero / NonNull types work ?</p>",
+        "id": 183538634,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493879
+    },
+    {
+        "content": "<p>Do all of them become lang items? Or does this tool get replaced with a different one ?</p>",
+        "id": 183538693,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493894
+    },
+    {
+        "content": "<p>I don't see any mid term (~4 years) future were this tool is replaced with something less powerful</p>",
+        "id": 183538730,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493926
+    },
+    {
+        "content": "<p>I'm not saying it will be changed because there is no need to from a compiler perspective</p>",
+        "id": 183538765,
+        "sender_full_name": "centril",
+        "timestamp": 1576493963
+    },
+    {
+        "content": "<p>And well its unstable, and requires the rustc_attrs features, so those using it already know that it isn't stable, and rustc-only</p>",
+        "id": 183538785,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576493994
+    },
+    {
+        "content": "<p>Well if you want to take the risk of an attribute which we are free to remove or fundamentally change then by all means.</p>",
+        "id": 183538980,
+        "sender_full_name": "centril",
+        "timestamp": 1576494128
+    },
+    {
+        "content": "<p>I mean, that's technically true for all nightly features / attributes.</p>",
+        "id": 183539122,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576494271
+    },
+    {
+        "content": "<p>No matter how far a nightly feature is on the path towards stabilization, before its stabilized a 180 turn can always happen.</p>",
+        "id": 183539154,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576494305
+    },
+    {
+        "content": "<p>Like, why do we have <code>specialization</code> and not <code>rustc_specialization</code></p>",
+        "id": 183539172,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576494316
+    },
+    {
+        "content": "<p>A lot of nightly crates use that feature, and chances are that if the feature ever sees more progress, most of them will break.</p>",
+        "id": 183539185,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576494338
+    },
+    {
+        "content": "<p>Technically yes but in practice no. Specialisation is unstable for very particular reasons whereas rustc_attrs features are never intended to be stabilised</p>",
+        "id": 183539401,
+        "sender_full_name": "centril",
+        "timestamp": 1576494504
+    },
+    {
+        "content": "<p>If a feature isn't stable, we can break it, and that's a risk. But trying to quantify how big is the risk in using the different nightly features in some code is quite hard. Some people think that the closer the feature is to stabilization the lesser the risk. Yet for my code, the closer a feature is to stabilization, the higher the chances that it gets iterated, and breaks.</p>",
+        "id": 183539440,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576494541
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span> all I really want is that it be mentioned that a feature is perma-unstable to give users a fair warning, that's all</p>",
+        "id": 183539915,
+        "sender_full_name": "centril",
+        "timestamp": 1576495015
+    },
+    {
+        "content": "<p>I think I'm going to exit this conversation for now</p>",
+        "id": 183539935,
+        "sender_full_name": "centril",
+        "timestamp": 1576495037
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> this feature is perma-unstable, which means that there is no path for it to stabilization</p>",
+        "id": 183539948,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576495061
+    },
+    {
+        "content": "<p>Its been available for years, it hasn't changed at all, there aren't AFAIK any plans to change it either, and it is required to support stable functionality that cannot be removed, which means that if this feature is removed, it needs to be replaced with something else that is at least able to support the current stable functionality, yet might not be able to support current unstable use cases (like the SSO), so apply good judgement if you decide to use it.</p>",
+        "id": 183540065,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576495176
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"126931\">@centril</span>  Why is it permanently unstable? It seems extremely useful. I understand it would need an RFC and such, but is there any other reason to not make it available to the public?</p>",
+        "id": 183567072,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576514712
+    },
+    {
+        "content": "<p>Yeah, I was familiar with the attribute before it was mentioned and was aware it was perma-unstable.</p>",
+        "id": 183571450,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1576517350
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224471\">@Lokathor</span> because the form it exists in is very suboptimal and const generics is necessary to provide something good</p>",
+        "id": 183573747,
+        "sender_full_name": "centril",
+        "timestamp": 1576519034
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"126931\">@centril</span> i thought about it a bit, and i'm not sure const generics suffices to provide something good</p>",
+        "id": 183594760,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576533039
+    },
+    {
+        "content": "<p>If we want to say that an integer only is valid in a particular range, we can emulate a quite good wrapper with const generics (e.g. <code>struct Int&lt;T: Int, const From: T, const To: T&gt;(T);</code>), but we can't give the type a niche with const generics I think</p>",
+        "id": 183594814,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576533070
+    },
+    {
+        "content": "<p>Or at least I wouldn't know how.</p>",
+        "id": 183594825,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576533079
+    },
+    {
+        "content": "<p>we'd need to be able to specify that the <code>T</code> in that wrapper only takes values in range <code>[From; To)</code>, and that feels quite a bit more like full-fledged dependent types</p>",
+        "id": 183594973,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576533179
+    },
+    {
+        "content": "<p>I don't think that generics need to be involved at all to make it a useful ability to have, but I suppose I see why would want to do nothing in the hope that you don't trip over a forward compatibility problem.</p>",
+        "id": 183595405,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576533444
+    },
+    {
+        "content": "<p>With <code>NonZeroU32</code>, you have <code>fn new(n: u32) -&gt; Option&lt;NonZeroU32&gt;</code>, which does a runtime check, and <code>unsafe fn new_unchecked(n: u32) -&gt; NonZeroU32</code>, which omits it at the cost of unsafety.  No reason you can't do the same thing for <span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span>'s <code>Int</code>.</p>",
+        "id": 183623159,
+        "sender_full_name": "comex",
+        "timestamp": 1576565781
+    },
+    {
+        "content": "<p>What dependent types would give you is the ability to <em>safely</em> skip the runtime check in more situations.</p>",
+        "id": 183623166,
+        "sender_full_name": "comex",
+        "timestamp": 1576565802
+    },
+    {
+        "content": "<p>(fixed)</p>",
+        "id": 183623171,
+        "sender_full_name": "comex",
+        "timestamp": 1576565815
+    },
+    {
+        "content": "<p>Which I personally think would be quite nice, but that's hardly necessary if we just want to replicate the API of <code>NonZeroU32</code> and friends in a way that lets you specify any range.</p>",
+        "id": 183623193,
+        "sender_full_name": "comex",
+        "timestamp": 1576565872
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"198590\">@comex</span> I wasn't worried about avoiding run-time checks, what the use cases discussed here require is for <code>Option&lt;T&gt;</code> to have the same size as <code>T</code>, which is something that the const generics solution by itself doesn't give you, because <code>Int(T)</code> has the same niches as <code>T</code>, which for <code>i32</code> would be none.</p>",
+        "id": 183640130,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576582796
+    },
+    {
+        "content": "<p>What I claimed is that if we wanted to give <code>struct Int&lt;T, const From: T, const To: usize&gt;(T);</code> niches outside <code>[From, To)</code>, we'd need something more than just \"const generics\", e.g., something that makes it UB to materialize a value of type <code>Int</code> with bit-patterns outside that range. The current attributes are a bad way of doing that, because you can't pass them the <code>From</code> and <code>To</code> parameters, but if we want to make this some type level condition in which these parameters can be used, the only-thing that comes to mind is some kind of <code>where Self.0 &gt;= From &amp;&amp; Self.0 &lt; To</code> type-level clause on the values that <code>Self</code> can take, and that sounds just like dependent types.</p>",
+        "id": 183640210,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576582845
+    },
+    {
+        "content": "<p>I don't believe anyone proposes such a radical and general mechanism (at least, not specifically for replacing <code>scalar_valid_range</code>), one idea I've seen floated around is that there would would be a lang item or something that looks more or less like <code>Int</code> and has a scalar valid range defined by the values of its two const parameters.</p>",
+        "id": 183671763,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1576604427
+    },
+    {
+        "content": "<p>Yeah I think for most purposes people need only the simple version. In fact just having \"NonMaxU32\" and similar would often be enough</p>",
+        "id": 183679932,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576609612
+    },
+    {
+        "content": "<p>Yeah, I was assuming it would just be a lang item.</p>",
+        "id": 183690078,
+        "sender_full_name": "comex",
+        "timestamp": 1576615862
+    },
+    {
+        "content": "<p>There is a library called <a href=\"https://docs.rs/optional/0.5.0/optional/\" target=\"_blank\" title=\"https://docs.rs/optional/0.5.0/optional/\">optional</a> that lets the user customize the niche of a <code>T</code> by allowing users to specify a <code>Noned</code> bit-pattern (a niche)</p>",
+        "id": 183758228,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576681848
+    },
+    {
+        "content": "<p>So you can, for example, implement <code>Noned</code> for <code>struct U32(u32);</code> and give it <code>42</code> as the <code>None</code> bit-pattern.</p>",
+        "id": 183758311,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576681912
+    },
+    {
+        "content": "<p>I've no idea if the general problem of allowing users to specify niches on, e.g., the <code>U32</code> type itself is a problem worth solving. but at least as currently written, this approach does not support specifying an invalid bit-pattern as the <code>None</code> one (cc <span class=\"user-mention\" data-user-id=\"248599\">@llogiq</span> ), since the <a href=\"https://github.com/llogiq/optional/blob/master/src/lib.rs#L1371\" target=\"_blank\" title=\"https://github.com/llogiq/optional/blob/master/src/lib.rs#L1371\"><code>Optional&lt;T&gt;</code></a> type actually stores a <code>T</code>, and thus the \"None\" bit pattern must be valid for T.</p>",
+        "id": 183758642,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576682149
+    },
+    {
+        "content": "<p>The API constraints users to pick a valid value of <code>T</code> as the <code>None</code> value, so this value must be valid.</p>",
+        "id": 183758716,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576682189
+    },
+    {
+        "content": "<p>I've seen similar types being written in C++, so apparently it appears to be something that some users want (e.g. see <a href=\"https://akrzemi1.wordpress.com/2015/07/15/efficient-optional-values/\" target=\"_blank\" title=\"https://akrzemi1.wordpress.com/2015/07/15/efficient-optional-values/\">https://akrzemi1.wordpress.com/2015/07/15/efficient-optional-values/</a>).</p>",
+        "id": 183758779,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576682243
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> thanks; I think that kind of code is a good argument for leaving memory untyped as I'd prefer anyway. The main concern here of course is that this will cost us some optimizations. But if C taught us anything it's that being too greedy with optimizations leads to a langauge noone can reason about...</p>",
+        "id": 184272959,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1577381696
+    },
+    {
+        "content": "<p>Sure, and those optimizations can be somewhat \"made up\" by leaving libraries more free to perform different optimizations, which can often have at least as substantial of an impact (if not more) than compiler-aided ones. The \"typed memory\" notion of C and C++ is, without a doubt, one of the biggest problems with those languages (Take a look at how many large c++ projects have -fno-strict-aliasing enabled; it's more than one might naively think, even ones with relatively high code quality like web browsers).</p>",
+        "id": 184273179,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1577381955
+    }
+]

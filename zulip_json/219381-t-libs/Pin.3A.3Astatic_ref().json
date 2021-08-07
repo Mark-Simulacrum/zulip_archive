@@ -1,0 +1,266 @@
+[
+    {
+        "content": "<p>I think it would be good to add a <code>Pin::static_ref(&amp;'static T) -&gt; Pin&lt;&amp;'static T&gt;</code>. The static lifetime guarantees the Pin requirement of it never moving until destruction (which is never, in this case).</p>\n<p>Context: I want to clean up unsafety a bit in the sys::mutex::Mutex implementations. Everything there is unsafe, mostly because these objects may not be moved. So changing everything to <code>Pin&lt;&amp;Self&gt;</code> there would help. But it's used in a few places (inside std) as a static (through sys_common's StaticMutex), where the 'static lifetime already guarantees it isn't moved. Would be good if that can be used as a pinned (static) reference safely.</p>",
+        "id": 212549677,
+        "sender_full_name": "Mara",
+        "timestamp": 1602073341
+    },
+    {
+        "content": "<p>Any thoughts? Or important Pin-related UB/requirements that I'm missing?</p>",
+        "id": 212549719,
+        "sender_full_name": "Mara",
+        "timestamp": 1602073374
+    },
+    {
+        "content": "<p>The problem is that it doesn't guarantee that the memory of <code>&amp;'static T</code> is not repurposed until <code>T</code> is <code>dropped</code>.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">use</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">pin</span>::<span class=\"n\">Pin</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">static_pin</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">static_ref</span>: <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"nb\">static</span> <span class=\"nc\">T</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">Pin</span><span class=\"o\">&lt;&amp;'</span><span class=\"nb\">static</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">//this is not safe</span>\n<span class=\"w\">    </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">Pin</span>::<span class=\"n\">new_unchecked</span><span class=\"p\">(</span><span class=\"n\">static_ref</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">something</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"cm\">/*some type needing pining*/</span><span class=\"nb\">String</span>::<span class=\"n\">new</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">leak</span>: <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"nb\">static</span> <span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"nb\">String</span><span class=\"w\">  </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"nb\">Box</span>::<span class=\"n\">leak</span><span class=\"p\">(</span><span class=\"nb\">Box</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">something</span><span class=\"p\">));</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">_pinned</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">static_pin</span><span class=\"p\">(</span><span class=\"o\">&amp;*</span><span class=\"n\">leak</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"cm\">/*do somthing with Pin&lt;&amp;'static T&gt; which requires the Drop guarantee */</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">//Ups, drop guarantee violated</span>\n<span class=\"w\">    </span><span class=\"n\">std</span>::<span class=\"n\">mem</span>::<span class=\"n\">replace</span><span class=\"p\">(</span><span class=\"n\">leak</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">String</span>::<span class=\"n\">new</span><span class=\"p\">());</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 212609587,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1602099841
+    },
+    {
+        "content": "<p>Now this would not brake any <code>async</code> based futures as they are based on <code>Pin&lt;&amp;mut Self&gt;</code> but you can have something based on <code>Pin&lt;&amp;Self&gt;</code> which idk uses interior mutability and internal self  references.</p>",
+        "id": 212609783,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1602099939
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"209646\">@Philipp Korber</span> that doesn't compile.</p>",
+        "id": 212614839,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1602102424
+    },
+    {
+        "content": "<p>Once you reborrow the <code>&amp;'static mut</code> as a <code>&amp;'static</code>, you can no longer use the <code>&amp;'static mut</code>. This was <span class=\"user-mention silent\" data-user-id=\"310399\">Mara</span>'s whole point I believe. Maybe <span class=\"user-mention\" data-user-id=\"256759\">@boats</span> wants to weigh in?</p>",
+        "id": 212615401,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1602102728
+    },
+    {
+        "content": "<p>Yeah that snippet results in <code>error[E0502]: cannot borrow *leak as mutable because it is also borrowed as immutable</code>.  That <code>&amp;'static T</code> is <code>Copy</code> and not attached to any lifetime shorter than <code>'static</code>, so <code>static_pin</code> could keep a copy around and use it forever. So it should be impossible to use any <code>&amp;mut</code> to that T afterwards.</p>",
+        "id": 212616182,
+        "sender_full_name": "Mara",
+        "timestamp": 1602103150
+    },
+    {
+        "content": "<p>Shes right I somehow missed that (worst I somehow tried it out on play.rust and didn't notice it doesn't compile <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span>  while believing it did, no idea what happened there).</p>",
+        "id": 212616300,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1602103208
+    },
+    {
+        "content": "<p>And even through you can use the <code>&amp;'static T</code> after the pin you can't repurpuse it.</p>\n<p>And while you could repurpose memory in fields with interior mutability of that <code>T</code> it doesn't matter as <code>Pin</code> only extends to <code>T</code>.</p>",
+        "id": 212616571,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1602103370
+    },
+    {
+        "content": "<p>So I guess <code>static_ref</code> is a good idea.</p>",
+        "id": 212617568,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1602103964
+    },
+    {
+        "content": "<p>I think it would be better to be named <code>new_static</code>? Right now we don't have <code>ref</code> but people may confuse <code>static_ref</code> with <code>as_ref</code>.</p>",
+        "id": 212647588,
+        "sender_full_name": "pickfire",
+        "timestamp": 1602133377
+    },
+    {
+        "content": "<p>Would the reasoning be valid for &amp;'static mut as well, since you won't be able to reuse the original &amp;mut if its reborrowed for static.</p>",
+        "id": 212942692,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1602378757
+    },
+    {
+        "content": "<p>Yeah it would. Not sure how often that one would be useful. a <code>static mut</code> is unsafe anyway. But maybe for something leaked through Box::leak?</p>",
+        "id": 212959300,
+        "sender_full_name": "Mara",
+        "timestamp": 1602411395
+    },
+    {
+        "content": "<p>Some interrupt handling libs have a <code>#[interrupt]</code> proc-attribute on functions which allows defining and using <code>static mut</code>'s safely inside of a interrupt handler (as due to how interrupts work on those platforms you will not have concurrent access). I don't think this interrupts need <code>Pin</code> normally but they are a good example for some edge cases having safe abstractions over a <code>static mut</code>. <span aria-label=\"wink\" class=\"emoji emoji-1f609\" role=\"img\" title=\"wink\">:wink:</span></p>",
+        "id": 212959552,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1602411899
+    },
+    {
+        "content": "<p>hm, but that wouldn't work right? do you get a <code>&amp;'static mut</code> there? because if you do, how would it prevent you from swapping/moving the thing next time the interrupt triggers? you can't relly reborrow that &amp;mut 'forever'</p>",
+        "id": 212960488,
+        "sender_full_name": "Mara",
+        "timestamp": 1602413554
+    },
+    {
+        "content": "<p>yeah, those aren't static. cortex-m-rt's <code>#[interrupt]</code> gives a <code>&amp;mut</code>, not a <code>&amp;'static mut</code>, to those <code>static mut</code>s.</p>",
+        "id": 212960640,
+        "sender_full_name": "Mara",
+        "timestamp": 1602413796
+    },
+    {
+        "content": "<p>you can't move out of an <code>&amp;'static T</code> either; this function is sound but I don't see what guarantee it gets you</p>",
+        "id": 212962735,
+        "sender_full_name": "boats",
+        "timestamp": 1602417606
+    },
+    {
+        "content": "<p>the mut version does actually restrict your ability to use the <code>&amp;'static mut T</code>, so it is possibly interesting</p>",
+        "id": 212962762,
+        "sender_full_name": "boats",
+        "timestamp": 1602417712
+    },
+    {
+        "content": "<p>It's possible to grab a static but mutable variable from any global allocator, not only from <code>Box::leak</code>. In general you could get a <code>&amp;'static mut</code> from a <code>static: UnsafeCell&lt;_&gt;</code> and not only a <code>static mut</code> instance. You might also store such a reference in thread local storage. That's quite interesting and powerful for embedded DMA.</p>",
+        "id": 212963034,
+        "sender_full_name": "HeroicKatora",
+        "timestamp": 1602418093
+    },
+    {
+        "content": "<blockquote>\n<p>but I don't see what guarantee it gets you</p>\n</blockquote>\n<p>See <a href=\"https://github.com/rust-lang/rust/pull/77726\">https://github.com/rust-lang/rust/pull/77726</a> and <a href=\"https://github.com/rust-lang/rust/pull/77801\">https://github.com/rust-lang/rust/pull/77801</a></p>",
+        "id": 213021078,
+        "sender_full_name": "Mara",
+        "timestamp": 1602498350
+    },
+    {
+        "content": "<p>I've seen the PRs but I haven't looked at them in detail. Can you demonstrate what code becomes an error thanks to using pin?</p>",
+        "id": 213025444,
+        "sender_full_name": "boats",
+        "timestamp": 1602501448
+    },
+    {
+        "content": "<p>My opinion is that <code>Pin&lt;&amp;T&gt;</code> is a very useless witness because you can't move out of <code>&amp;T</code> anyway. <code>&amp;'static T</code> is a witness that <code>T</code> will never move all on its own</p>",
+        "id": 213025516,
+        "sender_full_name": "boats",
+        "timestamp": 1602501509
+    },
+    {
+        "content": "<p>It seems like the goal is to make the init method take <code>Pin&lt;&amp;mut Self&gt;</code>, but I notice the init method is still unsafe (presumably because it can only be called once?)</p>",
+        "id": 213025894,
+        "sender_full_name": "boats",
+        "timestamp": 1602501813
+    },
+    {
+        "content": "<p>I'm somewhat suspicious of <code>get_or_init_pin</code>.. I guess because its a once-cell if you successfully witness a <code>Pin&lt;&amp;mut T&gt;</code> you will never be able to see an <code>&amp;mut T</code></p>",
+        "id": 213026042,
+        "sender_full_name": "boats",
+        "timestamp": 1602501930
+    },
+    {
+        "content": "<p>In particular, I'm not convinced this comment is correct (it might be but I don't know the API well enough): <a href=\"https://github.com/rust-lang/rust/pull/77801/files#diff-22033bdccee7e824822bec8e3cbe15f4R344\">https://github.com/rust-lang/rust/pull/77801/files#diff-22033bdccee7e824822bec8e3cbe15f4R344</a></p>",
+        "id": 213026191,
+        "sender_full_name": "boats",
+        "timestamp": 1602502035
+    },
+    {
+        "content": "<p>If there's any way to get an <code>&amp;mut T</code> from an <code>&amp;SyncOnceCell&lt;T&gt;</code> after calling this method, then this comment is not true</p>",
+        "id": 213026212,
+        "sender_full_name": "boats",
+        "timestamp": 1602502067
+    },
+    {
+        "content": "<p>Since init has other invariants that must be maintained, I'm not really sold that pin is buying a lot, especially since you have to then add on confirming that the various pin abstractions your adding are sound in general.</p>",
+        "id": 213026426,
+        "sender_full_name": "boats",
+        "timestamp": 1602502256
+    },
+    {
+        "content": "<p>Is it possible for init to take <code>&amp;'static self</code>?</p>",
+        "id": 213026544,
+        "sender_full_name": "boats",
+        "timestamp": 1602502334
+    },
+    {
+        "content": "<p>Okay, looking at SyncOnceCell I'm convinced that get_or_init_pin is sound.</p>",
+        "id": 213027240,
+        "sender_full_name": "boats",
+        "timestamp": 1602502888
+    },
+    {
+        "content": "<p>I think it'd be cleaner to just use the <code>'static</code> lifetime in this code and not <code>Pin</code>. For the special internal constructor on <code>SyncOnceCell</code> I'd write as <code>fn(&amp;'static self, f: impl FnOnce() -&gt; T, g: impl FnOnce(&amp;'static T)) -&gt; &amp;'static T</code> and then I'd justify the unsafe call to <code>init</code> with the <code>'static</code> lifetime and the once cell guarantees</p>",
+        "id": 213027371,
+        "sender_full_name": "boats",
+        "timestamp": 1602502997
+    },
+    {
+        "content": "<blockquote>\n<p>If there's any way to get an &amp;mut T from an &amp;SyncOnceCell&lt;T&gt; after calling this method, then this comment is not true</p>\n</blockquote>\n<p>but a <code>&amp;'a SyncOnceCell&lt;T&gt;</code> gives you a <code>&amp;'a T</code>, so there will never be any way to get a <code>&amp;mut T</code> from a <code>&amp;SyncOnceCell&lt;T&gt;</code></p>",
+        "id": 213056414,
+        "sender_full_name": "Mara",
+        "timestamp": 1602518362
+    },
+    {
+        "content": "<blockquote>\n<p>Is it possible for init to take &amp;'static self?</p>\n</blockquote>\n<p>sure. it took a <code>&amp;self</code> before. but with <code>&amp;mut</code> the type can guarantee it's not yet shared with anybody yet. So then the choice is between a <code>&amp;'static</code> that guarantees no-moving but not not-shared-at-this-point, or a <code>&amp;mut</code> that guarantees not-shared-at-this-point but not no-moving. <code>Pin&lt;&amp;mut&gt;</code> would do both.</p>",
+        "id": 213056803,
+        "sender_full_name": "Mara",
+        "timestamp": 1602518572
+    },
+    {
+        "content": "<p>And yes, 'static will work for ReentrantMutex with how it's currently used (except for the <code>&amp;mut</code> for init()). But if i  do that then we're just going to have the same discussion again later this week when I want to do the same for e.g. the thread local mutex and condvar used in the generic thread parker, or the RwLock used by the panicking logic.</p>",
+        "id": 213057102,
+        "sender_full_name": "Mara",
+        "timestamp": 1602518715
+    },
+    {
+        "content": "<p>Oh and while <code>sys_common::ReentrantMutex</code> is used only with a static lifetime since recently, <code>sys::ReentrantMutex</code> is used with shorter lifetimes as well. <code>sys_common::Mutex</code> on Windows contains a <code>sys::Mutex</code> containing basically a<code>Box&lt;sys::ReentrantMutex&gt;</code>.</p>",
+        "id": 213057629,
+        "sender_full_name": "Mara",
+        "timestamp": 1602518991
+    },
+    {
+        "content": "<p>is there any reason you want to avoid Pin here? seems like the perfect fit. it's exactly made for unmovable objects like this, right?</p>",
+        "id": 213058078,
+        "sender_full_name": "Mara",
+        "timestamp": 1602519209
+    },
+    {
+        "content": "<blockquote>\n<p>My opinion is that Pin&lt;&amp;T&gt; is a very useless witness because you can't move out of &amp;T anyway.</p>\n</blockquote>\n<p>The important difference here is that Pin&lt;&amp;T&gt; guarantees that it won't move until it gets destructed (or forgotten), not just while you have that <code>&amp;T</code>. That's exactly what all the mutex/rwlock/condvar types require. So a <code>Pin</code> explains that much better than a <code>'static</code> lifetime, which would be overly strict (and unusable for the other lock types anyway).</p>",
+        "id": 213058526,
+        "sender_full_name": "Mara",
+        "timestamp": 1602519475
+    },
+    {
+        "content": "<blockquote>\n<p>I've seen the PRs but I haven't looked at them in detail. Can you demonstrate what code becomes an error thanks to using pin?</p>\n</blockquote>\n<p>This for example: (currently UB) <a href=\"https://github.com/rust-lang/rust/blob/d6b5ffb5b41579dbc49e651691fa9bb670a39a07/library/std/src/sys_common/remutex/tests.rs#L8-L12\">https://github.com/rust-lang/rust/blob/d6b5ffb5b41579dbc49e651691fa9bb670a39a07/library/std/src/sys_common/remutex/tests.rs#L8-L12</a></p>",
+        "id": 213058752,
+        "sender_full_name": "Mara",
+        "timestamp": 1602519590
+    },
+    {
+        "content": "<p>thanks for these responses, its easier to understand your vision thinking about replacing the <code>Box&lt;sys::Mutex&gt;</code> in <code>Mutex</code> with a pinned box</p>",
+        "id": 213060008,
+        "sender_full_name": "boats",
+        "timestamp": 1602520220
+    },
+    {
+        "content": "<p>Yeah, sorry, I'm making it all a bit chaotic. ^^' I'm trying to make things more managable by splitting it all in smaller PRs, by not touching <code>sys</code> yet here. But using <code>Pin</code> has a lot more benefit for the types i'm not touching yet in this PR.</p>",
+        "id": 213060807,
+        "sender_full_name": "Mara",
+        "timestamp": 1602520663
+    },
+    {
+        "content": "<p>In the future it'd be cool if std could specialize on whether <code>sys::Mutex</code> is <code>Unpin</code> or not to decide if it goes in a Box. (Right now that's just an alias <code>type MovableMutex = Box&lt;Mutex&gt;; // or Mutex</code> for every platform.)</p>",
+        "id": 213060956,
+        "sender_full_name": "Mara",
+        "timestamp": 1602520743
+    },
+    {
+        "content": "<p>If eventually a parking_lot style mutex/condvar/rwlock is introduced, they'll all be Unpin anyway and we could get rid of all of this again, i suppose. But it's hard to say how far away that is.</p>",
+        "id": 213061068,
+        "sender_full_name": "Mara",
+        "timestamp": 1602520814
+    },
+    {
+        "content": "<p>I can probably find some good examples or show a PR how it works out for the other types, but it'd make it easier if I understand why you'd prefer to avoid Pin. This PR wouldn't really get simpler if i changed the Pin for a 'static.</p>",
+        "id": 213062132,
+        "sender_full_name": "Mara",
+        "timestamp": 1602521523
+    },
+    {
+        "content": "<blockquote>\n<p>My opinion is that Pin&lt;&amp;T&gt; is a very useless witness because you can't move out of &amp;T anyway.</p>\n</blockquote>\n<p>Here's another example that shows <code>Pin&lt;&amp;T&gt;</code> is very useful over a <code>&amp;T</code>:</p>\n<p><a href=\"https://github.com/rust-lang/rust/blob/d6b5ffb5b41579dbc49e651691fa9bb670a39a07/library/std/src/sys_common/rwlock.rs#L34-L35\">https://github.com/rust-lang/rust/blob/d6b5ffb5b41579dbc49e651691fa9bb670a39a07/library/std/src/sys_common/rwlock.rs#L34-L35</a></p>\n<p>By changing that to <code>self: Pin&lt;&amp;Self&gt;</code>, the function becomes safe. The pinnedness is the only unsafe requirement it has. <code>'static</code> wouldn't work there.</p>",
+        "id": 213062827,
+        "sender_full_name": "Mara",
+        "timestamp": 1602521935
+    },
+    {
+        "content": "<p>Demonstration of that: <a href=\"https://github.com/rust-lang/rust/pull/77865\">https://github.com/rust-lang/rust/pull/77865</a></p>",
+        "id": 213072029,
+        "sender_full_name": "Mara",
+        "timestamp": 1602527753
+    }
+]

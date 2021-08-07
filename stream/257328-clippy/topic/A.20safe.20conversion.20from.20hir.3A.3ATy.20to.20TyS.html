@@ -1,0 +1,151 @@
+<html>
+<head><meta charset="utf-8"><title>A safe conversion from hir::Ty to TyS · clippy · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/index.html">clippy</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html">A safe conversion from hir::Ty to TyS</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="225405509"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225405509" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Yoshitomo Nakanishi <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225405509">(Feb 06 2021 at 11:25)</a>:</h4>
+<p>I tried to implement a safe conversion from <code>hir::Ty</code> to <code>TyS</code> <a href="https://github.com/Y-Nak/rust-clippy/blob/8b8b0a94b05f7189d028d91deda659ed266ef09d/clippy_lints/src/default_numeric_fallback.rs#L54-L76">here</a>.<br>
+The problem here is that we have to use <code>node_type_opt</code>, ideally <code>node_type</code> should be used instead of <code>node_type_opt</code>, but <code>node_type</code> causes ICE when the arguments are types that appear in a nested fn signature like below.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">outer</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="kt">i32</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="sd">/// ICE because `TypeckResults` of inner def id doesn't contain types that appear in its signature.</span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">inner</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="kt">i32</span> <span class="p">{}</span><span class="w"></span>
+
+<span class="w">   </span><span class="sd">/// This is OK because a closure shares `TypeckResults` with the outer function.</span>
+<span class="w">   </span><span class="kd">let</span><span class="w"> </span><span class="n">f</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">|</span><span class="n">x</span><span class="o">|</span><span class="w"> </span>-&gt; <span class="kt">i32</span> <span class="p">{</span><span class="mi">13</span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>This is because <code>TypeckResults</code> doesn't contain types in its signature as I wrote in the above example.<br>
+Leaving aside a cache problem, I also tried to rewrite <code>ty_from_hir_ty</code> like below , but this also caused ICE because of <code>hir_owner</code> mismatch.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">ty_from_hir_ty</span><span class="o">&lt;'</span><span class="na">tcx</span><span class="o">&gt;</span><span class="p">(</span><span class="n">cx</span>: <span class="kp">&amp;</span><span class="nc">LateContext</span><span class="o">&lt;'</span><span class="na">tcx</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">hir_ty</span>: <span class="kp">&amp;</span><span class="nc">hir</span>::<span class="n">Ty</span><span class="o">&lt;'</span><span class="na">tcx</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Option</span><span class="o">&lt;</span><span class="n">Ty</span><span class="o">&lt;'</span><span class="na">tcx</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">body_id</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">enclosing_body_opt</span><span class="p">(</span><span class="n">cx</span><span class="p">.</span><span class="n">tcx</span><span class="p">,</span><span class="w"> </span><span class="n">hir_ty</span><span class="p">.</span><span class="n">hir_id</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Some</span><span class="p">(</span><span class="n">cx</span><span class="p">.</span><span class="n">tcx</span><span class="p">.</span><span class="n">typeck_body</span><span class="p">(</span><span class="n">body_id</span><span class="p">).</span><span class="n">node_type</span><span class="p">(</span><span class="n">hir_ty</span><span class="p">.</span><span class="n">hir_id</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Some</span><span class="p">(</span><span class="n">hir_ty_to_ty</span><span class="p">(</span><span class="n">cx</span><span class="p">.</span><span class="n">tcx</span><span class="p">,</span><span class="w"> </span><span class="n">hir_ty</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>In order to resolve this problem, I suppose it may be the easiest way to make <code>TypeCkResults</code> contain signature types.<br>
+I'm fairly new to Rust internal so any advice would be very much appreciated.</p>
+
+
+
+<a name="225409673"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225409673" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> flip1995 <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225409673">(Feb 06 2021 at 12:30)</a>:</h4>
+<p>I also don't know how to convert a <code>hir::Ty</code> to a <code>ty::Ty</code>. Those conversions seem so fragile, that we shouldn't try implementing workarounds in Clippy, but rather make it possible in rustc to get a <code>ty::Ty</code> from a <code>hir::Ty</code>.</p>
+
+
+
+<a name="225410797"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225410797" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Yoshitomo Nakanishi <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225410797">(Feb 06 2021 at 13:00)</a>:</h4>
+<p>Yeah,  I completely agree with you. I'll open an issue to enable the safe conversion in <code>rust</code>.</p>
+
+
+
+<a name="225465471"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225465471" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Yoshitomo Nakanishi <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225465471">(Feb 07 2021 at 14:04)</a>:</h4>
+<p>I posted an <a href="https://internals.rust-lang.org/t/provide-safe-conversion-from-hir-ty-to-tys/14000">article</a> to user forum, just as a reference.</p>
+
+
+
+<a name="225565676"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225565676" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225565676">(Feb 08 2021 at 16:06)</a>:</h4>
+<p><span class="user-mention" data-user-id="275569">@Yoshitomo Nakanishi</span> <a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_typeck/fn.hir_ty_to_ty.html">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_typeck/fn.hir_ty_to_ty.html</a></p>
+
+
+
+<a name="225565771"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225565771" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> xFrednet <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225565771">(Feb 08 2021 at 16:07)</a>:</h4>
+<blockquote>
+<p>A quasi-deprecated helper used in rustdoc and clippy to get the type from a HIR node.</p>
+</blockquote>
+<p>Nice ^^</p>
+
+
+
+<a name="225566062"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225566062" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Cameron Steffen <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225566062">(Feb 08 2021 at 16:08)</a>:</h4>
+<p>In other words, this works, but don't complain if it doesn't.</p>
+
+
+
+<a name="225566314"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225566314" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> xFrednet <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225566314">(Feb 08 2021 at 16:10)</a>:</h4>
+<p>I think it will remain working for a long time from how I know Rust. I just love how honest and direct the documentation is often <span aria-label="upside down" class="emoji emoji-1f643" role="img" title="upside down">:upside_down:</span><br>
+And also the fact that there are such helper functions :)</p>
+
+
+
+<a name="225567674"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225567674" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225567674">(Feb 08 2021 at 16:19)</a>:</h4>
+<p>since clippy is in-tree, if it's ever changed the person removing it will have to fix clippy at the same time</p>
+
+
+
+<a name="225567693"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225567693" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225567693">(Feb 08 2021 at 16:19)</a>:</h4>
+<p>so I wouldn't worry about it</p>
+
+
+
+<a name="225612756"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225612756" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Michael Wright <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225612756">(Feb 08 2021 at 21:41)</a>:</h4>
+<p>Also eddyb told us to use it. See <a href="https://github.com/rust-lang/rust-clippy/pull/5434#issue-400474851">https://github.com/rust-lang/rust-clippy/pull/5434#issue-400474851</a></p>
+
+
+
+<a name="225638083"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225638083" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Yoshitomo Nakanishi <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225638083">(Feb 09 2021 at 02:21)</a>:</h4>
+<p>As a preface: I didn't complain about it, just want to improve reliability and usability.</p>
+<p>Again, I don't think <code>hir_ty_to_ty</code> can be used inside a body, because it causes ICE whenever passed<code>hir::Ty::Kind</code> includes <code>TyKiind::Infer</code>,  please refer to <a href="https://github.com/rust-lang/rust-clippy/issues/6179">here</a> as a reference. <br>
+And also I think <code>TypeckResults::node_type</code> can't be used in some special situations, see the <a href="https://internals.rust-lang.org/t/provide-safe-conversion-from-hir-ty-to-tys/14000">post</a> for details.</p>
+
+
+
+<a name="225641060"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225641060" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225641060">(Feb 09 2021 at 03:14)</a>:</h4>
+<p>maybe you need to call <a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_infer/infer/struct.InferCtxt.html#method.resolve_vars_if_possible"><code>resolve_vars_if_possible</code></a>?</p>
+
+
+
+<a name="225641566"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225641566" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Yoshitomo Nakanishi <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225641566">(Feb 09 2021 at 03:24)</a>:</h4>
+<p>Thanks for the information! I'll see it later.</p>
+
+
+
+<a name="225641664"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225641664" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225641664">(Feb 09 2021 at 03:26)</a>:</h4>
+<p>or possibly <a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_infer/infer/struct.InferCtxt.html#method.fully_resolve"><code>fully_resolve</code></a></p>
+
+
+
+<a name="225661056"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/225661056" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> flip1995 <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#225661056">(Feb 09 2021 at 09:11)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="232545">Joshua Nelson</span> <a href="#narrow/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS/near/225565676">said</a>:</p>
+<blockquote>
+<p><a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_typeck/fn.hir_ty_to_ty.html">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_typeck/fn.hir_ty_to_ty.html</a></p>
+</blockquote>
+<p>Yes this function exists, but it just ICEs unpredictably. For example, <a href="https://github.com/rust-lang/rust-clippy/issues/6179">clippy#6179</a> fixing the <code>use_self</code> lint is being worked on since April 2020, because of the problem of trying to convert a <code>hir::Ty</code> to a <code>ty::Ty</code>. If you think, you fixed it, it will ICE in some other case, which you then can try to debug/reproduce again for a few hours.</p>
+<p>I will try <code>fully_resolve</code> and hope that it helps somehow.</p>
+
+
+
+<a name="226087647"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257328-clippy/topic/A%20safe%20conversion%20from%20hir%3A%3ATy%20to%20TyS/near/226087647" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Yoshitomo Nakanishi <a href="https://rust-lang.github.io/zulip_archive/stream/257328-clippy/topic/A.20safe.20conversion.20from.20hir.3A.3ATy.20to.20TyS.html#226087647">(Feb 12 2021 at 02:48)</a>:</h4>
+<p><code>fully_resolve</code> seems not to work for this purpose because </p>
+<ol>
+<li><code>hir::Ty</code> doesn't implement <code>TypeFoldable</code></li>
+<li><code>HirId</code> implement <code>TypeFoldable</code>but this is a trivial implementation. See <a href="https://doc.rust-lang.org/nightly/nightly-rustc/src/rustc_middle/macros.rs.html#51-80">https://doc.rust-lang.org/nightly/nightly-rustc/src/rustc_middle/macros.rs.html#51-80</a> as a reference.</li>
+</ol>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

@@ -1,0 +1,152 @@
+[
+    {
+        "content": "<p>I noticed that LLVM will only optimize away an <code>asm</code> with unused outputs if both the <code>pure</code> and <code>nomem</code> flags are set.</p>",
+        "id": 189440087,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583082630
+    },
+    {
+        "content": "<p>Based on our current rules for <code>pure</code>, code using it can't read or write memory anyways.</p>",
+        "id": 189440102,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583082699
+    },
+    {
+        "content": "<p>I can see 2 options:<br>\na) <code>pure</code> implies <code>nomem</code> and it is an error to specify both.<br>\nb) <code>pure</code> requires the <code>nomem</code> flag to also be set. It is an error otherwise.</p>",
+        "id": 189440148,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583082743
+    },
+    {
+        "content": "<p>Oh wait actually it's even worse. LLVM will happily remove a <code>nomem</code> or <code>readonly</code> asm, even if it is marked as <code>sideeffect</code>.</p>",
+        "id": 189440359,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583083115
+    },
+    {
+        "content": "<p>OK, let's consider the cases we need to model:</p>\n<ul>\n<li>Pure function which doesn't access memory. No side effects, outputs depend only on inputs.</li>\n<li>Doesn't access memory, but may have side effects (e.g. modifying a control register)</li>\n<li>Pure-ish function which only reads memory. No side effects, outputs depend on inputs + memory.</li>\n<li>Arbitrary memory reads/write &amp; side effects.</li>\n</ul>",
+        "id": 189441097,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583084582
+    },
+    {
+        "content": "<p>I would argue that <code>sideeffect</code> and <code>nomem</code> being specified at the same time is a bug, as those are mutually exclusive in LLVM AFAIK.</p>",
+        "id": 189441150,
+        "sender_full_name": "nagisa",
+        "timestamp": 1583084647
+    },
+    {
+        "content": "<p>And here are the LLVM attributes we have to work with: readnone, readonly, writeonly, argmemonly, inaccessiblememonly, inaccessiblemem_or_argmemonly</p>",
+        "id": 189441153,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583084655
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> Actually <code>sideeffect</code> is an attribute on the asm, while <code>readnone</code> is an attribute on the <code>call</code> instruction that invokes the asm. So they don't actually interact in LLVM.</p>",
+        "id": 189441167,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583084703
+    },
+    {
+        "content": "<p><code>readonly sideeffect</code> being optimised out sounds like a bug.</p>",
+        "id": 189441168,
+        "sender_full_name": "nagisa",
+        "timestamp": 1583084704
+    },
+    {
+        "content": "<p><code>sideeffect</code> is only actually looked at deep in the backend. By then the <code>call asm</code> has already been optimized away.</p>",
+        "id": 189441232,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583084794
+    },
+    {
+        "content": "<p>I didn’t look much at the <code>asm</code>'s sideeffect annotation, but the <code>sideeffect</code> intrinsic does interact with the <code>readnone</code> etc attributes very much. In particular <code>sideeffect</code> prevents LLVM from inferring a <code>readnone</code> attribute where it otherwise would. But if <code>readnone</code> is already specified somewhere, that takes precedence.</p>",
+        "id": 189441290,
+        "sender_full_name": "nagisa",
+        "timestamp": 1583084883
+    },
+    {
+        "content": "<p>And <code>readnone</code> is exactly what makes LLVM to delete things it considers to be dead code.</p>",
+        "id": 189441296,
+        "sender_full_name": "nagisa",
+        "timestamp": 1583084913
+    },
+    {
+        "content": "<p>(this most likely applies to <code>readonly</code> the same way)</p>",
+        "id": 189441307,
+        "sender_full_name": "nagisa",
+        "timestamp": 1583084961
+    },
+    {
+        "content": "<p>I think we should use <code>inaccessiblememonly</code> instead of <code>readnone</code> for non-pure asm with <code>nomem</code>. That tells LLVM that the asm doesn't touch any LLVM-visible memory, but still has some significant side-effect.</p>",
+        "id": 189441311,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583084972
+    },
+    {
+        "content": "<p>I wouldn't add <code>readnone</code> attribute at all and let LLVM infer it. <code>inaccessiblememonly</code> or <code>inaccessiblemem_or_argmemonly</code> sound like saner choices.</p>",
+        "id": 189441416,
+        "sender_full_name": "nagisa",
+        "timestamp": 1583085158
+    },
+    {
+        "content": "<p>LLVM can't infer it because it can't read the asm.</p>",
+        "id": 189441426,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583085182
+    },
+    {
+        "content": "<p>Clang uses <code>readnone</code>/<code>readonly</code> only for non-volatile asm.</p>",
+        "id": 189441439,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583085232
+    },
+    {
+        "content": "<p>Well… I guess. I don’t remember the RFC well enough to contribute to the discussion much here.</p>",
+        "id": 189441485,
+        "sender_full_name": "nagisa",
+        "timestamp": 1583085271
+    },
+    {
+        "content": "<p>Hmm I think I'm going to go with option b: <code>pure</code> must be used with either <code>nomem</code> or <code>readonly</code>, otherwise error. And I will relax the rules of <code>pure</code> to allow reading from memory when used with <code>readonly</code>.</p>",
+        "id": 189441891,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583085938
+    },
+    {
+        "content": "<p>So that leaves 4 valid combinations:</p>\n<ul>\n<li><code>pure</code> <code>nomem</code></li>\n<li><code>pure</code> <code>readonly</code></li>\n<li><code>nomem</code></li>\n<li><code>readonly</code></li>\n</ul>",
+        "id": 189442000,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583086097
+    },
+    {
+        "content": "<p>Which lower to:</p>\n<ul>\n<li><code>readnone</code></li>\n<li><code>readonly</code></li>\n<li><code>inaccessiblememonly</code></li>\n<li>(nothing)</li>\n</ul>",
+        "id": 189442021,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583086168
+    },
+    {
+        "content": "<p>what do writes count as? the \"nothing\" category?</p>",
+        "id": 189442715,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1583087334
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224471\">Lokathor</span> <a href=\"#narrow/stream/216763-project-inline-asm/topic/Should.20pure.20imply.20nomem/near/189442715\" title=\"#narrow/stream/216763-project-inline-asm/topic/Should.20pure.20imply.20nomem/near/189442715\">said</a>:</p>\n<blockquote>\n<p>what do writes count as? the \"nothing\" category?</p>\n</blockquote>\n<p>I believe the default plain <code>asm!</code> without annotations is the conservative thing and will allow arbitrary things (including writes)</p>",
+        "id": 189442790,
+        "sender_full_name": "nagisa",
+        "timestamp": 1583087440
+    },
+    {
+        "content": "<p>Sorry 5 combinations, the last one being no attributes, which also corresponds to (nothing)</p>",
+        "id": 189442876,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583087593
+    },
+    {
+        "content": "<p>LLVM doesn't have any attributes to represent <code>inaccessiblemem_or_readonly</code>, so we have to be conservative for <code>readonly</code> without <code>pure</code>.</p>",
+        "id": 189442886,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1583087632
+    }
+]

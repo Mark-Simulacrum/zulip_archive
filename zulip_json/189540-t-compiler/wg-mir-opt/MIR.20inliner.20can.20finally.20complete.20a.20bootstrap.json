@@ -1,0 +1,1058 @@
+[
+    {
+        "content": "<p>With a <a href=\"https://github.com/rust-lang/rust/pull/68213/commits/a3db6204e6d3d1d7fc994de4fb76a7f1d23a7e4f\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/68213/commits/a3db6204e6d3d1d7fc994de4fb76a7f1d23a7e4f\">simple patch</a> to turn the MIR inliner on, <code>./x.py build</code> now completes successfully! There's 4 failing UI tests which seem to be more or less expected but the rest of the tests seem to pass.</p>",
+        "id": 185595410,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579008694
+    },
+    {
+        "content": "<p>Failures:</p>\n<div class=\"codehilite\"><pre><span></span>failures:\n    [ui] ui/async-await/async-closure.rs\n    [ui] ui/backtrace-debuginfo.rs\n    [ui] ui/issues/issue-22638.rs\n    [ui] ui/type_length_limit.rs\n\ntest result: FAILED. 1 passed; 4 failed; 9515 ignored; 0 measured; 0 filtered out\n</pre></div>",
+        "id": 185595543,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579008811
+    },
+    {
+        "content": "<p>I'm doing a perf run in <a href=\"https://github.com/rust-lang/rust/issues/68213\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/68213\">#68213</a> to see where we stand. I suspect we will need to make some tweaks to the cost algorithm to see wins.</p>",
+        "id": 185595564,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579008834
+    },
+    {
+        "content": "<p>We should also do a crater run with the optimization enabled</p>",
+        "id": 185595788,
+        "sender_full_name": "oli",
+        "timestamp": 1579009017
+    },
+    {
+        "content": "<p>Update: The perf run completed and most cases show a 2-5% improvement. However, there are some major regressions, most notably <code>deeply-nested-opt</code> which regressed 901,432.7%! I posted an analysis on the PR which I'll copy here:</p>\n<blockquote>\n<p>Looking at the (major) regressions, I'm seeing the following patterns:</p>\n<ul>\n<li>\n<p>LLVM taking much more time</p>\n<ul>\n<li>This affects the deep-vector-opt, keccak-debug, regex-debug, encoding-debug, and most significantly deeply-nested-opt.</li>\n<li><a href=\"https://github.com/rust-lang/rust/issues/68105\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/68105\">#68105</a> seems related</li>\n</ul>\n</li>\n<li>\n<p>normalize_ty_after_erasing_regions being called more times:</p>\n<ul>\n<li>This affects the await-call-tree-check, await-call-tree-debug, and await-call-tree-opt tests.</li>\n</ul>\n</li>\n</ul>\n</blockquote>",
+        "id": 185685885,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579084472
+    },
+    {
+        "content": "<p>One way to figure out what is causing these to regress may be to add more fine grained profiling for <code>self-profile</code> to pick up. E.g. what I did for const eval was to have the main query also create a profile section that had the name of the constant being evaluated in it. Most of the time these will just disappear in the noise and never show up, but if one of them dominates, that shows up</p>",
+        "id": 185688917,
+        "sender_full_name": "oli",
+        "timestamp": 1579087265
+    },
+    {
+        "content": "<p>so for the <code>normalize_ty_after_erasing_regions</code> you could add a profile call <code>let _scope = tcx.prof.generic_activity(&amp;format!(\"inlining {}\", instance));</code> before <a href=\"https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/inline.rs#L125-L133\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/inline.rs#L125-L133\">https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/inline.rs#L125-L133</a> and thus see inlining which functions takes time</p>",
+        "id": 185689035,
+        "sender_full_name": "oli",
+        "timestamp": 1579087438
+    },
+    {
+        "content": "<p>I mean technically this may be worthy of a query, because if a  function is inlined multiple times with the same generic parameters we may want to have a cached version of the monomorphic version available</p>",
+        "id": 185689093,
+        "sender_full_name": "oli",
+        "timestamp": 1579087495
+    },
+    {
+        "content": "<p>That's a good idea! mw actually landed support recently for recording query keys for every event so we might already have all the data we need</p>",
+        "id": 185689107,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087506
+    },
+    {
+        "content": "<p>oh heh</p>",
+        "id": 185689111,
+        "sender_full_name": "oli",
+        "timestamp": 1579087515
+    },
+    {
+        "content": "<p>wonderful</p>",
+        "id": 185689113,
+        "sender_full_name": "oli",
+        "timestamp": 1579087517
+    },
+    {
+        "content": "<p>That's obviously a better way than my hacky format stuff</p>",
+        "id": 185689115,
+        "sender_full_name": "oli",
+        "timestamp": 1579087528
+    },
+    {
+        "content": "<p>And we just got the tooling support to read them in measureme this morning <a href=\"https://github.com/rust-lang/measureme/pull/108\" target=\"_blank\" title=\"https://github.com/rust-lang/measureme/pull/108\">https://github.com/rust-lang/measureme/pull/108</a></p>",
+        "id": 185689178,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087580
+    },
+    {
+        "content": "<p>For the LLVM issue, I tried enabling <code>-Z print-llvm-passes</code> and I saw this:</p>\n<div class=\"codehilite\"><pre><span></span>Target Library Information\n  FunctionPass Manager\n    Dominator Tree Construction\n    Natural Loop Information\n    Branch Probability Analysis\n    Block Frequency Analysis\n</pre></div>\n\n\n<p>and then a very long hang. So I attached gdb and got this backtrace:</p>\n<div class=\"codehilite\"><pre><span></span>#0  0x00007f98dd394337 in llvm::DenseMapBase&lt;llvm::DenseMap&lt;llvm::BasicBlock*, std::unique_ptr&lt;llvm::DomTreeNodeBase&lt;llvm::BasicBlock&gt;, std::default_delete&lt;llvm::DomTreeNodeBase&lt;llvm::BasicBlock&gt; &gt; &gt;, llvm::DenseMapInfo&lt;llvm::BasicBlock*&gt;, llvm::detail::DenseMapPair&lt;llvm::BasicBlock*, std::unique_ptr&lt;llvm::DomTreeNodeBase&lt;llvm::BasicBlock&gt;, std::default_delete&lt;llvm::DomTreeNodeBase&lt;llvm::BasicBlock&gt; &gt; &gt; &gt; &gt;, llvm::BasicBlock*, std::unique_ptr&lt;llvm::DomTreeNodeBase&lt;llvm::BasicBlock&gt;, std::default_delete&lt;llvm::DomTreeNodeBase&lt;llvm::BasicBlock&gt; &gt; &gt;, llvm::DenseMapInfo&lt;llvm::BasicBlock*&gt;, llvm::detail::DenseMapPair&lt;llvm::BasicBlock*, std::unique_ptr&lt;llvm::DomTreeNodeBase&lt;llvm::BasicBlock&gt;, std::default_delete&lt;llvm::DomTreeNodeBase&lt;llvm::BasicBlock&gt; &gt; &gt; &gt; &gt;::find(llvm::BasicBlock const*) const () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#1  0x00007f98de816c22 in llvm::DominatorTreeBase&lt;llvm::BasicBlock, false&gt;::getNode(llvm::BasicBlock const*) const ()\n   from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#2  0x00007f98de817036 in llvm::DominatorTreeBase&lt;llvm::BasicBlock, false&gt;::dominates(llvm::BasicBlock const*, llvm::BasicBlock const*) const ()\n   from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#3  0x00007f98ddf0c500 in llvm::GVN::findLeader(llvm::BasicBlock const*, unsigned int) () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#4  0x00007f98ddf18a93 in llvm::GVN::processInstruction(llvm::Instruction*) () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#5  0x00007f98ddf18cb9 in llvm::GVN::processBlock(llvm::BasicBlock*) () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#6  0x00007f98ddf18f90 in llvm::GVN::iterateOnFunction(llvm::Function&amp;) () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#7  0x00007f98ddf19176 in llvm::GVN::runImpl(llvm::Function&amp;, llvm::AssumptionCache&amp;, llvm::DominatorTree&amp;, llvm::TargetLibraryInfo const&amp;, llvm::AAResults&amp;, llvm::MemoryDependenceResults*, llvm::LoopInfo*, llvm::OptimizationRemarkEmitter*) () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#8  0x00007f98ddf19ee1 in llvm::gvn::GVNLegacyPass::runOnFunction(llvm::Function&amp;) () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#9  0x00007f98de867518 in llvm::FPPassManager::runOnFunction(llvm::Function&amp;) () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#10 0x00007f98de40e93b in (anonymous namespace)::CGPassManager::runOnModule(llvm::Module&amp;) () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#11 0x00007f98de8668c8 in llvm::legacy::PassManagerImpl::run(llvm::Module&amp;) () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n--Type &lt;RET&gt; for more, q to quit, c to continue without paging--\n#12 0x00007f98de7e2679 in LLVMRunPassManager () from /home/wesley/.rustup/toolchains/stage1/lib/librustc_driver-9d36f6e088352849.so\n#13 0x00007f98dc80bab8 in rustc_codegen_llvm::back::write::optimize (cgcx=0x7f98d8238150, diag_handler=&lt;optimized out&gt;, module=&lt;optimized out&gt;, config=&lt;optimized out&gt;)\n    at src/librustc_codegen_llvm/back/write.rs:444\n#14 &lt;rustc_codegen_llvm::LlvmCodegenBackend as rustc_codegen_ssa::traits::write::WriteBackendMethods&gt;::optimize (cgcx=&lt;optimized out&gt;, diag_handler=0x7f98d8237e50, module=&lt;optimized out&gt;,\n    config=0x7f98d4510f70) at src/librustc_codegen_llvm/lib.rs:160\n#15 0x00007f98dc6deff8 in rustc_codegen_ssa::back::write::execute_optimize_work_item (cgcx=0x7f98d8238150, module_config=0x7f98d4510f70, module=...)\n    at /home/wesley/code/rust/rust/src/librustc_codegen_ssa/back/write.rs:740\n#16 rustc_codegen_ssa::back::write::execute_work_item (cgcx=0x7f98d8238150, work_item=...) at /home/wesley/code/rust/rust/src/librustc_codegen_ssa/back/write.rs:717\n</pre></div>",
+        "id": 185689220,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087670
+    },
+    {
+        "content": "<p>I thought originally this might have something to do with how many blocks were in the function being optimized but after running the inliner, we actually have fewer blocks than when we started.</p>",
+        "id": 185689291,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087722
+    },
+    {
+        "content": "<p>GVN looks at locals I believe and we do create a lot more locals for the <code>deeply-nested</code> test after inlining.</p>",
+        "id": 185689312,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087755
+    },
+    {
+        "content": "<p>so... this is some exponential algorithm on the number of locals?</p>",
+        "id": 185689385,
+        "sender_full_name": "oli",
+        "timestamp": 1579087821
+    },
+    {
+        "content": "<p>I guess?</p>",
+        "id": 185689393,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087828
+    },
+    {
+        "content": "<p>I know nothing of LLVM internals</p>",
+        "id": 185689400,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087839
+    },
+    {
+        "content": "<p>\"GVNLegacyPass\" sounds dubious</p>",
+        "id": 185689401,
+        "sender_full_name": "oli",
+        "timestamp": 1579087841
+    },
+    {
+        "content": "<p>Yeah I thought so too</p>",
+        "id": 185689405,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087848
+    },
+    {
+        "content": "<p>But it looks like \"New GVN\" isn't ready yet</p>",
+        "id": 185689411,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087863
+    },
+    {
+        "content": "<p>Hmm... the docs aren't helpful :D <a href=\"http://llvm.org/doxygen/classllvm_1_1gvn_1_1GVNLegacyPass.html\" target=\"_blank\" title=\"http://llvm.org/doxygen/classllvm_1_1gvn_1_1GVNLegacyPass.html\">http://llvm.org/doxygen/classllvm_1_1gvn_1_1GVNLegacyPass.html</a></p>",
+        "id": 185689423,
+        "sender_full_name": "oli",
+        "timestamp": 1579087893
+    },
+    {
+        "content": "<p>Yeah lol</p>",
+        "id": 185689435,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087919
+    },
+    {
+        "content": "<p>Here's the tracking bug for New GVN <a href=\"https://bugs.llvm.org/show_bug.cgi?id=30995\" target=\"_blank\" title=\"https://bugs.llvm.org/show_bug.cgi?id=30995\">https://bugs.llvm.org/show_bug.cgi?id=30995</a></p>",
+        "id": 185689477,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579087928
+    },
+    {
+        "content": "<p>// This pass performs global value numbering to eliminate fully redundant<br>\n // instructions.  It also performs simple dead load elimination.<br>\n //<br>\n // Note that this pass does the value numbering itself; it does not use the<br>\n // ValueNumbering analysis passes.</p>",
+        "id": 185689493,
+        "sender_full_name": "oli",
+        "timestamp": 1579087974
+    },
+    {
+        "content": "<p>Something kind of interesting about the <code>deeply-nested</code> test case: before inlining, we have 34 basic blocks and 35 locals, after inlining we have only 16 basic blocks but we now have 53 locals.</p>",
+        "id": 185689667,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579088200
+    },
+    {
+        "content": "<p>that doesn't sound like something that should end up exploding llvm</p>",
+        "id": 185689685,
+        "sender_full_name": "oli",
+        "timestamp": 1579088233
+    },
+    {
+        "content": "<p>do you have a mir dump available that I could look at?</p>",
+        "id": 185689697,
+        "sender_full_name": "oli",
+        "timestamp": 1579088252
+    },
+    {
+        "content": "<p>Sure</p>",
+        "id": 185689703,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579088258
+    },
+    {
+        "content": "<p><a href=\"https://gist.github.com/wesleywiser/1a01122c920a8771a64a59847cfdf272\" target=\"_blank\" title=\"https://gist.github.com/wesleywiser/1a01122c920a8771a64a59847cfdf272\">https://gist.github.com/wesleywiser/1a01122c920a8771a64a59847cfdf272</a></p>",
+        "id": 185689775,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579088328
+    },
+    {
+        "content": "<p>There's also the weird extra <code>scope { }</code>s that the inliner produces</p>",
+        "id": 185689797,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579088378
+    },
+    {
+        "content": "<p>We could just start optimizing out random things until llvm morale improves</p>",
+        "id": 185690047,
+        "sender_full_name": "oli",
+        "timestamp": 1579088680
+    },
+    {
+        "content": "<p>e.g. assignments of zst locals are pretty much useless. We could just eliminate them, even generic uses of <code>PhantomData</code> could just be killed</p>",
+        "id": 185690150,
+        "sender_full_name": "oli",
+        "timestamp": 1579088797
+    },
+    {
+        "content": "<p>Hmm</p>",
+        "id": 185690252,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579088898
+    },
+    {
+        "content": "<p>Let me dump the rest of the method after the other optimization passes. I would think ConstProp and SimplifyLocals would already do that.</p>",
+        "id": 185690264,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579088924
+    },
+    {
+        "content": "<p>also... why did <code>Iterator::chain</code> not get inlined</p>",
+        "id": 185690265,
+        "sender_full_name": "oli",
+        "timestamp": 1579088924
+    },
+    {
+        "content": "<p>I guess <code>Chain::new(self, other.into_iter())</code> is either too complex to inline or it bailed out due to other reasons</p>",
+        "id": 185690323,
+        "sender_full_name": "oli",
+        "timestamp": 1579089003
+    },
+    {
+        "content": "<blockquote>\n<p>[DEBUG rustc_mir::transform::inline] NOT inlining CallSite { callee: DefId(2:4728 ~ core[e46f]::iter[0]::traits[0]::iterator[0]::Iterator[0]::chain[0]), substs: [std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Chain&lt;std::iter::Empty&lt;()&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;&gt;, std::iter::Empty&lt;()&gt;], bb: bb32, location: SourceInfo { span: test.rs:4:14: 20:24, scope: scope[0] } } [cost=106 &gt; threshold=100]</p>\n</blockquote>",
+        "id": 185690358,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579089043
+    },
+    {
+        "content": "<p>hmm...</p>",
+        "id": 185690697,
+        "sender_full_name": "oli",
+        "timestamp": 1579089440
+    },
+    {
+        "content": "<p>Oh const prop doesn't handle it because it's an assignment on a projection of a local <a href=\"https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/const_prop.rs#L828\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/const_prop.rs#L828\">https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/const_prop.rs#L828</a></p>",
+        "id": 185690716,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579089470
+    },
+    {
+        "content": "<p>oh heh...</p>",
+        "id": 185690773,
+        "sender_full_name": "oli",
+        "timestamp": 1579089510
+    },
+    {
+        "content": "<p>so... the inlining cost is computed on the polymorphic MIR of a function, and all locals with unknown type size (so all generic locals) have cost 10</p>",
+        "id": 185690816,
+        "sender_full_name": "oli",
+        "timestamp": 1579089567
+    },
+    {
+        "content": "<p>also function calls have cost 25</p>",
+        "id": 185690821,
+        "sender_full_name": "oli",
+        "timestamp": 1579089576
+    },
+    {
+        "content": "<p>so the two function calls + a few locals + a few instructions would quickly build up to 106</p>",
+        "id": 185690830,
+        "sender_full_name": "oli",
+        "timestamp": 1579089591
+    },
+    {
+        "content": "<p>imo the cost model was just a place holder since the pass was never really enabled</p>",
+        "id": 185690896,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579089631
+    },
+    {
+        "content": "<p>but I'm not the original author so I can't say for sure</p>",
+        "id": 185690904,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579089639
+    },
+    {
+        "content": "<p>yea</p>",
+        "id": 185690921,
+        "sender_full_name": "oli",
+        "timestamp": 1579089655
+    },
+    {
+        "content": "<p>I don't think there's ever been any tweaks made to it</p>",
+        "id": 185690925,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579089659
+    },
+    {
+        "content": "<p>Well, the costs themselves are probably taken from llvm: <a href=\"https://llvm.org/doxygen/namespacellvm_1_1InlineConstants.html\" target=\"_blank\" title=\"https://llvm.org/doxygen/namespacellvm_1_1InlineConstants.html\">https://llvm.org/doxygen/namespacellvm_1_1InlineConstants.html</a></p>",
+        "id": 185691546,
+        "sender_full_name": "oli",
+        "timestamp": 1579090353
+    },
+    {
+        "content": "<p>but llvm has no hard threshold</p>",
+        "id": 185691675,
+        "sender_full_name": "oli",
+        "timestamp": 1579090531
+    },
+    {
+        "content": "<p>llvm has fun things like <a href=\"https://github.com/llvm/llvm-project/blob/064087581ab98cca7254b4d0f12ecbed13da2692/llvm/lib/Analysis/InlineCost.cpp#L1250\" target=\"_blank\" title=\"https://github.com/llvm/llvm-project/blob/064087581ab98cca7254b4d0f12ecbed13da2692/llvm/lib/Analysis/InlineCost.cpp#L1250\">https://github.com/llvm/llvm-project/blob/064087581ab98cca7254b4d0f12ecbed13da2692/llvm/lib/Analysis/InlineCost.cpp#L1250</a> though</p>",
+        "id": 185691774,
+        "sender_full_name": "oli",
+        "timestamp": 1579090635
+    },
+    {
+        "content": "<p>That seems likely</p>",
+        "id": 185691887,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579090747
+    },
+    {
+        "content": "<p>ah</p>",
+        "id": 185691968,
+        "sender_full_name": "oli",
+        "timestamp": 1579090835
+    },
+    {
+        "content": "<p><a href=\"https://github.com/llvm/llvm-project/blob/064087581ab98cca7254b4d0f12ecbed13da2692/llvm/lib/Analysis/InlineCost.cpp#L49\" target=\"_blank\" title=\"https://github.com/llvm/llvm-project/blob/064087581ab98cca7254b4d0f12ecbed13da2692/llvm/lib/Analysis/InlineCost.cpp#L49\">https://github.com/llvm/llvm-project/blob/064087581ab98cca7254b4d0f12ecbed13da2692/llvm/lib/Analysis/InlineCost.cpp#L49</a></p>",
+        "id": 185691970,
+        "sender_full_name": "oli",
+        "timestamp": 1579090836
+    },
+    {
+        "content": "<p>so the default threshold is 225 in llvm</p>",
+        "id": 185691979,
+        "sender_full_name": "oli",
+        "timestamp": 1579090842
+    },
+    {
+        "content": "<p>and much higher values for hot calls</p>",
+        "id": 185692028,
+        "sender_full_name": "oli",
+        "timestamp": 1579090893
+    },
+    {
+        "content": "<p>and much lower values for cold calls</p>",
+        "id": 185692035,
+        "sender_full_name": "oli",
+        "timestamp": 1579090898
+    },
+    {
+        "content": "<p>so uh :D</p>",
+        "id": 185692038,
+        "sender_full_name": "oli",
+        "timestamp": 1579090902
+    },
+    {
+        "content": "<p>We should play with the inlining costs?</p>",
+        "id": 185692110,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579090934
+    },
+    {
+        "content": "<p>we may be confusing llvm by having a higher threshold for cold calls than they do and a lower one for hot calls</p>",
+        "id": 185692117,
+        "sender_full_name": "oli",
+        "timestamp": 1579090938
+    },
+    {
+        "content": "<p>Hm</p>",
+        "id": 185692128,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579090950
+    },
+    {
+        "content": "<p>well, idk if we can solve this without actually putting a lot of mindpower into it</p>",
+        "id": 185692138,
+        "sender_full_name": "oli",
+        "timestamp": 1579090955
+    },
+    {
+        "content": "<p>What do you mean by confusing llvm?</p>",
+        "id": 185692163,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579090987
+    },
+    {
+        "content": "<p>We don't pass any of this data to llvm from the inliner</p>",
+        "id": 185692178,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091008
+    },
+    {
+        "content": "<p>right, what I mean is we now inline cold calls that llvm didn't see inlined before</p>",
+        "id": 185692193,
+        "sender_full_name": "oli",
+        "timestamp": 1579091024
+    },
+    {
+        "content": "<p>So the only thing that should be happening is that we don't inline enough</p>",
+        "id": 185692196,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091026
+    },
+    {
+        "content": "<p>ah</p>",
+        "id": 185692206,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091040
+    },
+    {
+        "content": "<p>well we do <a href=\"https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/inline.rs#L257\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/inline.rs#L257\">https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/inline.rs#L257</a></p>",
+        "id": 185692269,
+        "sender_full_name": "oli",
+        "timestamp": 1579091060
+    },
+    {
+        "content": "<p>which is pretty close for the current threshold, so</p>",
+        "id": 185692278,
+        "sender_full_name": "oli",
+        "timestamp": 1579091070
+    },
+    {
+        "content": "<p>that's probably not the cause either</p>",
+        "id": 185692287,
+        "sender_full_name": "oli",
+        "timestamp": 1579091080
+    },
+    {
+        "content": "<p>idk, how to debug this</p>",
+        "id": 185692291,
+        "sender_full_name": "oli",
+        "timestamp": 1579091085
+    },
+    {
+        "content": "<p>just fiddling with the inlining cost seems fragile</p>",
+        "id": 185692306,
+        "sender_full_name": "oli",
+        "timestamp": 1579091104
+    },
+    {
+        "content": "<p>Should we perhaps not inline <code>#[cold]</code> functions <em>at all</em>?</p>",
+        "id": 185692330,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091129
+    },
+    {
+        "content": "<p>if llvm does it, there's no reason for us not to do it</p>",
+        "id": 185692350,
+        "sender_full_name": "oli",
+        "timestamp": 1579091157
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 185692488,
+        "sender_full_name": "oli",
+        "timestamp": 1579091255
+    },
+    {
+        "content": "<p>one thing that may be relevant</p>",
+        "id": 185692498,
+        "sender_full_name": "oli",
+        "timestamp": 1579091260
+    },
+    {
+        "content": "<p>can you check the llvm IR vs the llvm IR on nightly?</p>",
+        "id": 185692558,
+        "sender_full_name": "oli",
+        "timestamp": 1579091285
+    },
+    {
+        "content": "<p>maybe llvm now optimizes better</p>",
+        "id": 185692568,
+        "sender_full_name": "oli",
+        "timestamp": 1579091294
+    },
+    {
+        "content": "<p>After the LLVM optimizations run or before?</p>",
+        "id": 185692581,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091306
+    },
+    {
+        "content": "<p>after</p>",
+        "id": 185692604,
+        "sender_full_name": "oli",
+        "timestamp": 1579091339
+    },
+    {
+        "content": "<p>like I'm wondering if llvm optimizes away the entire test now</p>",
+        "id": 185692628,
+        "sender_full_name": "oli",
+        "timestamp": 1579091358
+    },
+    {
+        "content": "<p>if that entire functions ends up with a <code>Box::new(())</code> and nothing else, then I'd say the compile-time perf hit is kinda warranted</p>",
+        "id": 185692719,
+        "sender_full_name": "oli",
+        "timestamp": 1579091431
+    },
+    {
+        "content": "<p>So I have some random changes I'm playing with an <em>something</em> in them fixed it?</p>",
+        "id": 185692846,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091555
+    },
+    {
+        "content": "<p>Stashing for now and I'll track down what fixed it later</p>",
+        "id": 185692854,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091572
+    },
+    {
+        "content": "<p>wat</p>",
+        "id": 185692877,
+        "sender_full_name": "oli",
+        "timestamp": 1579091621
+    },
+    {
+        "content": "<p>It must have been this</p>\n<div class=\"codehilite\"><pre><span></span>diff --cc src/librustc_mir/transform/inline.rs\nindex f4e47b01cb3,f4e47b01cb3..2971347ec12\n--- a/src/librustc_mir/transform/inline.rs\n+++ b/src/librustc_mir/transform/inline.rs\n@@@ -40,6 -40,6 +40,13 @@@ struct CallSite&lt;&#39;tcx&gt;\n  impl&lt;&#39;tcx&gt; MirPass&lt;&#39;tcx&gt; for Inline {\n      fn run_pass(&amp;self, tcx: TyCtxt&lt;&#39;tcx&gt;, source: MirSource&lt;&#39;tcx&gt;, body: &amp;mut BodyAndCache&lt;&#39;tcx&gt;) {\n          if tcx.sess.opts.debugging_opts.mir_opt_level &gt;= 1 {\n++            // Don&#39;t run the `Inliner` on bodies that are very large because LLVM does not handle\n++            // them very well and increasing the number of blocks can drastically increase compile\n++            // time.\n++            if body.basic_blocks().len() &gt; 100 {\n++                return;\n++            }\n++\n              Inliner { tcx, source }.run_pass(body);\n          }\n      }\n</pre></div>",
+        "id": 185692890,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091638
+    },
+    {
+        "content": "<p>huh, but I thought bodies with that many blocks would have been eliminated by <a href=\"https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/inline.rs#L335\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/inline.rs#L335\">https://github.com/rust-lang/rust/blob/632387f38dfbac0f2b8b8900c840fff7f1fb888e/src/librustc_mir/transform/inline.rs#L335</a> increasing the cost by 5 per block</p>",
+        "id": 185692962,
+        "sender_full_name": "oli",
+        "timestamp": 1579091696
+    },
+    {
+        "content": "<p>Yeah</p>",
+        "id": 185692984,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091716
+    },
+    {
+        "content": "<p>Eh, hang on I've undone my change and it's still compiling fast</p>",
+        "id": 185692999,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091739
+    },
+    {
+        "content": "<p>I'm doing something wrong</p>",
+        "id": 185693006,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091745
+    },
+    {
+        "content": "<p>already commited some changes?</p>",
+        "id": 185693067,
+        "sender_full_name": "oli",
+        "timestamp": 1579091783
+    },
+    {
+        "content": "<p>No, I'm on the same commit as my branch</p>",
+        "id": 185693072,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091798
+    },
+    {
+        "content": "<p>Does <code>build -i</code> not play nice with <code>git stash</code>?</p>",
+        "id": 185693087,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091817
+    },
+    {
+        "content": "<p>idk</p>",
+        "id": 185693125,
+        "sender_full_name": "oli",
+        "timestamp": 1579091865
+    },
+    {
+        "content": "<p>I have <code>incremental = true</code> in <code>config.toml</code></p>",
+        "id": 185693130,
+        "sender_full_name": "oli",
+        "timestamp": 1579091878
+    },
+    {
+        "content": "<p>I'm cleaning and rebuilding</p>",
+        "id": 185693170,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579091883
+    },
+    {
+        "content": "<p>wut</p>",
+        "id": 185696521,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579094616
+    },
+    {
+        "content": "<p>If I compile rustc with <code>./x.py build --stage 1 -i src/libstd</code> it is fast but if I compile without the <code>-i</code>, it is very slow.</p>",
+        "id": 185696600,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579094665
+    },
+    {
+        "content": "<p>wtf</p>",
+        "id": 185706610,
+        "sender_full_name": "oli",
+        "timestamp": 1579101165
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 185706677,
+        "sender_full_name": "oli",
+        "timestamp": 1579101233
+    },
+    {
+        "content": "<p>maybe it's because of the hack in inlining that prevents cycles</p>",
+        "id": 185706741,
+        "sender_full_name": "oli",
+        "timestamp": 1579101251
+    },
+    {
+        "content": "<p>Ah, that's a good hypothesis!</p>",
+        "id": 185707345,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579101606
+    },
+    {
+        "content": "<p>I presume we don't handle debug information when inlining yet?</p>",
+        "id": 185719721,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1579108273
+    },
+    {
+        "content": "<p>No, that's what's breaking the <code>ui/backtrace-debuginfo.rs</code> test</p>",
+        "id": 185719774,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1579108313
+    },
+    {
+        "content": "<blockquote>\n<p>can you check the llvm IR vs the llvm IR on nightly?</p>\n</blockquote>\n<p>The IR is exactly the same. </p>\n<p>What's even more interesting is that if I mess with <code>-C codegen-units</code>, the compile time regression seems to go away. With codegen-units &lt; 3, the regression goes away. With codegen-units &gt;= 3, the regression appears.</p>\n<p>Passing <code>-Z time-llvm-passes</code> shows this:</p>\n<div class=\"codehilite\"><pre><span></span>===-------------------------------------------------------------------------===\n                      ... Pass execution timing report ...\n===-------------------------------------------------------------------------===\n  Total Execution Time: 16.3174 seconds (16.2279 wall clock)\n\n   ---User Time---   --System Time--   --User+System--   ---Wall Time---  --- Name ---\n  12.9047 ( 79.7%)   0.0039 (  3.2%)  12.9086 ( 79.1%)  12.9085 ( 79.5%)  Global Value Numbering #3\n   1.1998 (  7.4%)   0.0000 (  0.0%)   1.1998 (  7.4%)   1.1998 (  7.4%)  Dead Store Elimination #3\n   0.2420 (  1.5%)   0.0038 (  3.1%)   0.2458 (  1.5%)   0.2458 (  1.5%)  Combine redundant instructions #12\n   0.2086 (  1.3%)   0.0148 ( 12.1%)   0.2234 (  1.4%)   0.2233 (  1.4%)  Function Integration/Inlining #3\n   0.1406 (  0.9%)   0.0039 (  3.2%)   0.1445 (  0.9%)   0.1444 (  0.9%)  Memory SSA #3\n....\n</pre></div>",
+        "id": 186953130,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580356116
+    },
+    {
+        "content": "<blockquote>\n<p>The IR is exactly the same. </p>\n</blockquote>\n<p>To be clear: The IR for the test program is the same. I have no idea what the std library IR looks like.</p>",
+        "id": 186989563,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580393482
+    },
+    {
+        "content": "<p>I'm trying to add support for enabling the LLVM <a href=\"https://aras-p.info/blog/2019/01/16/time-trace-timeline-flame-chart-profiler-for-Clang/\" target=\"_blank\" title=\"https://aras-p.info/blog/2019/01/16/time-trace-timeline-flame-chart-profiler-for-Clang/\">time-trace</a> feature which hopefully will give us more details. My C++ code is seg faulting though <span aria-label=\"laughter tears\" class=\"emoji emoji-1f602\" role=\"img\" title=\"laughter tears\">:laughter_tears:</span></p>",
+        "id": 186989739,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580393557
+    },
+    {
+        "content": "<p>That <code>time-trace</code> looks very Clang-ish. Does it have much LLVM stuff?</p>",
+        "id": 187016092,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1580409304
+    },
+    {
+        "content": "<p>I think so? <a href=\"https://reviews.llvm.org/rL357340\" target=\"_blank\" title=\"https://reviews.llvm.org/rL357340\">https://reviews.llvm.org/rL357340</a></p>",
+        "id": 187016232,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580409379
+    },
+    {
+        "content": "<p>Aw, looks like it isn't a callback based interface. Having LLVM stuff in <code>-Zself-profile</code> would be neat.</p>",
+        "id": 187016442,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1580409522
+    },
+    {
+        "content": "<p>Yeah</p>",
+        "id": 187017191,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580409952
+    },
+    {
+        "content": "<p>I'm not sure how useful it will be yet</p>",
+        "id": 187017239,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580409964
+    },
+    {
+        "content": "<p>If it actually helps, we may want to see if we can change it to be callback based as you say.</p>",
+        "id": 187017306,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580410016
+    },
+    {
+        "content": "<p>I guess you could also just parse the JSON it produces too and generate events from that? But having a <code>timeTraceProfilerInitializeWithCallbacks</code>function might be easier.</p>",
+        "id": 187017542,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1580410163
+    },
+    {
+        "content": "<p>Also looks like it's designed for a single thread only</p>",
+        "id": 187017850,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1580410329
+    },
+    {
+        "content": "<p>So use <code>-j1</code> when testing it =P</p>",
+        "id": 187017935,
+        "sender_full_name": "Zoxc",
+        "timestamp": 1580410388
+    },
+    {
+        "content": "<p>Ah</p>",
+        "id": 187018004,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580410436
+    },
+    {
+        "content": "<p>Well that's why I'm getting a seg fault then</p>",
+        "id": 187018026,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580410444
+    },
+    {
+        "content": "<p>and the issue doesn't repro under <code>-C codegen-units=1</code></p>",
+        "id": 187018128,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580410480
+    },
+    {
+        "content": "<p>you can try to use the <a href=\"https://github.com/rust-lang/rust/pull/68406\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/68406\">https://github.com/rust-lang/rust/pull/68406</a>  and then compile with <code>RUSTFLAGS=\"-Znew-llvm-pass-manager=y -Zself-profile -Zself-profile-events=llvm</code></p>",
+        "id": 187036503,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580421963
+    },
+    {
+        "content": "<p>is needs the new passmanager in llvm but maybe can give some info anyway</p>",
+        "id": 187036551,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580422012
+    },
+    {
+        "content": "<p>Oh, that's helpful</p>",
+        "id": 187036567,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580422027
+    },
+    {
+        "content": "<p>Thanks!</p>",
+        "id": 187036569,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580422029
+    },
+    {
+        "content": "<p>and if you do not want the new passmanager I have a supper old hack for it in <a href=\"https://github.com/andjo403/rust/tree/llvmProfiler\" target=\"_blank\" title=\"https://github.com/andjo403/rust/tree/llvmProfiler\">https://github.com/andjo403/rust/tree/llvmProfiler</a> but that needs to recompile llvm as some changes was needed there</p>",
+        "id": 187036830,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580422218
+    },
+    {
+        "content": "<p>I see there is a NewGVN pass in LLVM but I have no idea if it's any better than the current one</p>",
+        "id": 187036990,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580422359
+    },
+    {
+        "content": "<p>about changing the codegen-units resulting in compile time regressions I found that the partitioning is not that good tried to fix part of it in <a href=\"https://github.com/rust-lang/rust/pull/65281\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/65281\">https://github.com/rust-lang/rust/pull/65281</a> and some more info in <a href=\"https://github.com/rust-lang/rust/issues/64913\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/64913\">https://github.com/rust-lang/rust/issues/64913</a></p>",
+        "id": 187037903,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580423076
+    },
+    {
+        "content": "<p>Do you think there's blocking or something happening between cgu partitions?</p>",
+        "id": 187038701,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580423671
+    },
+    {
+        "content": "<p>no I think that you only get unlucky with the partitioning. The smallest change in the estimated size can change alot of what is in the same cgu and due to that is it possible that one cgu gets alot larger and due to this affects the compile time</p>",
+        "id": 187039067,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580423919
+    },
+    {
+        "content": "<p>had crates that got up to 20% faster to compile by only changing the partitioning algorithm</p>",
+        "id": 187039239,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580424064
+    },
+    {
+        "content": "<p>It took longer than I hoped but I have a self contained repro:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">struct</span> <span class=\"nc\">Empty</span><span class=\"p\">(</span><span class=\"n\">std</span>::<span class=\"n\">marker</span>::<span class=\"n\">PhantomData</span><span class=\"o\">&lt;</span><span class=\"kt\">u8</span><span class=\"o\">&gt;</span><span class=\"p\">);</span><span class=\"w\"></span>\n\n<span class=\"k\">struct</span> <span class=\"nc\">Chain</span><span class=\"o\">&lt;</span><span class=\"n\">A</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span>: <span class=\"nc\">A</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">b</span>: <span class=\"nc\">B</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">which</span>: <span class=\"kt\">bool</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">_x</span>: <span class=\"nb\">Box</span><span class=\"o\">&lt;</span><span class=\"n\">Hint</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"nb\">Box</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">.</span><span class=\"n\">chain</span><span class=\"p\">(</span><span class=\"n\">empty</span><span class=\"p\">()));</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">empty</span><span class=\"p\">()</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">Empty</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">Empty</span><span class=\"p\">(</span><span class=\"n\">std</span>::<span class=\"n\">marker</span>::<span class=\"n\">PhantomData</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">Hint</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">Empty</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">hint</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"p\">(</span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">Option</span><span class=\"o\">&lt;</span><span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">(</span><span class=\"mi\">0</span><span class=\"k\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"mi\">0</span><span class=\"k\">usize</span><span class=\"p\">))</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">impl</span><span class=\"o\">&lt;</span><span class=\"n\">A</span>: <span class=\"nc\">Hint</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">B</span>: <span class=\"nc\">Hint</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"n\">Hint</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">Chain</span><span class=\"o\">&lt;</span><span class=\"n\">A</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">//#[inline(always)]</span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">hint</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"p\">(</span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">Option</span><span class=\"o\">&lt;</span><span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">which</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"kc\">true</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">which</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"kc\">true</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">.</span><span class=\"n\">hint</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"kc\">false</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">a_lower</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">a_upper</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">.</span><span class=\"n\">hint</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">b_lower</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b_upper</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"p\">.</span><span class=\"n\">hint</span><span class=\"p\">();</span><span class=\"w\"></span>\n\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">lower</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">a_lower</span><span class=\"p\">.</span><span class=\"n\">saturating_add</span><span class=\"p\">(</span><span class=\"n\">b_lower</span><span class=\"p\">);</span><span class=\"w\"></span>\n\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">upper</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">a_upper</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b_upper</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">(</span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"p\">),</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">y</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">checked_add</span><span class=\"p\">(</span><span class=\"n\">y</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"nb\">None</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"w\">                </span><span class=\"p\">(</span><span class=\"n\">lower</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">upper</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">trait</span><span class=\"w\"> </span><span class=\"n\">Hint</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">hint</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"p\">(</span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">Option</span><span class=\"o\">&lt;</span><span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">);</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">chain</span><span class=\"o\">&lt;</span><span class=\"n\">B</span>: <span class=\"nc\">Hint</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">other</span>: <span class=\"nc\">B</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">Chain</span><span class=\"o\">&lt;</span><span class=\"n\">Self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"k\">where</span><span class=\"w\"> </span><span class=\"n\">Self</span>: <span class=\"nb\">Sized</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">Chain</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"nc\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"nc\">other</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">which</span>: <span class=\"nc\">false</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 187082538,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580476891
+    },
+    {
+        "content": "<p>If you uncomment the <code>//#[inline(always)]</code> line, it compiles very slowly but if you comment it out, it compiles very quickly.</p>",
+        "id": 187082613,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580476926
+    },
+    {
+        "content": "<p>The issue still repros if you use the <code>-Z no-parallel-llvm</code> flag so I was able to capture an LLVM time trace</p>",
+        "id": 187082635,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580476955
+    },
+    {
+        "content": "<p><a href=\"https://www.speedscope.app/#profileURL=https%3A%2F%2Fgist.githubusercontent.com%2Fwesleywiser%2F3daf5710dfeaba66ae4f4d001cb36761%2Fraw%2Fd4d8141493f496e93574e7bd74335fdbd96f2b17%2Fllvm.json&amp;title=llvm\" target=\"_blank\" title=\"https://www.speedscope.app/#profileURL=https%3A%2F%2Fgist.githubusercontent.com%2Fwesleywiser%2F3daf5710dfeaba66ae4f4d001cb36761%2Fraw%2Fd4d8141493f496e93574e7bd74335fdbd96f2b17%2Fllvm.json&amp;title=llvm\">https://www.speedscope.app/#profileURL=https%3A%2F%2Fgist.githubusercontent.com%2Fwesleywiser%2F3daf5710dfeaba66ae4f4d001cb36761%2Fraw%2Fd4d8141493f496e93574e7bd74335fdbd96f2b17%2Fllvm.json&amp;title=llvm</a></p>",
+        "id": 187083323,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580477516
+    },
+    {
+        "content": "<p>Which shows that most of the time taken is in the <code>Chain::hint()</code> function running GVN.</p>",
+        "id": 187083383,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580477539
+    },
+    {
+        "content": "<p>Have you compared the LLVM time trace with and without the PR so that the time is not moved from one cgu to another</p>",
+        "id": 187092504,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580484112
+    },
+    {
+        "content": "<p>Do you mean PR 68406? I haven't had a chance yet. I'm hoping to get to it tonight.</p>",
+        "id": 187093423,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580484736
+    },
+    {
+        "content": "<p>Hmm think that I was not mening PR test with the different codegen-units and check that the time is not moved from one cgu to another</p>",
+        "id": 187094744,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580485657
+    },
+    {
+        "content": "<p>Oh gotcha. I've tried with cgu={1,2,3,4,5,8} and cgu={1,2} does not experience the issue. cgu &gt;= 3 does.</p>",
+        "id": 187095336,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580486051
+    },
+    {
+        "content": "<p>Is there a way I can see what ended up in the cgu?</p>",
+        "id": 187095358,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580486070
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"125250\">@Wesley Wiser</span> You could add println!() in the right place in the partitioning code, or you could use <code>-Cno-prepopulate-passes</code> to disable all llvm optimizations (including inlining), while keeping all rust optimizations enabled and <code>-Csave-temps</code> to keep all object files. You can then just look at the defined symbols in each object file.</p>",
+        "id": 187098550,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1580488147
+    },
+    {
+        "content": "<p>Brilliant, thanks!</p>",
+        "id": 187098744,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580488260
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"125799\">@andjo403</span> It looks pretty much the same as what I was able to get out of the <code>time-trace</code> thing. Having it integrated with the self-profiler is awesome though! <a href=\"/user_uploads/4715/Ma3T38fWo5vZnKgvbw6i5ywv/Screenshot-from-2020-02-01-14-37-02.png\" target=\"_blank\" title=\"Screenshot-from-2020-02-01-14-37-02.png\">Screenshot-from-2020-02-01-14-37-02.png</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/4715/Ma3T38fWo5vZnKgvbw6i5ywv/Screenshot-from-2020-02-01-14-37-02.png\" target=\"_blank\" title=\"Screenshot-from-2020-02-01-14-37-02.png\"><img src=\"/user_uploads/4715/Ma3T38fWo5vZnKgvbw6i5ywv/Screenshot-from-2020-02-01-14-37-02.png\"></a></div>",
+        "id": 187173960,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580585890
+    },
+    {
+        "content": "<p>that was the plan hope it can help some one and it also do not force you to use  <code>-Z no-parallel-llvm</code></p>",
+        "id": 187174063,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580586044
+    },
+    {
+        "content": "<p>Yeah, it works great!</p>",
+        "id": 187174092,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580586096
+    },
+    {
+        "content": "<p>Having de-mangled function names is also a plus</p>",
+        "id": 187174099,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580586118
+    },
+    {
+        "content": "<p>yes it is nice</p>",
+        "id": 187174163,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580586195
+    },
+    {
+        "content": "<p>was you able to see some difference in the logs when it was slow vs fast?</p>",
+        "id": 187174236,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580586292
+    },
+    {
+        "content": "<p>No, it looks pretty much the same</p>",
+        "id": 187174351,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580586492
+    },
+    {
+        "content": "<p>I'm playing the the <code>-Csave-temps</code> flag and the llvm dissembler to see if there's anything interesting in the cgu</p>",
+        "id": 187174359,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580586526
+    },
+    {
+        "content": "<p>is it even more than one cgu created for that small program? can only see one in the speedscope log</p>",
+        "id": 187174451,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580586717
+    },
+    {
+        "content": "<p>I believe so because I have stuff like <code>test2.test2.hash-cgu-0.*</code> and <code>test2.test2.hash-cgu-1.*</code> in the working directory</p>",
+        "id": 187174498,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580586786
+    },
+    {
+        "content": "<p>So the only difference between the slow and fast test case I came up with at the IR level is that we pass the inline hint along to llvm</p>",
+        "id": 187177380,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580592561
+    },
+    {
+        "content": "<p>However, when LLVM does the inlining, <code>size_hint()</code> balloons to have 327,680 locals</p>",
+        "id": 187177389,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580592599
+    },
+    {
+        "content": "<p>Actually, I'm wrong. Those are only the trivially assigned variables in the first block.</p>",
+        "id": 187177487,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580592766
+    },
+    {
+        "content": "<p>The function actually has 4,915,132 locals</p>",
+        "id": 187177620,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580593044
+    },
+    {
+        "content": "<p>So it's not surprising GVN is falling over</p>",
+        "id": 187177623,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580593054
+    },
+    {
+        "content": "<p>but how is codegen-units affecting is the inline hint is passed to llvm or not? or is that an other fault?</p>",
+        "id": 187178066,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580594017
+    },
+    {
+        "content": "<p>if I want to reproduce this do I need some special PR or is master enough?</p>",
+        "id": 187178116,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580594079
+    },
+    {
+        "content": "<p>I'm not sure yet</p>",
+        "id": 187178125,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594110
+    },
+    {
+        "content": "<p>Oh</p>",
+        "id": 187178137,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594158
+    },
+    {
+        "content": "<p>Ok</p>",
+        "id": 187178138,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594162
+    },
+    {
+        "content": "<p>When I rebased I lost my in progress changes the enabled the inliner</p>",
+        "id": 187178177,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594177
+    },
+    {
+        "content": "<p>Then <code>-C codegen-units</code> thing doesn't seem to make a difference once we've enabled the MIR inliner</p>",
+        "id": 187178187,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594217
+    },
+    {
+        "content": "<p>To recap:</p>\n<ol>\n<li>Cherry-pick this patch <a href=\"https://github.com/rust-lang/rust/pull/68213/commits/a3db6204e6d3d1d7fc994de4fb76a7f1d23a7e4f\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/68213/commits/a3db6204e6d3d1d7fc994de4fb76a7f1d23a7e4f\">https://github.com/rust-lang/rust/pull/68213/commits/a3db6204e6d3d1d7fc994de4fb76a7f1d23a7e4f</a></li>\n<li>Build with <code>./x.py build --stage 1 src/libstd</code> NOTE: if you build with <code>-i</code> you can't repro the issue</li>\n<li>Try compiling the test example I posted above. You'll need to uncomment the <code>//#[inline(always)]</code> line with <code>rustc +stage1 -O repro.rs</code></li>\n</ol>",
+        "id": 187178282,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594363
+    },
+    {
+        "content": "<p>ok will try to do that<br>\nby the way have rebased the llvm profiling PR and fixed the comments</p>",
+        "id": 187178361,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580594498
+    },
+    {
+        "content": "<p>Awesome! I took a look real quick and it looks good to me but since mw left the feedback, I'd like him to sign off.</p>",
+        "id": 187178408,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594566
+    },
+    {
+        "content": "<p>Can we rebase it without the changes from <a href=\"https://github.com/rust-lang/rust/issues/68170\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/68170\">#68170</a> or is it dependent on those to compile?</p>",
+        "id": 187178417,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594596
+    },
+    {
+        "content": "<p>If not that's fine but we'll have to wait for that PR to merge before we can merge this one</p>",
+        "id": 187178420,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594614
+    },
+    {
+        "content": "<p>I wonder if this (compile-time regression) is maybe expected? We've tweaked the std library's <code>inline</code> annotations for years without MIR inlining. Now that we're enabling that, there might be functions that have become just small enough to trigger LLVM to inline that were before too large.</p>",
+        "id": 187178476,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594727
+    },
+    {
+        "content": "<p>yes it is still based on 68170 so that needs to be merged first</p>",
+        "id": 187178482,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580594738
+    },
+    {
+        "content": "<p>Maybe we just need to undo a few key <code>#[inline]</code> hints?</p>",
+        "id": 187178487,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594753
+    },
+    {
+        "content": "<p>Ah, ok. That's fine :)</p>",
+        "id": 187178508,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594762
+    },
+    {
+        "content": "<p>Gotta run <span aria-label=\"wave\" class=\"emoji emoji-1f44b\" role=\"img\" title=\"wave\">:wave:</span></p>",
+        "id": 187178531,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1580594788
+    },
+    {
+        "content": "<p>ok will maby look at it tomorrow kind of late here also</p>",
+        "id": 187178541,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580594828
+    },
+    {
+        "content": "<p>I get the same behavior with and without cherry pick and almost the same times with different codegen-units even tried with stage2 and the same thing</p>",
+        "id": 187202384,
+        "sender_full_name": "andjo403",
+        "timestamp": 1580644194
+    }
+]

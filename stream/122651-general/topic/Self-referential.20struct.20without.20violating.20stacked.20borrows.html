@@ -1,0 +1,166 @@
+<html>
+<head><meta charset="utf-8"><title>Self-referential struct without violating stacked borrows · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html">Self-referential struct without violating stacked borrows</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="241078165"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241078165" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> UnsafeCell <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241078165">(Jun 01 2021 at 21:27)</a>:</h4>
+<p>Hi! I've been looking at stacked borrows recently due to using some self-referential structs, and the impression I got was that something like <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f12b090f5387c040322984cb5c27cad2">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f12b090f5387c040322984cb5c27cad2</a> would be UB, which makes sense, as otherwise mutable references wouldn't hold their invariants anymore (i.e. that access could be hidden inside a function call, as shown in several examples in the issues talking about this). However, would <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=e4155b44bd725ab1a8f760e21db08c1e">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=e4155b44bd725ab1a8f760e21db08c1e</a> work as an alternative? It does look like it would be valid (even though I could use some help checking that it actually is), but it also seems unintended at best. (Also, regarding the second example, the <code>Pin</code> and <code>PhantomPinned</code> aren't really needed for the example, they're only used to avoid accidentally taking mutable references to the <code>Box</code> and invalidating the borrow stack)</p>
+
+
+
+<a name="241096054"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241096054" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241096054">(Jun 02 2021 at 01:22)</a>:</h4>
+<p>Although miri doesn't seem to catch it, I think the second version is UB. At this point:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="o">*</span><span class="bp">self</span><span class="p">.</span><span class="n">field1</span><span class="p">.</span><span class="n">as_ref</span><span class="p">().</span><span class="mf">0.</span><span class="n">get</span><span class="p">())[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="c1">// Creates two SharedRW(⊥)s and a Unique(t)</span>
+<span class="o">*</span><span class="bp">self</span><span class="p">.</span><span class="n">field0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w"> </span><span class="c1">// Possibly not UB? The Unique(t) from the previous line is popped, and the SharedRW(⊥) created by the previous `.get()` call is kept</span>
+</code></pre></div>
+<p>the subterm <code>&amp;mut *self.field1.as_ref().0.get()</code> has type <code>&amp;mut [u8; 16]</code>, and as soon as you create an element of that type you are invalidating all pointers not derived from this reference (so the second line is UB).</p>
+
+
+
+<a name="241096892"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241096892" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241096892">(Jun 02 2021 at 01:36)</a>:</h4>
+<p>I would recommend something more like <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=0e2c86ed1fbc2aa352b0d73923ee96e0">this</a>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">A</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">field0</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">field1</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="p">[</span><span class="kt">u8</span><span class="p">;</span><span class="w"> </span><span class="mi">16</span><span class="p">],</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">impl</span><span class="w"> </span><span class="nb">Drop</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">A</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">drop</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nb">Box</span>::<span class="n">from_raw</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">field1</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">A</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">new</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="nc">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">field1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Box</span>::<span class="n">into_raw</span><span class="p">(</span><span class="nb">Box</span>::<span class="n">new</span><span class="p">([</span><span class="mi">0</span><span class="k">u8</span><span class="p">;</span><span class="w"> </span><span class="mi">16</span><span class="p">]));</span><span class="w"></span>
+<span class="w">        </span><span class="n">A</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">field0</span>: <span class="nc">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">field1</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="p">},</span><span class="w"></span>
+<span class="w">            </span><span class="n">field1</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">do_stuff</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">u8</span> <span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="p">.</span><span class="n">field1</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="o">*</span><span class="bp">self</span><span class="p">.</span><span class="n">field0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="p">.</span><span class="n">field1</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="o">*</span><span class="bp">self</span><span class="p">.</span><span class="n">field0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">(</span><span class="o">*</span><span class="bp">self</span><span class="p">.</span><span class="n">field1</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>This involves a bit more boilerplate when it comes to destruction compared to storing a box directly, but it makes it easier to avoid accidentally creating a reference through the box and causing UB in safe code. But the key point here is that <code>field0</code> is a pointer derived from <code>field1</code>, so even if you manifest a mutable reference to <code>field1</code>, <code>field0</code> is not invalidated.</p>
+
+
+
+<a name="241097044"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241097044" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241097044">(Jun 02 2021 at 01:39)</a>:</h4>
+<p><span class="user-mention" data-user-id="417677">@UnsafeCell</span></p>
+
+
+
+<a name="241097459"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241097459" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake Goulding <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241097459">(Jun 02 2021 at 01:47)</a>:</h4>
+<p>Also hopefully you've seen crates like ouroboros</p>
+
+
+
+<a name="241113907"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241113907" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> UnsafeCell <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241113907">(Jun 02 2021 at 07:27)</a>:</h4>
+<blockquote>
+<p>and as soon as you create an element of that type you are invalidating all pointers not derived from this reference</p>
+</blockquote>
+<p>But as explained in the comment, I thought according to stacked borrows the first line would modify the top of the borrow stack to contain, bottom-to-top, SharedRW(⊥) (from the shared reference to the UnsafeCell), SharedRW(⊥) (from the <code>.get()</code> and Unique(t); then, when the second line was used, due to <code>WRITE-1</code>, it would pop the Unique(t) and use the group of SharedRW(⊥)s underneath (now at the top of the stack)</p>
+
+
+
+<a name="241114886"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241114886" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> UnsafeCell <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241114886">(Jun 02 2021 at 07:39)</a>:</h4>
+<p><span class="user-mention" data-user-id="271719">@Mario Carneiro</span></p>
+
+
+
+<a name="241115051"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241115051" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> UnsafeCell <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241115051">(Jun 02 2021 at 07:41)</a>:</h4>
+<blockquote>
+<p>Also hopefully you've seen crates like ouroboros</p>
+</blockquote>
+<p>Oh, I hadn't, thank you! Unfortunately, I don't know if it's really suitable for my usecase, as I also have to modify what the self-referencing pointers point to several times at runtime and can't rebuild the entire struct (though I forgot to put it in the example)</p>
+<p>Using pointers would probably work, though ideally I'd have wanted to put the <code>UnsafeCell&lt;[u8; 16]&gt;</code> in a wrapper to allow safe immediate accesses to its contents (in a similar way as <code>Cell</code>), as well as unsafely creating mutable pointers to it</p>
+
+
+
+<a name="241115454"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241115454" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241115454">(Jun 02 2021 at 07:47)</a>:</h4>
+<p>I think your reasoning is correct and explains why miri doesn't complain, however I think this "pointer confusion" issue is considered a not necessarily desirable property of the current version of stacked borrows so I hesitate to endorse a mechanism that relies on it. (The problem is that <code>field0</code> is not derived from <code>field1</code> but SB doesn't currently track pointer provenance well enough to notice)</p>
+
+
+
+<a name="241115520"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241115520" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241115520">(Jun 02 2021 at 07:47)</a>:</h4>
+<p>Also I think that it would be suboptimal to have <code>UnsafeCell</code> here since you don't actually need interior mutability</p>
+
+
+
+<a name="241115611"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241115611" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> UnsafeCell <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241115611">(Jun 02 2021 at 07:48)</a>:</h4>
+<p>That makes sense then, and... it's actually also the reason why I was worried, despite not being able to disprove that through the existing rules</p>
+
+
+
+<a name="241115741"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241115741" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> UnsafeCell <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241115741">(Jun 02 2021 at 07:50)</a>:</h4>
+<blockquote>
+<p>Also I think that it would be suboptimal to have UnsafeCell here since you don't actually need interior mutability</p>
+</blockquote>
+<p>It was originally to make shared references to the field not invalidate pointers, but now that I think about it it shouldn't have any visible effect over some other pointer-based solution, as it's relying on items lingering on the borrow stack anyway</p>
+
+
+
+<a name="241115836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241115836" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241115836">(Jun 02 2021 at 07:51)</a>:</h4>
+<p>the basic technique is to make a <code>*mut</code> pointer for the "root object", derive everything else from that, and then dereference it locally when you need access. This can be wrapped behind a safe interface</p>
+
+
+
+<a name="241115923"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241115923" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241115923">(Jun 02 2021 at 07:52)</a>:</h4>
+<p>by locally I mean that you shouldn't hold on to <code>&amp;mut *self.field1</code> over the <code>*self.field0 = 2;</code> line</p>
+
+
+
+<a name="241116179"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241116179" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> UnsafeCell <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241116179">(Jun 02 2021 at 07:55)</a>:</h4>
+<p>I would've liked to avoid that, but after all it might really be the only solution that would work reliably. Thank you!</p>
+
+
+
+<a name="241116250"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241116250" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241116250">(Jun 02 2021 at 07:56)</a>:</h4>
+<p>Note that you don't have to worry about sharing when you use <code>*mut</code> because <code>*mut</code> is Copy and all copies are considered equivalent for the purpose of pointer invalidation when you <code>&amp;mut</code> them, and as long as you never retain two <code>&amp;mut</code> references derived from the same pointer there is no invalidation</p>
+
+
+
+<a name="241116325"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241116325" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241116325">(Jun 02 2021 at 07:57)</a>:</h4>
+<p>I think it might be possible to have a structure with <code>Box&lt;T&gt;, *mut T</code> if you are careful about how you dereference the box (and the <code>*mut</code> is derived from the box's <code>as_raw</code>), but those sorts of solutions are harder to reason about</p>
+
+
+
+<a name="241116443"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Self-referential%20struct%20without%20violating%20stacked%20borrows/near/241116443" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Self-referential.20struct.20without.20violating.20stacked.20borrows.html#241116443">(Jun 02 2021 at 07:59)</a>:</h4>
+<p>the fact that so many basic methods take references makes it a minefield of potential UB</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

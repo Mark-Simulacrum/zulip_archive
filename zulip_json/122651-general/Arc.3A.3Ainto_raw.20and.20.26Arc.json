@@ -1,0 +1,86 @@
+[
+    {
+        "content": "<p>Hello!<br>\nI am writing various C-compatible API where sometime I return pointer that are coming from Arc::into_raw. I sometime need to then pass that pointer back to rust and work on that Arc to retrieve a weak pointer to it.<br>\nI am currently dancing with:</p>\n<div class=\"codehilite\"><pre><span></span><code>let arc = Arc::from_raw(ptr);\nlet weak = Arc::downgrade(&amp;arc);\nArc::into_raw(arc);\ndo_something_with(weak);\n</code></pre></div>\n<p>I wonder if there is a more idiomatic way to retrieve a <code>&amp;Arc&lt;T&gt;</code> from a pointer that comes from <code>Arc&lt;T&gt;::into_raw</code>?</p>",
+        "id": 231999514,
+        "sender_full_name": "marmeladema",
+        "timestamp": 1616778074
+    },
+    {
+        "content": "<p>There's also <code>Weak::from_raw</code></p>",
+        "id": 232001629,
+        "sender_full_name": "cuviper",
+        "timestamp": 1616778904
+    },
+    {
+        "content": "<p>I guess it's not explicit that <code>Arc::into_raw</code> and <code>Weak::into_raw</code> return compatible pointers, but logically they must</p>",
+        "id": 232001766,
+        "sender_full_name": "cuviper",
+        "timestamp": 1616778961
+    },
+    {
+        "content": "<p>oh, but the counts would not be correct</p>",
+        "id": 232001879,
+        "sender_full_name": "cuviper",
+        "timestamp": 1616779000
+    },
+    {
+        "content": "<p>Arc::downgrade(&amp;*ManuallyDrop::new(Arc::from_raw(ptr)))</p>",
+        "id": 232002276,
+        "sender_full_name": "tm",
+        "timestamp": 1616779154
+    },
+    {
+        "content": "<p>Would ManuallyDrop be better that what I am currently doing?</p>",
+        "id": 232002909,
+        "sender_full_name": "marmeladema",
+        "timestamp": 1616779429
+    },
+    {
+        "content": "<p>It seems cleaner</p>",
+        "id": 232003106,
+        "sender_full_name": "marmeladema",
+        "timestamp": 1616779502
+    },
+    {
+        "content": "<p><code>ManuallyDrop</code> sort of hides the temporary local ownership</p>",
+        "id": 232005151,
+        "sender_full_name": "cuviper",
+        "timestamp": 1616780233
+    },
+    {
+        "content": "<p>I think it would be possible to add some <code>unsafe fn(&amp;*const T) -&gt; &amp;Arc&lt;T&gt;</code>, because <code>Arc</code> itself is basically just a pointer</p>",
+        "id": 232005227,
+        "sender_full_name": "cuviper",
+        "timestamp": 1616780274
+    },
+    {
+        "content": "<p>or maybe there should just be a <code>downgrade_raw</code></p>",
+        "id": 232005397,
+        "sender_full_name": "cuviper",
+        "timestamp": 1616780345
+    },
+    {
+        "content": "<p>Ideally for my use cases, I would really like a <code>unsafe fn(&amp;*const T) -&gt; &amp;Arc&lt;T&gt;</code> because it's not only to call downgrade. I have objects that implement certain method only if they are in an arc and sometime I want to get arc properties like strong_count etc; So that solution seems better than a very targeted <code>downgrade_raw</code></p>",
+        "id": 232011268,
+        "sender_full_name": "marmeladema",
+        "timestamp": 1616783008
+    },
+    {
+        "content": "<p>hmm, <code>from_raw</code> has to offset the pointer, so it's not as simple as I hoped</p>",
+        "id": 232012249,
+        "sender_full_name": "cuviper",
+        "timestamp": 1616783464
+    },
+    {
+        "content": "<p><code>&amp;Arc&lt;T&gt;</code> has to borrow from something, and it can't directly repurpose <code>&amp;*const T</code> after all</p>",
+        "id": 232012350,
+        "sender_full_name": "cuviper",
+        "timestamp": 1616783516
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">unsafe</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">arc_ref_from_raw</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">p</span>: <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"nb\">_</span> <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">  </span>-&gt; <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"o\">'</span><span class=\"nb\">_</span><span class=\"w\"> </span><span class=\"o\">+</span><span class=\"w\"> </span><span class=\"n\">Deref</span><span class=\"o\">&lt;</span><span class=\"n\">Target</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Arc</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;&gt;</span><span class=\"w\"></span>\n<span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">ManuallyDrop</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">Arc</span>::<span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span>::<span class=\"n\">from_raw</span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"p\">))</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>or with CPS style:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">unsafe</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">with_arc_ref_from_raw</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">R</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">p</span>: <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">ret</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"o\">&lt;'</span><span class=\"na\">ret</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">(</span><span class=\"o\">&amp;'</span><span class=\"na\">ret</span><span class=\"w\"> </span><span class=\"n\">Arc</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">R</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">R</span><span class=\"w\"></span>\n<span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">ret</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">ManuallyDrop</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">Arc</span>::<span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span>::<span class=\"n\">from_raw</span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"p\">)))</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Examples:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">unsafe</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">inc_ref</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">p</span>: <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">mem</span>::<span class=\"n\">forget</span><span class=\"p\">(</span><span class=\"n\">Arc</span>::<span class=\"n\">clone</span><span class=\"p\">(</span><span class=\"n\">arc_ref_from_raw</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">p</span><span class=\"p\">)))</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// or</span>\n<span class=\"w\">    </span><span class=\"n\">mem</span>::<span class=\"n\">forget</span><span class=\"p\">(</span><span class=\"n\">with_arc_ref_from_raw</span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"n\">arc_ref</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"n\">arc_ref</span><span class=\"p\">.</span><span class=\"n\">clone</span><span class=\"p\">()))</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 232020781,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1616787535
+    }
+]

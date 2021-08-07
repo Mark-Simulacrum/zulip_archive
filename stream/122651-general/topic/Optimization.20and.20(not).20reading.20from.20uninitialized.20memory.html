@@ -1,0 +1,160 @@
+<html>
+<head><meta charset="utf-8"><title>Optimization and (not) reading from uninitialized memory · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html">Optimization and (not) reading from uninitialized memory</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="209459365"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209459365" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209459365">(Sep 09 2020 at 00:16)</a>:</h4>
+<p>I have a case where I'd like to read from uninitialized memory. Sort of. Let me explain...</p>
+<div class="codehilite"><pre><span></span><code>let buf: [MaybeUninit&lt;u64&gt;; 8] = MaybeUninit::uninit_array();
+</code></pre></div>
+
+
+<p>Suppose we've initialized the first N bytes of a u64 in buf. Now we want to initialize the rest of it. I believe the fastest way would involve bit manipulation--something like this:</p>
+<div class="codehilite"><pre><span></span><code>some_u64 = ...
+
+mask = bitmask that will extract valid portion of buf[i]
+
+shift = shift that will put some_u64 into invalid portion of buf[i]
+
+buf[i] = (buf[i] &amp; mask) | (some_u64 &lt;&lt; shift)
+</code></pre></div>
+
+
+<p>But AFAICT, we can't do this without violating MaybeUninit's contract. The problem is that we're reading a partially initialized (i.e. uninitialized) u64, buf[i]. We end up masking out the uninitialized portion, so I think it could be considered safe with the right API. But I'm not sure that API exists.</p>
+<p>I'm aware of some contortions I can do to accomplish this in a safe way, but I'm wondering if I can directly express the above safely somehow, so I don't have to rely on the optimizer to change the contortions to something at least as efficient as the above.</p>
+<p>Any ideas?</p>
+
+
+
+<a name="209461715"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209461715" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209461715">(Sep 09 2020 at 00:54)</a>:</h4>
+<p>If you're initializing 8 u64s, and that's not an "example number" I would check that you can't afford just zero initializing them up front - that's going to be pretty fast.</p>
+<p>How did you initialize parts of the u64? Maybe you can use MaybeUninit&lt;u8&gt; and initialize each byte instead...</p>
+
+
+
+<a name="209462749"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209462749" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209462749">(Sep 09 2020 at 01:15)</a>:</h4>
+<p>I'm actually trying to determine the cost of that upfront initialization, and this is where I got stuck :)</p>
+<p>I haven't actually used MaybeUninit&lt;u64&gt; because of getting stuck here, but I assumed I could initialize them partially with something like copy_nonoverlapping (with statically known sizes so the memcpy gets optimized out, and with considerations for endianness).</p>
+<p>I did look at using a <code>[u8]</code> / <code>[MaybeUninit&lt;u8&gt;]</code> instead, and just copying in the new bytes,  but the generated code wasn't ideal. It may be enough for me to tell whether or not using MaybeUninit is worth it to begin with though.</p>
+
+
+
+<a name="209462815"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209462815" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209462815">(Sep 09 2020 at 01:16)</a>:</h4>
+<p>But in general, I'm also wondering if there's a hole in the API here, or if there's some other tool I should be reaching for</p>
+
+
+
+<a name="209462824"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209462824" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209462824">(Sep 09 2020 at 01:17)</a>:</h4>
+<p>This is my first brush with MaybeUninit, and I'm fairly new to Rust overall</p>
+
+
+
+<a name="209462841"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209462841" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Quy Nguyen <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209462841">(Sep 09 2020 at 01:17)</a>:</h4>
+<p>Iirc from the UCG repos, LLVM doesn't track per byte (or bit) initialization of an integer, so reading from a <code>*mut u64</code> is UB if you manually bitmask stuff - the whole integer is treated as uninitialized.</p>
+
+
+
+<a name="209463207"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463207" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Quy Nguyen <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463207">(Sep 09 2020 at 01:25)</a>:</h4>
+<p>Aha - found it. <a href="https://github.com/rust-lang/unsafe-code-guidelines/issues/71#issuecomment-686904006">https://github.com/rust-lang/unsafe-code-guidelines/issues/71#issuecomment-686904006</a></p>
+
+
+
+<a name="209463367"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463367" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463367">(Sep 09 2020 at 01:28)</a>:</h4>
+<p><span class="user-mention" data-user-id="306073">@Tyson Nottingham</span> how are you initializing the first N bytes? Is that from a u64 as well?</p>
+
+
+
+<a name="209463400"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463400" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463400">(Sep 09 2020 at 01:29)</a>:</h4>
+<p><span class="user-mention" data-user-id="303115">@Quy Nguyen</span>  Well, the operation that I want to convey is just a copy at the end of the day. I don't really need to read that uninitialized memory, but I want the hardware to do that if it's optimal. From context, I know that it can always be expressed as as a mask + shift + OR. I just need to reliably convince the optimizer that it should do that (assuming that it's optimal).</p>
+
+
+
+<a name="209463504"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463504" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463504">(Sep 09 2020 at 01:30)</a>:</h4>
+<p><span class="user-mention" data-user-id="116122">@simulacrum</span> The first N bytes are from one or more integers of any size.</p>
+
+
+
+<a name="209463559"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463559" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Quy Nguyen <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463559">(Sep 09 2020 at 01:31)</a>:</h4>
+<p>Are you combining multiple integers into one?</p>
+
+
+
+<a name="209463665"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463665" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463665">(Sep 09 2020 at 01:33)</a>:</h4>
+<p>Yes. This is a SipHasher128 optimization I'm working on.</p>
+
+
+
+<a name="209463709"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463709" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463709">(Sep 09 2020 at 01:34)</a>:</h4>
+<p>which does this kind of combination</p>
+
+
+
+<a name="209463748"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463748" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463748">(Sep 09 2020 at 01:35)</a>:</h4>
+<p>There are endianness considerations, if you're thinking about that, but don't worry, they're on my mind :)</p>
+
+
+
+<a name="209463823"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463823" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Quy Nguyen <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463823">(Sep 09 2020 at 01:36)</a>:</h4>
+<p>Will you do each integer one-by-one? If so, you might be able to get away with a single scratch u64.</p>
+
+
+
+<a name="209463834"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463834" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463834">(Sep 09 2020 at 01:37)</a>:</h4>
+<p>Heh, if I understand you correctly, that's what the current implementation does :)</p>
+
+
+
+<a name="209463853"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463853" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463853">(Sep 09 2020 at 01:38)</a>:</h4>
+<p>I'm basically adding some buffering to create a better hot path</p>
+
+
+
+<a name="209463985"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209463985" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209463985">(Sep 09 2020 at 01:40)</a>:</h4>
+<p>In theory anyway... I haven't done much perf optimization, so we'll see if that makes any sense. Looks somewhat promising so far.</p>
+
+
+
+<a name="209464191"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209464191" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Quy Nguyen <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209464191">(Sep 09 2020 at 01:45)</a>:</h4>
+<p>As far I know, Rust doesn't have what you want. I'd say just benchmark the cost of zero initialization to see if it's passable - iirc C(++) has the same limitations here.</p>
+
+
+
+<a name="209464429"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209464429" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209464429">(Sep 09 2020 at 01:50)</a>:</h4>
+<p>Thanks, I'll see how it goes</p>
+
+
+
+<a name="209466998"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Optimization%20and%20%28not%29%20reading%20from%20uninitialized%20memory/near/209466998" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Optimization.20and.20(not).20reading.20from.20uninitialized.20memory.html#209466998">(Sep 09 2020 at 02:53)</a>:</h4>
+<p>Hmm, I think the shift fundamentally going to be trouble here.  In a bunch of other situations you can sidestep these problems with <code>#[repr(align(8))] struct Foo([u8; 8]);</code>, but actually doing the operation on it complicates things.</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

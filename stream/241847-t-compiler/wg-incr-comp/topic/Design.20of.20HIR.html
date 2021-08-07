@@ -1,0 +1,304 @@
+<html>
+<head><meta charset="utf-8"><title>Design of HIR · t-compiler/wg-incr-comp · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/index.html">t-compiler/wg-incr-comp</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html">Design of HIR</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="229367611"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/229367611" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#229367611">(Mar 08 2021 at 20:22)</a>:</h4>
+<p>Is there a design document for the HIR since the work in <a href="https://github.com/rust-lang/compiler-team/blob/master/content/minutes/design-meeting/2019-12-06-end-to-end-query-PRs.md">https://github.com/rust-lang/compiler-team/blob/master/content/minutes/design-meeting/2019-12-06-end-to-end-query-PRs.md</a> and <a href="https://zulip-archive.rust-lang.org/131828tcompiler/75795designmeeting20191206.html#182771577">https://zulip-archive.rust-lang.org/131828tcompiler/75795designmeeting20191206.html#182771577</a> ?<br>
+I was just beginning my involvement in rust at the time, so I did not really follow which decision was reached.</p>
+
+
+
+<a name="229457703"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/229457703" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#229457703">(Mar 09 2021 at 10:55)</a>:</h4>
+<p>IIRC, we went some of the way towards end-to-end queries with <a href="https://github.com/rust-lang/rust/pull/68944">https://github.com/rust-lang/rust/pull/68944</a>, but not further because there was no actual plan on what things should look like beyond that. So an actual design document would be great. I think in order to come up with a good design, it would make sense to strive for (1) documenting how macro expansion and name resolution (should) work, (2) getting the data structures (i.e. the things ending up as query results) right, and from there (3) come up with a way of formulating a querified implementation of the two. I have a gut feeling that (for historical reasons) hygiene, macro expansion, and handling of spans are more entangled than they need to be.</p>
+
+
+
+<a name="232942428"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232942428" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232942428">(Apr 02 2021 at 19:38)</a>:</h4>
+<p>Here is a write-up of my thoughts on end-to-end queries<br>
+<a href="https://hackmd.io/CCNBA1L5R5Oxc72HtSwxuw?view">https://hackmd.io/CCNBA1L5R5Oxc72HtSwxuw?view</a></p>
+<p>The proposed design is maximalist, going to end-to-end queries. Some restricted versions are certainly possible. The graph at the end summarizes how queries fall together (in pseudo-code).<br>
+Please tell me if I missed something on the behaviour of name resolution, my description is probably overly simplistic. I kind of swept macro expansion under the rug, I can definitely expand that part.</p>
+
+
+
+<a name="232943621"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232943621" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232943621">(Apr 02 2021 at 19:50)</a>:</h4>
+<p>I don't think queries can support the fix-point name resolution + macro expansion that is necessary. Macro expansion can create new macros which are then used for macro expansion. Macro invocations can change from unambiguous to ambiguous back to unambiguous.</p>
+<p>(using decl macro 2.0 for simplicity sake)</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">mod</span> <span class="nn">a</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="n">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">mod</span> <span class="nn">b</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kr">macro</span><span class="w"> </span><span class="n">bar</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">         </span><span class="k">pub</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="n">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">bar</span><span class="o">!</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">mod</span> <span class="nn">c</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="n">baz</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="k">crate</span>::<span class="n">c</span>::<span class="n">foo</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="n">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">use</span><span class="w"> </span><span class="n">a</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+<span class="k">use</span><span class="w"> </span><span class="n">b</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+<span class="n">c</span>::<span class="n">baz</span><span class="o">!</span><span class="p">();</span><span class="w"></span>
+<span class="n">foo</span><span class="o">!</span><span class="p">();</span><span class="w"></span>
+</code></pre></div>
+<p>At first <code>foo!()</code> seems to resolve to <code>a::foo</code>. Then when <code>bar!()</code> is expanded, it becomes ambiguous and finally when <code>baz!()</code> is expanded it will definitively resolve to <code>c::foo</code>.</p>
+
+
+
+<a name="232946733"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232946733" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232946733">(Apr 02 2021 at 20:19)</a>:</h4>
+<p>So, IIUC, macro expansion must be performed in file order to be well-defined. To expand <code>foo!()</code>, we can query the expanded AST from all the code above it, and resolve <code>foo</code> from that state. Does it answer to your example?</p>
+
+
+
+<a name="232949545"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232949545" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232949545">(Apr 02 2021 at 20:45)</a>:</h4>
+<p>But in that example <code>foo!()</code> actually resolves to <code>a::foo</code></p>
+
+
+
+<a name="232950092"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232950092" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232950092">(Apr 02 2021 at 20:50)</a>:</h4>
+<p>I don't get it: which is the correct resolution?</p>
+
+
+
+<a name="232951457"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232951457" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232951457">(Apr 02 2021 at 21:02)</a>:</h4>
+<p>it resolves to a::foo: <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=77863cd0d5c0f23451bfbd10c95fbbf5">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=77863cd0d5c0f23451bfbd10c95fbbf5</a></p>
+
+
+
+<a name="232951715"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232951715" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232951715">(Apr 02 2021 at 21:04)</a>:</h4>
+<p>rust-analyzer gets it wrong</p>
+
+
+
+<a name="232951760"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232951760" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232951760">(Apr 02 2021 at 21:05)</a>:</h4>
+<p>is this an intentional feature?</p>
+
+
+
+<a name="232951763"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232951763" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232951763">(Apr 02 2021 at 21:05)</a>:</h4>
+<p>but I'm not sure which one is actually the intended outcome, in principle the explanation above makes sense for why this should be <code>c::foo</code></p>
+
+
+
+<a name="232951816"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232951816" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232951816">(Apr 02 2021 at 21:05)</a>:</h4>
+<p><span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span> any clues? :)</p>
+
+
+
+<a name="232951875"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232951875" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232951875">(Apr 02 2021 at 21:05)</a>:</h4>
+<p>Is it possible to do name resolution first, before expansion?</p>
+
+
+
+<a name="232951972"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232951972" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232951972">(Apr 02 2021 at 21:06)</a>:</h4>
+<p>no, expansion affects name resolution</p>
+
+
+
+<a name="232951988"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232951988" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232951988">(Apr 02 2021 at 21:06)</a>:</h4>
+<p>macros can define modules and items</p>
+
+
+
+<a name="232952002"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232952002" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232952002">(Apr 02 2021 at 21:06)</a>:</h4>
+<p>cfg_if is the most common example</p>
+
+
+
+<a name="232952035"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232952035" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232952035">(Apr 02 2021 at 21:06)</a>:</h4>
+<p>I re-read the documentation <a href="https://rustc-dev-guide.rust-lang.org/macro-expansion.html">https://rustc-dev-guide.rust-lang.org/macro-expansion.html</a>, and resolution is in algorithm order: resolutions that do not come from expansions take precedence.</p>
+
+
+
+<a name="232952109"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232952109" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232952109">(Apr 02 2021 at 21:07)</a>:</h4>
+<p>If I use <code>macro_rules!</code> instead of <code>macro</code> for the use, I get an ambiguous import error.</p>
+
+
+
+<a name="232952209"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232952209" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232952209">(Apr 02 2021 at 21:08)</a>:</h4>
+<p>I tried to set up the test with <code>macro_rules</code> but the scoping around modules is different</p>
+
+
+
+<a name="232952256"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232952256" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232952256">(Apr 02 2021 at 21:08)</a>:</h4>
+<p><code>macro</code> is hygienic by default for items too, so the <code>use</code> never leaked out of the macro expansion.</p>
+
+
+
+<a name="232952298"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232952298" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232952298">(Apr 02 2021 at 21:09)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="248906">cjgillot</span> <a href="#narrow/stream/241847-t-compiler.2Fwg-incr-comp/topic/Design.20of.20HIR/near/232952035">said</a>:</p>
+<blockquote>
+<p>I re-read the documentation <a href="https://rustc-dev-guide.rust-lang.org/macro-expansion.html">https://rustc-dev-guide.rust-lang.org/macro-expansion.html</a>, and resolution is in algorithm order: resolutions that do not come from expansions take precedence.</p>
+</blockquote>
+<p>hmm, yeah, that does make sense</p>
+
+
+
+<a name="232952710"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232952710" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232952710">(Apr 02 2021 at 21:12)</a>:</h4>
+<p>ah, this one works as I'd expect:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">mod</span> <span class="nn">a</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="n">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">mod</span> <span class="nn">b</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kr">macro</span><span class="w"> </span><span class="n">bar</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">         </span><span class="k">pub</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="n">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">bar</span><span class="o">!</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">mod</span> <span class="nn">c</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="n">baz</span><span class="p">(</span><span class="cp">$n</span>:<span class="nc">ident</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="k">crate</span>::<span class="n">c</span>::<span class="cp">$n</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="kr">macro</span><span class="w"> </span><span class="n">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="fm">println!</span><span class="p">(</span><span class="s">"hello"</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">use</span><span class="w"> </span><span class="n">a</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+<span class="k">use</span><span class="w"> </span><span class="n">b</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+<span class="n">c</span>::<span class="n">baz</span><span class="o">!</span><span class="p">(</span><span class="n">foo</span><span class="p">);</span><span class="w"></span>
+<span class="n">foo</span><span class="o">!</span><span class="p">();</span><span class="w"></span>
+</code></pre></div>
+<div class="codehilite"><pre><span></span><code>error[E0659]: `foo` is ambiguous (glob import vs macro-expanded name in the same module during import/macro resolution)
+  --&gt; src/main.rs:22:1
+   |
+22 | foo!();
+   | ^^^ ambiguous name
+   |
+note: `foo` could refer to the macro imported here
+  --&gt; src/main.rs:15:35
+   |
+15 |     pub macro baz($n:ident) { use crate::c::$n; }
+   |                                   ^^^^^^^^^^^^
+...
+21 | c::baz!(foo);
+   | ------------- in this macro invocation
+note: `foo` could also refer to the macro imported here
+  --&gt; src/main.rs:19:5
+   |
+19 | use a::*;
+   |     ^^^^
+   = help: consider adding an explicit import of `foo` to disambiguate
+   = note: this error originates in a macro (in Nightly builds, run with -Z macro-backtrace for more info)
+</code></pre></div>
+
+
+
+<a name="232952732"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232952732" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232952732">(Apr 02 2021 at 21:12)</a>:</h4>
+<p>so the r-a issue is merely us not supporting macro 2.0 hygiene yet</p>
+
+
+
+<a name="232952738"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232952738" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232952738">(Apr 02 2021 at 21:12)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/241847-t-compiler.2Fwg-incr-comp/topic/Design.20of.20HIR/near/232952256">said</a>:</p>
+<blockquote>
+<p><code>macro</code> is hygienic by default for items too, so the <code>use</code> never leaked out of the macro expansion.</p>
+</blockquote>
+<p>This.<br>
+<code>foo!();</code> is <code>a::foo!();</code> because all other <code>foo</code>s are hidden by hygiene.</p>
+
+
+
+<a name="232955695"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232955695" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232955695">(Apr 02 2021 at 21:41)</a>:</h4>
+<blockquote>
+<p>resolution is in algorithm order: resolutions that do not come from expansions take precedence</p>
+</blockquote>
+<p>That's news to me. Where is this written?</p>
+
+
+
+<a name="232955930"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232955930" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232955930">(Apr 02 2021 at 21:44)</a>:</h4>
+<p>It's not written that way, it's just how I understood it, probably poorly.</p>
+
+
+
+<a name="232956839"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232956839" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232956839">(Apr 02 2021 at 21:57)</a>:</h4>
+<p>This is what I get from the doc. The algorithm is structured as a work queue, in which to-be-expanded macros do not participate in resolution, and newly expanded macro always go to the end of the work queue.<br>
+By indexing the macro invocations with <code>ExpnId</code> in the order of their discovery, resolution only needs to considers macros created by expansions that happened earlier in <code>ExpnId</code> order. Does this seem right?</p>
+
+
+
+<a name="232994807"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232994807" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232994807">(Apr 03 2021 at 09:43)</a>:</h4>
+<p><span class="user-mention" data-user-id="248906">@cjgillot</span> <br>
+Here's the expansion order description that I usually refer to - <a href="https://github.com/rust-lang/rust/pull/53778#issuecomment-419224049">https://github.com/rust-lang/rust/pull/53778#issuecomment-419224049</a> (it's linked from somewhere in dev guide, but probably easy to miss).</p>
+
+
+
+<a name="232994973"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232994973" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232994973">(Apr 03 2021 at 09:46)</a>:</h4>
+<p><code>ExpnId</code>s are not fully ordered because they form a tree, and the expansion results should not depend on which specific acceptable order is used during specific compilation session (because the specific order may change if we change the compiler, or use some incremental expansion).</p>
+
+
+
+<a name="232995085"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232995085" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232995085">(Apr 03 2021 at 09:48)</a>:</h4>
+<blockquote>
+<p>resolution only needs to considers macros created by expansions that happened earlier in ExpnId order.</p>
+</blockquote>
+<p>"earlier" -&gt; "never later" (given the previous message).</p>
+
+
+
+<a name="232995180"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/232995180" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#232995180">(Apr 03 2021 at 09:50)</a>:</h4>
+<p>I'm pretty sure that the work queue algorithm used now is not correct (as the linked comment mentions), even if the incorrectness doesn't show up in practical cases.</p>
+
+
+
+<a name="233010692"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Design%20of%20HIR/near/233010692" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Design.20of.20HIR.html#233010692">(Apr 03 2021 at 14:41)</a>:</h4>
+<p>Thank you <span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span>, this comment is really helpful!<br>
+If we delay reporting the ambiguity, I think we can actually describe an incremental resolution algorithm:</p>
+<ol>
+<li>
+<p>Look for candidates in the parent expansions to the invocation I.<br>
+This corresponds to the very conservative shadowing mode. As it is strictly more conservative, it will find strictly less candidates. As all candidates in this search are found in parents expansions of I, there is never any ambiguity, and we just need to find the closest in terms of scoping.</p>
+</li>
+<li>
+<p>If we have a candidate A, we have already considered all resolutions that come from a parent expansion of A or I (by transitivity). Therefore, any other candidate must be ambiguous. Do not bother looking for them, and return A.</p>
+</li>
+<li>Otherwise, we need to find a candidate that is not in a parent expansion of I. We walk all the expansion points earlier to I in reverse order, expand them, and return the first candidate A we find. We have already considered all candidates from parent expansions of A in (1), so any resolution we find later will be ambiguous.</li>
+</ol>
+<p>Later in the compilation, HIR lowering will actually need to compute the full resolver, and the ambiguities we ignored can be reported at this point.</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

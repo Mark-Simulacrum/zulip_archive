@@ -1,0 +1,67 @@
+<html>
+<head><meta charset="utf-8"><title>Layout/Alignment of dyn Trait based DSTs · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Layout.2FAlignment.20of.20dyn.20Trait.20based.20DSTs.html">Layout/Alignment of dyn Trait based DSTs</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="210671289"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Layout/Alignment%20of%20dyn%20Trait%20based%20DSTs/near/210671289" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Layout.2FAlignment.20of.20dyn.20Trait.20based.20DSTs.html#210671289">(Sep 20 2020 at 15:20)</a>:</h4>
+<p>Is there any RFC or similar, which specifies  how the Layout/Alignment of DST structs containing a <code>dyn Trait</code> field is supposed to be handled?</p>
+<p>For example in <code>#[repr(C)] struct DST { f1: u8, dst: dyn Debug }</code>.</p>
+<p>The thing is that while it's <code>repr(C)</code> <code>dyn Debug</code> has a not at compiler-time known alignment and size, but in a normal C layout  it could theoretically affect the layout of the whole <code>DST</code> struct.</p>
+<p>I know about some ways people had been doing this kind of things in practice, but did we ever specify how it's supposed to work, at least for <code>repr(C)</code> structs? (I have searched the RFC on github but I might have overlooked something).</p>
+
+
+
+<a name="210753754"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Layout/Alignment%20of%20dyn%20Trait%20based%20DSTs/near/210753754" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Layout.2FAlignment.20of.20dyn.20Trait.20based.20DSTs.html#210753754">(Sep 21 2020 at 15:01)</a>:</h4>
+<p>If anyone wonders:</p>
+<p>The reference does define that:</p>
+<ul>
+<li>structs containing a DST are DST</li>
+<li>dyn Trait DSTs have the same layout as the underlying struct</li>
+<li>how <code>#[repr(C)]</code> in <em>rust</em> works (without specifically mentioning dyn Trait or DSTs)</li>
+</ul>
+<p>From that we can roughly infer that for a <code>#[repr(C)] struct Dst { f1: u8, dst: dyn Debug }</code> where <code>dst</code> is <code>u8</code> the layout is the same as <code>#[repr(C)]  struct DstU8 { f1: u8, dst: u8 }</code> and for a case where <code>dst</code> is a <code>String</code> it's the same as <code>#[repr(C)]  struct DstString { f1: u8, dst: String }</code>.</p>
+<p>This has some interesting consequences:</p>
+<ul>
+<li>The padding between the last non-DS field and the dst field is dependent on the underlying type and as such can vary.</li>
+<li>The alignment of <code>Dst</code> might depend on the underlying type (which isn't surprising)</li>
+<li>
+<p>Casting a <code>&amp;Dst</code> pointer/reference to <code>&amp;DstU8</code>/<code>&amp;DstUString</code>/... must be valid if it's the right underlying type (<br>
+  e.g. you stored the originals TypeId or retrived it from a <code>Any</code> trait)</p>
+</li>
+<li>
+<p>Casting the other way around must be valid to if you have a way to create the correct fat-pointers (RFC2580)</p>
+</li>
+<li>Creating a correctly aligned pointer/reference to the dst field requires looking up the alignment at runtime</li>
+<li>If you have a <code>struct A1 { f1: F1, f2: F2, dst: DST }</code> and a (auto-derived) <code>struct A2 { f1: F1, f2: F2 }</code> then due to<br>
+  how the <code>repr(C)</code> algorithm works as far as I can tell <code>A1</code> and <code>A2</code> have the same exact same layout "up to"<br>
+  the dst field in A1/end of A2 which means you should be able to cast a <code>&amp;mut A1</code> to an <code>&amp;mut A2</code>  and still be able to<br>
+  correctly access <code>f1</code>/<code>f2</code> even a mem swap of that casted <code>&amp;mut A2</code> should be valid and just override f1/f2 if I'm not<br>
+  wrong (which seems useless but might matters for some derive based library to allow easier handling of custom DST types).</li>
+</ul>
+
+
+
+<a name="210759469"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Layout/Alignment%20of%20dyn%20Trait%20based%20DSTs/near/210759469" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Layout.2FAlignment.20of.20dyn.20Trait.20based.20DSTs.html#210759469">(Sep 21 2020 at 15:40)</a>:</h4>
+<p>AFAIK, everything you've mentioned is correct.</p>
+<p>Using <code>struct Wrapper&lt;Dst : ?Sized&gt; { f1: u8, dst: Dst }</code> notation:</p>
+<p>In the <code>Dst = dyn Trait</code> case, the offset to <code>dst</code> is computed as the offset to <code>dst</code> for <code>Dst = ()</code>(_i.e._, one byte past the end of the previous field), and then that is padded to the alignment of the <code>dyn Trait</code> instance present in the struct, which is obtained by reading one field of the vtable (currently laid out as: <code>struct VTable { ... size: usize, align: usize, ... }</code>), through the pointer to it bundled in the fat pointer: <code>::core::mem::align_of_val(&lt;*const Wrapper&lt;dyn Trait&gt;&gt;::cast::&lt;dyn Trait&gt;(p))</code></p>
+
+
+
+<a name="210766547"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Layout/Alignment%20of%20dyn%20Trait%20based%20DSTs/near/210766547" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Layout.2FAlignment.20of.20dyn.20Trait.20based.20DSTs.html#210766547">(Sep 21 2020 at 16:33)</a>:</h4>
+<p>Thanks a lot for the confirmation <span aria-label="thumbs up" class="emoji emoji-1f44d" role="img" title="thumbs up">:thumbs_up:</span></p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

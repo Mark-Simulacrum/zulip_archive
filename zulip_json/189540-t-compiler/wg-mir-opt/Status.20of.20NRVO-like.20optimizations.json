@@ -1,0 +1,1364 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"211727\">@Jonas Schievink</span> <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> I was excited to see some recent movement towards copy propagation into the return place in <a href=\"https://github.com/rust-lang/rust/issues/71003\" title=\"https://github.com/rust-lang/rust/issues/71003\">#71003</a>, but that PR seems to have pretty poor worst-case performance and is now closed. Is the worst-case performance of the MIR transformation the only blocker for this class of optimizations? I saw that there are also some outstanding questions around MIR semantics now that the return place can be written to even if the function eventually unwinds, but I think these can be resolved independently?</p>",
+        "id": 194615813,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587326996
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> also cited implementation complexity as a concern (which would arise if we tried to make this optimization fast enough), but I think it wouldn't be much more complicated than the generator transform, which does similar things.</p>",
+        "id": 194615882,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587327093
+    },
+    {
+        "content": "<p>The MIR semantics issue is mostly resolvable independently, but I did need to modify const eval to avoid ICEs, which is in <a href=\"https://github.com/rust-lang/rust/issues/71005\" title=\"https://github.com/rust-lang/rust/issues/71005\">#71005</a></p>",
+        "id": 194615937,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587327168
+    },
+    {
+        "content": "<p>One thing I wanted to play with is a borrow-aware liveness analysis, which is also used by the generator transform, and your dataflow framework changes to support backwards dataflow would help making that simpler, so I'm looking forward to that</p>",
+        "id": 194616042,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587327308
+    },
+    {
+        "content": "<p>Yeah, that was one of my motivations. I'll try to push a bit harder to get that reviewed so you can make use of it. Lemme know if I can assist in other ways. I want to read through <code>dag_nrvo.rs</code> so I can be more helpful in this area.</p>",
+        "id": 194616126,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587327461
+    },
+    {
+        "content": "<p>Thanks for writing the module summary BTW</p>",
+        "id": 194616130,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587327477
+    },
+    {
+        "content": "<p>Awesome, thanks!</p>",
+        "id": 194616169,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587327488
+    },
+    {
+        "content": "<p>I read through your PR today. It was much more like  <a href=\"https://github.com/rust-lang/rust/issues/47954\" title=\"https://github.com/rust-lang/rust/issues/47954\">#47954</a> than I expected, basically a robust, global copy propagator. This is cool, but there must be a simpler approach to the NRVO specifically (as opposed to global copy propagation in general) that will work for most users.</p>",
+        "id": 194747960,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587427633
+    },
+    {
+        "content": "<p>I'm going to try to come up with a more \"bottom-up\" approach to the NRVO; one that tries to propagate only the small subset of copies that assign to <code>_0</code> and reach a <code>Return</code>. I'd be happy to have a discussion partner if you think this approach might have merit, but it might be more fruitful to spend time optimizing your existing approach if you think you're close.</p>",
+        "id": 194748322,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587427964
+    },
+    {
+        "content": "<p>To elaborate, I don't care so much about propagating long chains of copies all the way into the return place. I expect that most functions that would benefit from NRVO look like the one in <a href=\"https://github.com/rust-lang/rust/issues/62446\" title=\"https://github.com/rust-lang/rust/issues/62446\">#62446</a>, where a large value is assigned to a local, then that value is mutated in place before it is returned.</p>",
+        "id": 194749590,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587429099
+    },
+    {
+        "content": "<p>So I'm thinking that the first step is computing the set of reaching definitions of the return place that are live at each <code>Return</code> terminator in the MIR. This can be done robustly with dataflow, or we can just traverse the predecessor graph and abort if we find a basic block with more than two predecessors before finding a copy/move into the return place (<code>_0 = _1</code>).</p>",
+        "id": 194749832,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587429281
+    },
+    {
+        "content": "<p>In the simplest case, we will have MIR like:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"n\">_1</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">128</span><span class=\"p\">];</span><span class=\"w\"></span>\n<span class=\"n\">_1</span><span class=\"p\">[</span><span class=\"n\">_2</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">;</span><span class=\"w\">   </span><span class=\"c1\">// Mutate `_1` in place</span>\n<span class=\"n\">_0</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">_1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">return</span><span class=\"p\">;</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 194749911,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587429362
+    },
+    {
+        "content": "<p>I like to think of a <code>return</code> as an implicit \"use\" of <code>_0</code>. Writing that explicitly, we get:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"n\">_1</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">128</span><span class=\"p\">];</span><span class=\"w\"></span>\n<span class=\"c1\">// Mutate `_1` in place</span>\n<span class=\"n\">_0</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">_1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">return</span><span class=\"w\"> </span><span class=\"n\">_0</span><span class=\"p\">;</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 194749979,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587429428
+    },
+    {
+        "content": "<p>Those last two statements are the canonical form for copy propagation. Then the question is whether it's safe to rename <code>_1</code> to <code>_0</code> to eliminate the copy.</p>",
+        "id": 194750191,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587429621
+    },
+    {
+        "content": "<p>In what I expect is the common case, all return statements will have a single reaching definition of the return place , all of which are a copy of the same local. In this case, you could pretend that <code>return</code> takes an arbitrary local and do the transformation the other way at all return terminators.</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"n\">_1</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">128</span><span class=\"p\">];</span><span class=\"w\"></span>\n<span class=\"c1\">// _1 = _1; // removed</span>\n<span class=\"k\">return</span><span class=\"w\"> </span><span class=\"n\">_1</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 194750394,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587429840
+    },
+    {
+        "content": "<p>At that point, you can simply swap the names for <code>_0</code> and <code>_1</code>, although I believe there will be no more uses of <code>_0</code> remaining due to the way MIR is currently built.</p>",
+        "id": 194750589,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587430058
+    },
+    {
+        "content": "<p>I think it can definitely be helpful to explore simpler approaches, yeah. My approach tried to simplify <a href=\"https://github.com/rust-lang/rust/issues/47954\" title=\"https://github.com/rust-lang/rust/issues/47954\">#47954</a> by only handling acyclic CFGs, which gets rid of all the complexity related to computing conflict matrices. The approach with reaching definitions sounds plausible, but it's hard for me to judge soundness of this approach (even my simplified NRVO pass needed a lot of iteration to work well, during which I've found some soundness bugs in the original approach as well).</p>",
+        "id": 194789092,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587468635
+    },
+    {
+        "content": "<p>I don't feel like it's a good idea to jump straight to ad-hoc approximations with no obvious relation to the soundness conditions already identified. Even in <a href=\"https://github.com/rust-lang/rust/issues/71003\" title=\"https://github.com/rust-lang/rust/issues/71003\">#71003</a> as it is, the part that really killed performance (according to comments there) is the particular way in which the \"live ranges do not overlap\" check is converted into a potentially-whole-CFG traversal for every single candidate. I don't know why this is done in the first place, instead of \"just\" (devil is in the details, of course) computing a representation of the live range of every relevant place once and then doing pairwise overlap checks on these representations. This really ought to be fast enough with established techniques -- generator layout in rustc and stack coloring in LLVM use liveness information in very similar ways and they're plenty fast. Apart from that, NRVO may still be too slow e.g. because too many candidate pairs are generated (only trying to unify locals with <code>_0</code>, not arbitrary pairs of locals, would help with that). But currently I get the impression that the immediate problem isn't that the previous implementations weren't \"simple\" or approximate enough, but that they used approximations that aren't actually faster than \"the proper way\".</p>",
+        "id": 194791992,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587470664
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@Hanna Kruppe</span> Noted. My concern was that, because NRVO is not useful in most cases, using a better-optimized global copy propagation pass to achieve it may cause too large a regression in compile time to ultimately be worth it. I think it's valuable to explore alternatives, since propagating copies into the return place specifically should have a greater benefit than doing the same for locals residing within our stack frame.</p>",
+        "id": 194822854,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587484457
+    },
+    {
+        "content": "<p>I share that concern and actually suggested the same restriction on discord a few days ago. Besides compile time, I also believe merging locals too eagerly could have negative effects on some LLVM optimizations (one reason why stack coloring is traditionally done very late). I was only objecting to starting by fiddling further with how we check if the optimization is legal, I see a risk of losing sight of what (and why) is actually approximated and zooming in on presumed optimizations that may be unnecessary if we took a step back first.</p>",
+        "id": 194825408,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587485452
+    },
+    {
+        "content": "<p>That's fair. I'll put my energy into ensuring the soundness of the current approach while extending it to borrowed locals. I suspect that most functions that would benefit from NRVO borrow the local they ultimately return at some point. See the example in <del>#62466</del> <a href=\"https://github.com/rust-lang/rust/issues/62446\" title=\"https://github.com/rust-lang/rust/issues/62446\">#62446</a>.</p>",
+        "id": 194826366,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587485914
+    },
+    {
+        "content": "<p>Did you mean to link a different issue= <a href=\"https://github.com/rust-lang/rust/issues/62466\" title=\"https://github.com/rust-lang/rust/issues/62466\">#62466</a> is about trait impls for tuples with &gt;12 elements.</p>",
+        "id": 194831877,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587488411
+    },
+    {
+        "content": "<p>Whoops, yes <a href=\"https://github.com/rust-lang/rust/issues/62446\" title=\"https://github.com/rust-lang/rust/issues/62446\">#62446</a></p>",
+        "id": 194833036,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587488942
+    },
+    {
+        "content": "<p>I'm trying put a finger on why I'm having a hard time coming up with the proper set of restrictions on the general case. The canonical example for copy propagation looks something like:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">;</span><span class=\"w\">    </span><span class=\"c1\">// Copy</span>\n\n<span class=\"w\">    </span><span class=\"c1\">// No intervening definitions of A or B</span>\n\n<span class=\"w\">    </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// This use of A can safely be replaced with B</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>Note that while in this example, the use of <code>A</code> is a <code>return</code> statement, it could be any kind of use, e.g. <code>let C = A</code>.</p>",
+        "id": 194862160,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587503475
+    },
+    {
+        "content": "<p>Is the necessary restriction more than \"A and B are never live at the same time\"?</p>",
+        "id": 194862471,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587503639
+    },
+    {
+        "content": "<p>(plus some MIR-specific oddities, of course)</p>",
+        "id": 194862534,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587503649
+    },
+    {
+        "content": "<p>What's somewhat unique about NRVO on the MIR is that the name of the local that is returned is always the same. Previous attempts are actually trying to solve a slightly different problem:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// Can B be replaced with A?</span>\n\n<span class=\"w\">    </span><span class=\"c1\">// What are the restrictions on statements between the initial definition of B and the copy?</span>\n\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">;</span><span class=\"w\">    </span><span class=\"c1\">// Copy</span>\n\n<span class=\"w\">     </span><span class=\"c1\">// What about between the copy and the use of A?</span>\n\n<span class=\"w\">    </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 194862633,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587503701
+    },
+    {
+        "content": "<p>So that depends on your definition of liveness. If <code>B</code> becomes \"live\" as soon as it is borrowed, then that's a deal-breaker</p>",
+        "id": 194862838,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587503787
+    },
+    {
+        "content": "<p>It would, yes</p>",
+        "id": 194862923,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587503835
+    },
+    {
+        "content": "<p>I want to look at \"indirect definitions\" (e.g. <code>*p = 42</code> or arbitrary function calls) and consider them a \"def\" of a given local in the liveness analysis here <em>only if</em> a (mutable) borrow to that local could exist at that point</p>",
+        "id": 194862997,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587503878
+    },
+    {
+        "content": "<p>Yeah, that's what the original attempt tried to do</p>",
+        "id": 194863065,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587503916
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// B becomes borrowed here</span>\n\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"c1\">// But there is no intervening definition, direct or indirect, here</span>\n<span class=\"w\">    </span><span class=\"c1\">// foo();</span>\n\n<span class=\"w\">    </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 194863122,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587503961
+    },
+    {
+        "content": "<p>But wouldn't you have to give up as soon as the borrow escapes the local stack frame?</p>",
+        "id": 194863226,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587504012
+    },
+    {
+        "content": "<p>Right, so it's quite clear to me how that applies to the first example above. It's less clear how it applies to the second example.</p>",
+        "id": 194863241,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587504026
+    },
+    {
+        "content": "<p>Our locals only exist as long as our stack frame is live</p>",
+        "id": 194863296,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587504059
+    },
+    {
+        "content": "<p>Do you mean escapes into callees? Yes.</p>",
+        "id": 194863332,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587504086
+    },
+    {
+        "content": "<p>Yeah. But if the reference is passed via a function call you wouldn't just have a single use, you'd potentially have continued uses (due to threads) until the local is deallocated.</p>",
+        "id": 194863387,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587504129
+    },
+    {
+        "content": "<p>Or moved out of, but that isn't currently used by optimizations</p>",
+        "id": 194863418,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587504146
+    },
+    {
+        "content": "<p>That's why we have to treat any function call as an indirect definition. As soon as we have a function call between the copy and the use, we can't do copy propagation unless we can prove that the local is not (mutably) borrowed.</p>",
+        "id": 194863466,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587504192
+    },
+    {
+        "content": "<p>Ah</p>",
+        "id": 194863639,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587504314
+    },
+    {
+        "content": "<p>I guess my question is: Is the same condition that is necessary to replace the use of <code>A</code> with one of <code>B</code> in the first example sufficient to justify replacing the definition of <code>B</code> with one of <code>A</code> in the second?</p>",
+        "id": 194863838,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587504444
+    },
+    {
+        "content": "<p>The condition being: \"no intervening definitions of <code>A</code> or <code>B</code> between the copy and the use of <code>A</code>\"</p>",
+        "id": 194863934,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587504486
+    },
+    {
+        "content": "<p>(I'm currently trying to find a counter-example)</p>",
+        "id": 194863965,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587504511
+    },
+    {
+        "content": "<p>Obviously, as soon as you have other uses of <code>B</code>, you would need to rename these as well. I'm not sure what conditions that would make this renaming legal.</p>",
+        "id": 194865600,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587505561
+    },
+    {
+        "content": "<p>Your mental model, checking whether live ranges overlap, works quite nicely because then there can be no problems coalescing two locals into one.</p>",
+        "id": 194865722,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587505638
+    },
+    {
+        "content": "<p>So probably I need to adopt that one.</p>",
+        "id": 194865839,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587505706
+    },
+    {
+        "content": "<p>Hmm, yeah, that's why we've used the model based on live ranges of the variables so far. Is there a reason you want to use a different condition?</p>",
+        "id": 194865853,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587505712
+    },
+    {
+        "content": "<p>(\"that\" being \"it seems pretty clearly sound\")</p>",
+        "id": 194865877,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587505728
+    },
+    {
+        "content": "<p>I'm thinking it's not as precise in the presence of <em>immutable</em> borrows.</p>",
+        "id": 194865916,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587505763
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">B</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// B becomes borrowed here</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">foo</span><span class=\"p\">(</span><span class=\"n\">p</span><span class=\"p\">);</span><span class=\"w\"> </span><span class=\"c1\">// B is &quot;used&quot; here</span>\n<span class=\"w\">    </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 194866091,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587505840
+    },
+    {
+        "content": "<p>Replacing the use of <code>A</code> with one of <code>B</code> is still sound in this case. Despite the fact that the live ranges of <code>A</code> and <code>B</code> overlap.</p>",
+        "id": 194866268,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587505924
+    },
+    {
+        "content": "<p>(again with most definitions of \"liveness\")</p>",
+        "id": 194866301,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587505943
+    },
+    {
+        "content": "<p>That's why I think the \"nonoverlapping live ranges\" mental model is not strictly better than the \"no intervening definitions between copy and use\" mental model</p>",
+        "id": 194866500,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587506073
+    },
+    {
+        "content": "<p>Although one may be better in practice.</p>",
+        "id": 194866554,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587506109
+    },
+    {
+        "content": "<p>That's true, but \"no intervening definitions\" does not seem sufficient for soundness due to unrelated uses of A and B in other places in the function</p>",
+        "id": 194866988,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587506332
+    },
+    {
+        "content": "<p>The no intervening definitions approach is perfectly sound, but it only considers a single use of a variable at a time.</p>",
+        "id": 194867174,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587506427
+    },
+    {
+        "content": "<p>Whereas \"nonoverlapping live ranges\" considers all uses/definitions of a pair of variables.</p>",
+        "id": 194867237,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587506464
+    },
+    {
+        "content": "<p>So what I've been considering is a sort of two-phase approach. First is traditional global copy propagation, where we consider <code>return</code> a \"use\" of the local <code>_0</code> and allow a global copy propagation pass to replace those uses with other locals. Then we visit all possible return places to see which local is most commonly used as the return value, rename that local to <code>_0</code> and then insert copies to <code>_0</code> for all return statements that <em>don't</em> use the most common local.</p>",
+        "id": 194867649,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587506689
+    },
+    {
+        "content": "<p>(I call this \"traditional\" because it's in <a href=\"https://www.amazon.com/Advanced-Compiler-Design-Implementation-Muchnick/dp/1558603204\" title=\"https://www.amazon.com/Advanced-Compiler-Design-Implementation-Muchnick/dp/1558603204\">https://www.amazon.com/Advanced-Compiler-Design-Implementation-Muchnick/dp/1558603204</a>)</p>",
+        "id": 194871772,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1587509606
+    },
+    {
+        "content": "<p>argh this is a long thread</p>",
+        "id": 195378051,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587969874
+    },
+    {
+        "content": "<blockquote>\n<p>but I think it wouldn't be much more complicated than the generator transform, which does similar things.</p>\n</blockquote>\n<p>I just wanted to point that the generator transform is simpler because it doesn't care about accesses, only storage live ranges, and fundamentally it overlaps <em>unrelated</em> locals whereas NRVO needs to overlap locals with <em>transfers</em> between them (which requires they both be live at the same time)</p>",
+        "id": 195378201,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970014
+    },
+    {
+        "content": "<p>also every time you unify two locals, the conflict matrix needs to be updated to account for \"shallow transitivity\"</p>",
+        "id": 195378227,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970065
+    },
+    {
+        "content": "<p>also, NRVO and copy propagation aren't the same, they're more like...duals</p>",
+        "id": 195378324,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970175
+    },
+    {
+        "content": "<p>what is usually called \"copy propagation\" is \"(forward) source propagation\" while NRVO in the sense that I use it in is \"(backwards) destination propagation\"</p>",
+        "id": 195378387,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970221
+    },
+    {
+        "content": "<p>and unifying locals is not exactly \"propagation\", i.e. it's global and the resulting MIR has one less local, whereas \"destination propagation\" could be understood to be more local and skip a copy without getting rid of the intermediary local from <em>other</em> places in the MIR</p>",
+        "id": 195378507,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970418
+    },
+    {
+        "content": "<p>I think forward source propagation is harder in some respects, because you have to check that you can move an <code>Rvalue</code> all the way down to an use of a local</p>",
+        "id": 195378621,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970528
+    },
+    {
+        "content": "<p>so it's kind of like the conflict check of replacing <code>b = a</code> by unifying <code>a</code> and <code>b</code> when their live ranges don't overlap, except for swapping two statements</p>",
+        "id": 195378741,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970653
+    },
+    {
+        "content": "<p>but in that sense, <code>b = a</code> is a \"local\" check (after the live ranges have been computed), whereas the source propagation requires you to effectively swap statements the entire path between def and use</p>",
+        "id": 195378833,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970711
+    },
+    {
+        "content": "<p>you wouldn't literally implement it as such, but there's more to check overall IIUC</p>",
+        "id": 195378846,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970742
+    },
+    {
+        "content": "<p>for SSA-like locals though, you can do a better job at propagating them into uses, as long as the original is still live</p>",
+        "id": 195378895,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970801
+    },
+    {
+        "content": "<p>IMO this is most useful (ignoring consts which have their own propagation) for arguments</p>",
+        "id": 195378952,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970827
+    },
+    {
+        "content": "<p>and I suppose non-<code>Use</code> <code>Rvalue</code>s if you want to do that</p>",
+        "id": 195379023,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970906
+    },
+    {
+        "content": "<p>MIR statements of the form <code>local = local;</code> can be optimized by either unifying the locals (\"NRVO\") or propagating the RHS to uses of the LHS, and you can't do the former if the RHS is an argument</p>",
+        "id": 195379134,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587970989
+    },
+    {
+        "content": "<p>or, wait, you can?! did I get confused at some point in the past?</p>",
+        "id": 195379145,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587971000
+    },
+    {
+        "content": "<p>just like you can only unify <code>_0</code> with a local by renaming <em>that</em> local to <code>_0</code>, not the other way around, you can unify arguments with other locals by renaming those locals to the argument</p>",
+        "id": 195379235,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587971077
+    },
+    {
+        "content": "<p>the difference being that <code>_0</code> is usually a destination and arguments are usually a source</p>",
+        "id": 195379244,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587971089
+    },
+    {
+        "content": "<p>so IOW, copyprop aka \"source propagation\" is most useful when you have non-<code>Use</code> <code>Rvalue</code>s, if I'm not mistaken</p>",
+        "id": 195379344,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587971167
+    },
+    {
+        "content": "<p>or I guess places with projections</p>",
+        "id": 195379358,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587971191
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"118594\">@ecstatic-morse</span> also, MIR working with <em>places</em> rather than <em>values</em> means a bunch of textbook stuff (e.g. SSA) doesn't apply as cleanly, and some of the tradeoffs are different too</p>",
+        "id": 195379541,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587971346
+    },
+    {
+        "content": "<p>I much prefer approaches like my \"local unification\" in how it completely eliminates reasoning about \"code motion\"</p>",
+        "id": 195379626,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587971410
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"118594\">ecstatic-morse</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/194822854\" title=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/194822854\">said</a>:</p>\n<blockquote>\n<p><strong>Hanna Kruppe</strong> Noted. My concern was that, because NRVO is not useful in most cases, using a better-optimized global copy propagation pass to achieve it may cause too large a regression in compile time to ultimately be worth it. I think it's valuable to explore alternatives, since propagating copies into the return place specifically should have a greater benefit than doing the same for locals residing within our stack frame.</p>\n</blockquote>\n<p>Maybe it is possible to compute a quick score/heuristic that tells us how likely it is that NRVO is going to be useful. That way we don't run it for most of the time, but when we do, it gives big perf wins. If that makes sense?</p>",
+        "id": 195443685,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1588005774
+    },
+    {
+        "content": "<p>One thing that might become a performance issue is that we need to know about liveness and \"borrowed-ness\" of all locals at every single statement to build the conflict matrix, but liveness is a backwards analysis, while \"borrowed-ness\" (and <code>MaybeInitializedLocals</code>) are forward analyses, so for at least one analysis we will have <code>O(n²)</code> visiting of all statements, at least with the current cursor API.</p>\n<p>(Generators don't have this problem because they only use forward analyses to build their conflict matrix – liveness doesn't factor into which locals may or may not overlap in their state)</p>\n<p>This is likely to be an issue at least for the <code>tuple-stress</code> benchmark, which has 1 basic block with 458745 statements.</p>\n<p><span class=\"user-mention\" data-user-id=\"118594\">@ecstatic-morse</span> you might have some ideas for how to make the cursor API more performant for cases like this.</p>",
+        "id": 196713483,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588810172
+    },
+    {
+        "content": "<p>Can you go once backward through the basic block and once forward?</p>",
+        "id": 196713620,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1588810287
+    },
+    {
+        "content": "<p>Oh, that's right. We just <code>|</code> the bits in the conflict matrix. Well that was easy.</p>",
+        "id": 196713710,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588810353
+    },
+    {
+        "content": "<p>NP lemme know if anything else comes up.</p>",
+        "id": 196713741,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1588810405
+    },
+    {
+        "content": "<p>Good job you guys! :D</p>",
+        "id": 196723097,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1588821039
+    },
+    {
+        "content": "<p>Heh, apparently the liveness analysis does not consider <code>_0</code> live, ever. Maybe the MIR visitor code should treat <code>return</code> like a use of <code>_0</code> to fix this, and potentially handling in other passes?</p>",
+        "id": 196948490,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588970706
+    },
+    {
+        "content": "<p>Oh, no, that's not true either, <code>_0</code> <em>is</em> live, but only at the <em>start</em> of the function? But it doesn't contain any value there...</p>",
+        "id": 196948724,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588970842
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">struct</span> <span class=\"nc\">BigTest</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">arr</span>: <span class=\"p\">[</span><span class=\"kt\">u32</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">128</span><span class=\"p\">]</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">BigTest</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">new</span><span class=\"p\">()</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">BigTest</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">BigTest</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">arr</span>: <span class=\"p\">[</span><span class=\"mi\">123</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">128</span><span class=\"p\">],</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>yields:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"o\">&lt;</span><span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">at</span><span class=\"w\"> </span><span class=\"n\">nrvo</span><span class=\"p\">.</span><span class=\"n\">rs</span>:<span class=\"mi\">9</span>:<span class=\"mi\">1</span>: <span class=\"mi\">15</span>:<span class=\"mi\">2</span><span class=\"o\">&gt;</span>::<span class=\"n\">new</span><span class=\"p\">()</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">BigTest</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">_0</span>: <span class=\"nc\">BigTest</span><span class=\"p\">;</span><span class=\"w\">                 </span><span class=\"c1\">// return place in scope 0 at nrvo.rs:10:21: 10:28</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">_1</span>: <span class=\"p\">[</span><span class=\"kt\">u32</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">128</span><span class=\"p\">];</span><span class=\"w\">              </span><span class=\"c1\">// in scope 0 at nrvo.rs:12:18: 12:28</span>\n\n<span class=\"w\">    </span><span class=\"c1\">// init: []</span>\n<span class=\"w\">    </span><span class=\"c1\">// live: [_0]</span>\n<span class=\"w\">    </span><span class=\"n\">bb0</span>: <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"c1\">// init: []</span>\n<span class=\"w\">        </span><span class=\"c1\">// live: [_0]</span>\n<span class=\"w\">        </span><span class=\"n\">StorageLive</span><span class=\"p\">(</span><span class=\"n\">_1</span><span class=\"p\">);</span><span class=\"w\">                 </span><span class=\"c1\">// scope 0 at nrvo.rs:12:18: 12:28</span>\n<span class=\"w\">        </span><span class=\"c1\">// init: []</span>\n<span class=\"w\">        </span><span class=\"c1\">// live: [_0, _1]</span>\n<span class=\"w\">        </span><span class=\"n\">_1</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"mi\">123</span><span class=\"k\">u32</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">128</span><span class=\"p\">];</span><span class=\"w\">        </span><span class=\"c1\">// scope 0 at nrvo.rs:12:18: 12:28</span>\n<span class=\"w\">                                         </span><span class=\"c1\">// ty::Const</span>\n<span class=\"w\">                                         </span><span class=\"c1\">// + ty: u32</span>\n<span class=\"w\">                                         </span><span class=\"c1\">// + val: Value(Scalar(0x0000007b))</span>\n<span class=\"w\">                                         </span><span class=\"c1\">// mir::Constant</span>\n<span class=\"w\">                                         </span><span class=\"c1\">// + span: nrvo.rs:12:19: 12:22</span>\n<span class=\"w\">                                         </span><span class=\"c1\">// + literal: Const { ty: u32, val: Value(Scalar(0x0000007b)) }</span>\n<span class=\"w\">        </span><span class=\"c1\">// init: [_1]</span>\n<span class=\"w\">        </span><span class=\"c1\">// live: []</span>\n<span class=\"w\">        </span><span class=\"p\">(</span><span class=\"n\">_0</span><span class=\"p\">.</span><span class=\"mi\">0</span>: <span class=\"p\">[</span><span class=\"kt\">u32</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">128</span><span class=\"p\">])</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">move</span><span class=\"w\"> </span><span class=\"n\">_1</span><span class=\"p\">;</span><span class=\"w\">    </span><span class=\"c1\">// scope 0 at nrvo.rs:11:9: 13:10</span>\n<span class=\"w\">        </span><span class=\"c1\">// init: [_0]</span>\n<span class=\"w\">        </span><span class=\"c1\">// live: []</span>\n<span class=\"w\">        </span><span class=\"n\">StorageDead</span><span class=\"p\">(</span><span class=\"n\">_1</span><span class=\"p\">);</span><span class=\"w\">                 </span><span class=\"c1\">// scope 0 at nrvo.rs:13:9: 13:10</span>\n<span class=\"w\">        </span><span class=\"c1\">// init: [_0]</span>\n<span class=\"w\">        </span><span class=\"c1\">// live: []</span>\n<span class=\"w\">        </span><span class=\"k\">return</span><span class=\"p\">;</span><span class=\"w\">                          </span><span class=\"c1\">// scope 0 at nrvo.rs:14:6: 14:6</span>\n<span class=\"w\">        </span><span class=\"c1\">// init: [_0]</span>\n<span class=\"w\">        </span><span class=\"c1\">// live: []</span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 196949104,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588971021
+    },
+    {
+        "content": "<p>(where <code>init</code> is <code>MaybeInitializedLocals</code> and <code>live</code> is <code>MaybeLiveLocals</code>)</p>",
+        "id": 196949241,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588971110
+    },
+    {
+        "content": "<p>\"Maybe the MIR visitor code should treat return like a use of _0 to fix this\" - I would like to see this.</p>",
+        "id": 196949600,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1588971337
+    },
+    {
+        "content": "<p>Isn't \"live before initialized\" going to be a problem for anything initialized by an aggregate rvalue, which becomes a bunch of field assignments.</p>",
+        "id": 196949724,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1588971394
+    },
+    {
+        "content": "<p>(my printing code was a bit broken, I've edited the output)</p>",
+        "id": 196949958,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588971526
+    },
+    {
+        "content": "<p>Certainly I wouldn't expect any locals to be live at the start of bb0 in any case, that implies a use of uninitialized data if I understand liveness correctly</p>",
+        "id": 196950066,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588971592
+    },
+    {
+        "content": "<p>Ah, well except arguments of course</p>",
+        "id": 196950160,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588971619
+    },
+    {
+        "content": "<p>\"Live and initialized\" is generally what's needed. Borrowck used to have an issue where uninitialized variables were considered to be live because there was a <code>Drop</code> of them along some unwind path (which drop elaboration would fix). Here liveness believes that assigning to <code>_0.0</code> is a use, even though it isn't (this behavior is correct for borrowck).</p>",
+        "id": 196950701,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1588971985
+    },
+    {
+        "content": "<p>Oof, yeah, the interaction with aggregates is bad...</p>",
+        "id": 196952615,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588973278
+    },
+    {
+        "content": "<p>This comes from marking <code>MutatingUseContext::Projection</code> as a \"use\". According to the docs, that context is used for both <code>&amp;mut x.y</code> (which is indeed a use of <code>x</code>) and <code>x.y = ...</code> (which is not a use of <code>x</code> but is also not a def of the entirety of <code>x</code>). Looks like we'll need to stop relying on <code>PlaceContext</code> for MIR liveness.</p>",
+        "id": 196953051,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1588973533
+    },
+    {
+        "content": "<p>Yeah, it kinda does makes sense</p>",
+        "id": 196953128,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588973604
+    },
+    {
+        "content": "<p>Somehow I'm also getting different liveness after a block's terminator when compared to after the block itself, in the function above...</p>",
+        "id": 196953197,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588973643
+    },
+    {
+        "content": "<p>But yeah, we need to handle <code>return</code> properly. That's a bug and maybe caused the unexpected changes in <a href=\"https://github.com/rust-lang/rust/issues/71956\" title=\"https://github.com/rust-lang/rust/issues/71956\">#71956</a>?</p>",
+        "id": 196953210,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1588973658
+    },
+    {
+        "content": "<p>I somewhat doubt that, as I don't think <code>_0</code> can ever be live across a yield currently.</p>",
+        "id": 196953372,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588973778
+    },
+    {
+        "content": "<p>I say this only because there's a mention of NRVO in the comment above  one of the generator tests whose size changed. I think it might be outdated; It seems wrong to me. <a href=\"https://github.com/rust-lang/rust/blob/7b805396bf46dce972692a6846ce2ad8481c5f85/src/test/ui/generator/size-moved-locals.rs#L48-L59\" title=\"https://github.com/rust-lang/rust/blob/7b805396bf46dce972692a6846ce2ad8481c5f85/src/test/ui/generator/size-moved-locals.rs#L48-L59\">https://github.com/rust-lang/rust/blob/7b805396bf46dce972692a6846ce2ad8481c5f85/src/test/ui/generator/size-moved-locals.rs#L48-L59</a></p>",
+        "id": 196953607,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1588973961
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/196953197\" title=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/196953197\">said</a>:</p>\n<blockquote>\n<p>Somehow I'm also getting different liveness after a block's terminator when compared to after the block itself, in the function above...</p>\n</blockquote>\n<p>Can you be more specific? Remember <code>seek_after_primary_effect(terminator_loc)</code> and <code>seek_to_block_end</code> are not the same for backward dataflow analyses. That's why the name of the first changed from <code>seek_after</code>.</p>",
+        "id": 196953766,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1588974057
+    },
+    {
+        "content": "<p>Ah, right, I've been printing the wrong dataflow state then</p>",
+        "id": 196953983,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588974208
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116118\">Matthew Jasper</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/196949600\" title=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/196949600\">said</a>:</p>\n<blockquote>\n<p>\"Maybe the MIR visitor code should treat return like a use of _0 to fix this\" - I would like to see this.</p>\n</blockquote>\n<p>I also think this is a good idea.</p>",
+        "id": 196954223,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1588974372
+    },
+    {
+        "content": "<p>So, is this the correct way to print the dataflow state between statements?</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"n\">PassWhere</span>::<span class=\"n\">BeforeLocation</span><span class=\"p\">(</span><span class=\"n\">loc</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">init</span><span class=\"p\">.</span><span class=\"n\">seek_before_primary_effect</span><span class=\"p\">(</span><span class=\"n\">loc</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">live</span><span class=\"p\">.</span><span class=\"n\">seek_after_primary_effect</span><span class=\"p\">(</span><span class=\"n\">loc</span><span class=\"p\">);</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"n\">writeln</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">w</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"s\">&quot;        // init: {:?}&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">init</span><span class=\"p\">.</span><span class=\"n\">get</span><span class=\"p\">())</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">writeln</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">w</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"s\">&quot;        // live: {:?}&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">live</span><span class=\"p\">.</span><span class=\"n\">get</span><span class=\"p\">())</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"n\">PassWhere</span>::<span class=\"n\">AfterTerminator</span><span class=\"p\">(</span><span class=\"n\">bb</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">loc</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">body</span><span class=\"p\">.</span><span class=\"n\">terminator_loc</span><span class=\"p\">(</span><span class=\"n\">bb</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">init</span><span class=\"p\">.</span><span class=\"n\">seek_after_primary_effect</span><span class=\"p\">(</span><span class=\"n\">loc</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">live</span><span class=\"p\">.</span><span class=\"n\">seek_before_primary_effect</span><span class=\"p\">(</span><span class=\"n\">loc</span><span class=\"p\">);</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"n\">writeln</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">w</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"s\">&quot;        // init: {:?}&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">init</span><span class=\"p\">.</span><span class=\"n\">get</span><span class=\"p\">())</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">writeln</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">w</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"s\">&quot;        // live: {:?}&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">live</span><span class=\"p\">.</span><span class=\"n\">get</span><span class=\"p\">())</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 196954650,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588974703
+    },
+    {
+        "content": "<p>(it looks correct now, at least)</p>",
+        "id": 196954770,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588974788
+    },
+    {
+        "content": "<p>Yes. That should give you the correct results (it's slow for liveness, but you already knew that)</p>",
+        "id": 196954833,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1588974840
+    },
+    {
+        "content": "<p>One issue with making <code>return</code> read from <code>_0</code> is that <code>MutVisitor</code> receives a <code>&amp;mut Local</code>, but this would be the only <code>Local</code> it cannot actually mutate.</p>",
+        "id": 196958057,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588977139
+    },
+    {
+        "content": "<p>I can put an assertion in the visitor code, but maybe there's a better solution?</p>",
+        "id": 196958085,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588977171
+    },
+    {
+        "content": "<p>(the assertion is needed, CopyProp started miscompiling things otherwise)</p>",
+        "id": 196958122,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1588977197
+    },
+    {
+        "content": "<p>Regarding the interaction of liveness with aggregates, maybe that could be fixed by making liveness act on places instead of locals?</p>",
+        "id": 196991032,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589029797
+    },
+    {
+        "content": "<p>Or maybe my <code>MergeLocals</code> pass should run before the deaggregator. The generator transform already does that, interestingly. I wonder if it'd break if we run it afterwards.</p>",
+        "id": 196991099,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589029886
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/196991099\" title=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/196991099\">said</a>:</p>\n<blockquote>\n<p>Or maybe my <code>MergeLocals</code> pass should run before the deaggregator. The generator transform already does that, interestingly. I wonder if it'd break if we run it afterwards.</p>\n</blockquote>\n<p>Ah, well this doesn't work since the pass then can't propagate destinations at all</p>",
+        "id": 196991471,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589030446
+    },
+    {
+        "content": "<p>I've now hit a peculiar issue where my NRVO pass apparently misoptimizes <a href=\"https://github.com/rust-lang/rust/blob/74bd074eefcf4915c73d1ab91bc90859664729e6/src/liballoc/str.rs#L137\" title=\"https://github.com/rust-lang/rust/blob/74bd074eefcf4915c73d1ab91bc90859664729e6/src/liballoc/str.rs#L137\"><code>join_generic_copy</code></a>, but looking at how the MIR changes, it seems that the <em>input</em> to my pass contains an <code>Operand::Copy</code> that copies from a local of type <code>&amp;mut [T]</code>, and according to the docs that is not supposed to happen. Is that correct? If so, is there any way to run a sort of sanitizer pass between each optimization that could find these issues? Maybe the MIR typecheck pass?</p>",
+        "id": 197020482,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589067192
+    },
+    {
+        "content": "<p>Ohh</p>",
+        "id": 197028326,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1589078709
+    },
+    {
+        "content": "<p>Yes</p>",
+        "id": 197028327,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1589078713
+    },
+    {
+        "content": "<p>That's a good idea</p>",
+        "id": 197028328,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1589078719
+    },
+    {
+        "content": "<p>I mean</p>",
+        "id": 197028330,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1589078721
+    },
+    {
+        "content": "<p>We should never need them if the optimizations are correct</p>",
+        "id": 197028331,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1589078739
+    },
+    {
+        "content": "<p>Like, sound</p>",
+        "id": 197028332,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1589078750
+    },
+    {
+        "content": "<p>But maybe we could run that sanitizer while in testing mode</p>",
+        "id": 197028371,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1589078779
+    },
+    {
+        "content": "<p>Or no. Even better: we could run that sanitizer in a special mode where we basically run crater</p>",
+        "id": 197028373,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1589078801
+    },
+    {
+        "content": "<p>And we check that our transformations are sound</p>",
+        "id": 197028374,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1589078814
+    },
+    {
+        "content": "<p>This appears to be caused by the <code>&amp;*x =&gt; x</code> transform made by InstCombine</p>",
+        "id": 197078397,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589144442
+    },
+    {
+        "content": "<p><del>#72093 seems to fix the issues I was seeing</del> nevermind</p>",
+        "id": 197086131,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589154318
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/197078397\">said</a>:</p>\n<blockquote>\n<p>This appears to be caused by the <code>&amp;*x =&gt; x</code> transform made by InstCombine</p>\n</blockquote>\n<p>You might be interested in <a href=\"https://github.com/rust-lang/rust/issues/46420\">https://github.com/rust-lang/rust/issues/46420</a></p>",
+        "id": 197458625,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1589395683
+    },
+    {
+        "content": "<p>Ah, indeed</p>",
+        "id": 197459141,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589395918
+    },
+    {
+        "content": "<p>I wonder if it makes sense to create an <code>A-mir-opt-nrvo</code> label to track issues that would be fixed by this...</p>",
+        "id": 197610658,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589486838
+    },
+    {
+        "content": "<p>I think that would be good. We have <code>A-mir-opt-inlining</code> which is similar</p>",
+        "id": 197611093,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1589487034
+    },
+    {
+        "content": "<p>Created one</p>",
+        "id": 197611579,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589487264
+    },
+    {
+        "content": "<p>Looking through the tagged issues is also helpful when trying to stabilize the optimization because we can extract test cases.</p>",
+        "id": 197611684,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1589487314
+    },
+    {
+        "content": "<p>Yay! I find these kinds of things make writing test suites much easier.</p>",
+        "id": 197612155,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1589487578
+    },
+    {
+        "content": "<p>Status update: I've been hacking on dataflow-based NRVO in my spare time, but still have to work out some kinks. I'm hoping to make more progress over the weekend (and if not, next weekend).</p>",
+        "id": 197747731,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589574032
+    },
+    {
+        "content": "<p>please sync with <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> because they also have such a pass</p>",
+        "id": 197749815,
+        "sender_full_name": "oli",
+        "timestamp": 1589575247
+    },
+    {
+        "content": "<p>ehm</p>",
+        "id": 197749851,
+        "sender_full_name": "eddyb",
+        "timestamp": 1589575276
+    },
+    {
+        "content": "<p>I'm pretty sure everyone here knows about my history with NRVO?</p>",
+        "id": 197749862,
+        "sender_full_name": "eddyb",
+        "timestamp": 1589575285
+    },
+    {
+        "content": "<p>at least <span class=\"user-mention\" data-user-id=\"211727\">@Jonas Schievink</span> who I've talked extensively to about it</p>",
+        "id": 197749896,
+        "sender_full_name": "eddyb",
+        "timestamp": 1589575303
+    },
+    {
+        "content": "<p>yeah, <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> guided me through my last attempt :)</p>",
+        "id": 197749958,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1589575329
+    },
+    {
+        "content": "<p>(some of the recent experiments were based on my hopes that there are simpler ways to correctly approximate the conditions for NRVO than my original attempt at it which I don't feel great about due to the complexity, although now that I've discussed it with <span class=\"user-mention\" data-user-id=\"124289\">@Hanna Kruppe</span> and <span class=\"user-mention\" data-user-id=\"211727\">@Jonas Schievink</span>, I could see ways to break it up into understandable \"standard compiler concept\" pieces. sadly I'm again not working on optimizations so... yeah I can't do much about it atm)</p>",
+        "id": 197750372,
+        "sender_full_name": "eddyb",
+        "timestamp": 1589575607
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/197747731\">said</a>:</p>\n<blockquote>\n<p>Status update: I've been hacking on dataflow-based NRVO in my spare time, but still have to work out some kinks. I'm hoping to make more progress over the weekend (and if not, next weekend).</p>\n</blockquote>\n<p><span class=\"user-mention\" data-user-id=\"211727\">@Jonas Schievink</span>  Let me know if you see any room for improvement within the dataflow framework. You're basically the first person using it to write new stuff, so your feedback is very useful.</p>",
+        "id": 197754905,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1589578278
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"118594\">@ecstatic-morse</span> So, my destination propagation pass now makes your NRVO pass fail this assertion: <a href=\"https://github.com/rust-lang/rust/blob/7726070fa755f660b5da3f82f46e07d9c6866f69/src/librustc_mir/transform/nrvo.rs#L206\">https://github.com/rust-lang/rust/blob/7726070fa755f660b5da3f82f46e07d9c6866f69/src/librustc_mir/transform/nrvo.rs#L206</a></p>",
+        "id": 198586170,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590331675
+    },
+    {
+        "content": "<p>Does your pass work when <code>_0</code> is \"just another local\"?</p>",
+        "id": 198586208,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590331692
+    },
+    {
+        "content": "<p>You can turn it off if you're already renaming the return place</p>",
+        "id": 198587170,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590333183
+    },
+    {
+        "content": "<p>That is true I guess</p>",
+        "id": 198587769,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590334170
+    },
+    {
+        "content": "<p>Hmm, can NRVO create <code>Operand::Move</code> after replacement, but have the moved place still be used afterwards?</p>",
+        "id": 198587817,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590334205
+    },
+    {
+        "content": "<p>Seems like yes? If it propagates this:</p>\n<div class=\"codehilite\"><pre><span></span><code>_3 = _4;\n(_2.0: i32) = move _3;\n(_2.1: i32) = move _4;\n</code></pre></div>\n\n\n<p>It can produce</p>\n<div class=\"codehilite\"><pre><span></span><code>(_2.0: i32) = move _4;\n(_2.1: i32) = move _4;\n</code></pre></div>\n\n\n<p>Seems bad if we do want to use <code>Operand::Move</code> vs. <code>Operand::Copy</code> for optimizations. This might also be true for the existing pass.</p>",
+        "id": 198587885,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590334347
+    },
+    {
+        "content": "<p>Ah nevermind, it would just produce</p>\n<div class=\"codehilite\"><pre><span></span><code>(_2.0: i32) = _4;\nnop;\n(_2.1: i32) = move _4;\n</code></pre></div>",
+        "id": 198588109,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590334783
+    },
+    {
+        "content": "<p>Oof, that's a relief</p>",
+        "id": 198595748,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590347528
+    },
+    {
+        "content": "<p>:)</p>",
+        "id": 198595749,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590347529
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/196713710\">said</a>:</p>\n<blockquote>\n<p>Oh, that's right. We just <code>|</code> the bits in the conflict matrix. Well that was easy.</p>\n</blockquote>\n<p>Turns out this is wrong, since we have to <code>&amp;</code> the bits from liveness and initializedness before adding the result to the matrix. I guess I can collect the states into a <code>Vec</code> and <code>&amp;</code> with that though.</p>",
+        "id": 198705664,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590445142
+    },
+    {
+        "content": "<p>I've tried to make the dataflow traversal take linear time, but it still seems quadratic. <a href=\"https://github.com/rust-lang/rust/commit/f99570bd551a34f5864792ef8a685e0cff4c58d7\">https://github.com/rust-lang/rust/commit/f99570bd551a34f5864792ef8a685e0cff4c58d7</a></p>\n<p>Probably just a brain fart on my side though, will revisit tomorrow.</p>",
+        "id": 198708613,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590449423
+    },
+    {
+        "content": "<p>Ah, adding stuff to the conflict matrix has O(n²) performance too, gotta find a better way to do that (this code was copied straight from the generator transform, so it's possible that it leaves some performance behind as well).</p>",
+        "id": 198745595,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590490558
+    },
+    {
+        "content": "<blockquote>\n<p>I guess I can collect the states into a Vec and &amp; with that though.</p>\n</blockquote>\n<p>I also don't see a better way than this. I forgot we needed the intersection of two dataflow analyses in different directions.</p>",
+        "id": 198774744,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590505323
+    },
+    {
+        "content": "<p>You seem to have independently figured this out, but I think we should be specific about the  <code>n</code> when talking about the big-O notation for destination propagation going forward. AFAICT, the best we can do is <code>O(L^2 * S)</code> in time and <code>O(L^2 + S*L)</code> in memory, where <code>L</code> is the number of locals and <code>S</code> is the  number of statements in a basic block. Does this sound right? Obviously there's a very low constant factor for the <code>L</code> terms since they use bitsets.</p>",
+        "id": 198775745,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590505650
+    },
+    {
+        "content": "<p>I guess it would actually be <code>O(L^2 * S * B)</code> in time for an entire function, where <code>B</code> is the number of basic blocks. And memory is <code>O(L^2 + S*L + B*L)</code>, since we need to consider the entry set for each basic block (<code>B*L</code>) as well as the intermediate buffer used to do the forward/backward intersection (<code>S*L</code>).</p>",
+        "id": 198776331,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590505893
+    },
+    {
+        "content": "<p>can the algorithm be degraded to just look at a few locals in case there are too many?</p>",
+        "id": 198777562,
+        "sender_full_name": "oli",
+        "timestamp": 1590506283
+    },
+    {
+        "content": "<p>Or can we prefilter the locals to just look at those that are relevant at all? We have a few super local heavy tests in the perf suite, they may actually notice such a quadratic algorithm</p>",
+        "id": 198777771,
+        "sender_full_name": "oli",
+        "timestamp": 1590506368
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124288\">@oli</span> We can always bail out, or fall back to my dumb version, which is linear.</p>",
+        "id": 198778322,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590506561
+    },
+    {
+        "content": "<p>(I don't immediately see a subset of locals you could ignore, but perhaps <span class=\"user-mention\" data-user-id=\"211727\">@Jonas Schievink</span> can do better)</p>",
+        "id": 198778886,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590506774
+    },
+    {
+        "content": "<p>So, if <code>m</code> out of <code>n</code> total locals are in conflict at any point, adding those <code>m</code> conflicts to the matrix takes <code>O(m²)</code> time (since it <code>|</code>s each <code>m</code>'s row in the matrix with the <code>m</code> <code>BitSet</code>). I believe this means that the <code>O(L^2 * S)</code> figure is correct, since all locals can conflict at every point in the function.</p>\n<p>I think I can replace the conflict matrix with a unification table though, which should only take almost-linear time for this \"add conflicts\" operation, unless I missed something. I already use one in another place, so this should simplify the code too.</p>",
+        "id": 198780483,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590507363
+    },
+    {
+        "content": "<p>What's a \"unification table\"?</p>",
+        "id": 198782278,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590508083
+    },
+    {
+        "content": "<p>This thing: <a href=\"https://docs.rs/ena/0.14.0/ena/unify/struct.UnificationTable.html\">https://docs.rs/ena/0.14.0/ena/unify/struct.UnificationTable.html</a></p>\n<p>It's already used by the type inferencer</p>",
+        "id": 198782392,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590508141
+    },
+    {
+        "content": "<p>Ah, maybe I should've just said union-find</p>",
+        "id": 198782727,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590508293
+    },
+    {
+        "content": "<p>Does it require transitivity? The use of the phrase \"union-find\" suggests it does, but I'm not sure. I don't think you have that when detecting live-range overlaps, since \"A overlaps with B\" and \"B overlaps with C\" does not imply \"A overlaps with C\". Maybe you're thinking of applying it in a different way than I am, though.</p>",
+        "id": 198782739,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590508298
+    },
+    {
+        "content": "<p>Ah, that is true</p>",
+        "id": 198782898,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590508361
+    },
+    {
+        "content": "<p>I wouldn't worry too much the <code>L^2</code> part, since you handle 64 locals per instruction and we can always bail out for massive <code>L</code> as <span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> mentioned. I think you already ran into a degenerative case in your earlier PR.</p>",
+        "id": 198783240,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590508503
+    },
+    {
+        "content": "<p>Yeah, I'm benchmarking with said perf test (<code>tuple-stress</code>)</p>",
+        "id": 198783482,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590508589
+    },
+    {
+        "content": "<p>It's true that we could just bail out when there's too many locals, just seems a bit unfortunate</p>",
+        "id": 198783540,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590508613
+    },
+    {
+        "content": "<p>Frankly, if you write code that gets lowered to 100,000 MIR locals, that's on you, not on us <span aria-label=\"smiley\" class=\"emoji emoji-1f603\" role=\"img\" title=\"smiley\">:smiley:</span></p>",
+        "id": 198783798,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590508719
+    },
+    {
+        "content": "<p>/me looks directly at <code>keccak</code></p>",
+        "id": 198783825,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590508732
+    },
+    {
+        "content": "<p>FWIW, I do think there are ways of doing this that are linear (or at least quasi-linear) in time and memory, but they will be more complex than destination propagation using a conflict matrix and have higher constant factors to boot.</p>",
+        "id": 198784512,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1590509028
+    },
+    {
+        "content": "<p>I would agree that we should care more about getting good performance for low N, but we should also make sure to avoid exponentially increasing runtime (even if that means just switching some optimization off; eventually perhaps we can emit a warning on this \"function has too many variables\").</p>",
+        "id": 198788021,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1590510643
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116122\">simulacrum</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/198788021\">said</a>:</p>\n<blockquote>\n<p>perhaps we can emit a warning on this \"function has too many variables\").</p>\n</blockquote>\n<p>I like this</p>",
+        "id": 198788484,
+        "sender_full_name": "oli",
+        "timestamp": 1590510874
+    },
+    {
+        "content": "<p>XD</p>",
+        "id": 198792933,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590513172
+    },
+    {
+        "content": "<p>I dunno</p>",
+        "id": 198792954,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590513185
+    },
+    {
+        "content": "<p>From what I used to hear when I was part of the Swift community, the fact that their compiler gave up sometimes and said \"this expression is too complex\" left a bitter taste in _everyone_ who got to see it</p>",
+        "id": 198793119,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590513256
+    },
+    {
+        "content": "<p>But on the other hand that happened with fairly normal code</p>",
+        "id": 198793153,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590513277
+    },
+    {
+        "content": "<p>If you're telling me that this would happen only with code at like, 200 local variables per function...</p>",
+        "id": 198793201,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590513308
+    },
+    {
+        "content": "<p>Well, that seems actually quite fair</p>",
+        "id": 198793216,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590513321
+    },
+    {
+        "content": "<p>:P</p>",
+        "id": 198793225,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590513323
+    },
+    {
+        "content": "<p>Ah, wait. You're thinking of emitting a warning. Okay, my bad. Yeah, that seems pretty good :)</p>",
+        "id": 198793406,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590513416
+    },
+    {
+        "content": "<p>I thought you were talking about error-ing, but that was not the case at all :)</p>",
+        "id": 198793490,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590513458
+    },
+    {
+        "content": "<p>I'm not sure we'd even want a warning on that. It's not like the code is <em>wrong</em> it's just bloated and not necessarily going to be optimized well. </p>\n<p>I think something like optimization remarks where we provide <code>// annotations</code> if requested when emitting MIR files might be more appropriate. LLVM has a much more sophisticated system that we could steal ideas from: <a href=\"https://llvm.org/docs/Remarks.html\">https://llvm.org/docs/Remarks.html</a></p>",
+        "id": 198794045,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1590513738
+    },
+    {
+        "content": "<p>Maybe something like:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"c1\">// opt-remark: [NRVO] - gave up due to too many locals!</span>\n<span class=\"k\">fn</span>  <span class=\"nf\">bar</span><span class=\"p\">(</span><span class=\"n\">_1</span>: <span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_2</span>: <span class=\"kp\">&amp;</span><span class=\"p\">[</span><span class=\"kt\">u32</span><span class=\"p\">])</span><span class=\"w\"> </span>-&gt; <span class=\"p\">(</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">debug</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"n\">_1</span><span class=\"p\">;</span><span class=\"w\">                       </span><span class=\"c1\">// in scope 0 at src/lib.rs:16:5: 16:10</span>\n<span class=\"w\">    </span><span class=\"n\">debug</span><span class=\"w\"> </span><span class=\"n\">w</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"n\">_2</span><span class=\"p\">;</span><span class=\"w\">                       </span><span class=\"c1\">// in scope 0 at src/lib.rs:17:5: 17:6</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">_0</span>: <span class=\"p\">(</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">);</span><span class=\"w\">         </span><span class=\"c1\">// return place in scope 0 at src/lib.rs:18:6: 1</span>\n<span class=\"w\">    </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 198794243,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1590513842
+    },
+    {
+        "content": "<p>Ohh, I kinda like that!</p>",
+        "id": 198806830,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590519855
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/pull/72632\">https://github.com/rust-lang/rust/pull/72632</a></p>",
+        "id": 198824040,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590528532
+    },
+    {
+        "content": "<p>oh nice :D</p>",
+        "id": 199262382,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1590853103
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"211727\">@Jonas Schievink</span> if you want to get some extra checking of whether the MIR still makes sense, you could try</p>\n<div class=\"codehilite\"><pre><span></span><code>MIRI_TEST_FLAGS=&quot;-Z mir-opt-level=3&quot; ./x.py test --stage 0 src/tools/miri\n</code></pre></div>",
+        "id": 199262419,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1590853183
+    },
+    {
+        "content": "<p>Thanks, no failures with that though</p>",
+        "id": 199262593,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590853421
+    },
+    {
+        "content": "<p>I've been trying to extend the MIR validation pass to check the MIR against the live and initialized locals from dataflow, and it reports a lot of errors. I'll try to narrow those down next.</p>",
+        "id": 199262684,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590853523
+    },
+    {
+        "content": "<p>Whoa, just noticed this immense amount of test failures <a href=\"https://github.com/rust-lang/rust/pull/72635/checks?check_run_id=711136389\">https://github.com/rust-lang/rust/pull/72635/checks?check_run_id=711136389</a></p>\n<p>I can't reproduce any of that locally</p>",
+        "id": 199270541,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590864655
+    },
+    {
+        "content": "<p>Great, my <code>InstCombine</code> changes break dest-prop and <code>MaybeInitializedLocals</code> <a href=\"https://github.com/rust-lang/rust/issues/72797\">#72797</a></p>\n<p>Not entirely sure what to do, but I guess we can revert the <code>Operand::Move</code> change for now?</p>",
+        "id": 199278455,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590876923
+    },
+    {
+        "content": "<p>Found another issue, this time with <code>SimplifyArmIdentity</code>: <a href=\"https://github.com/rust-lang/rust/issues/72800\">#72800</a></p>\n<p>(that MIR validation pass I added is really starting to pay off!)</p>",
+        "id": 199282478,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1590884469
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"211727\">@Jonas Schievink</span> I cannot thank you enough for that pass. Anything that helps to ensure that our opts are, at the end of the day, sound, is imo incredibly important.</p>",
+        "id": 199294294,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590907819
+    },
+    {
+        "content": "<p>Although MIR validation isn't fool-proof (you could make a transform that changes program behavior and still generates valid MIR), I still think it's a great tool</p>",
+        "id": 199294306,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590907890
+    },
+    {
+        "content": "<p>What I eventually would love to have is some sort of proof that the opts are all valid transformations over a MIR program. But that feels more like end-game stuff</p>",
+        "id": 199294350,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1590907993
+    },
+    {
+        "content": "<p>Ah, just found this gem, this isn't sound of course:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"gd\">-        _44 = const std::option::Option::&lt;ExpandError&gt;::or(move _45, move _46) -&gt; [return: bb20, unwind: bb49]; // scope 12 at crates/ra_mbe/src/mbe_expander/transcriber.rs:97:23: 97:32</span>\n<span class=\"gi\">+        _45 = const std::option::Option::&lt;ExpandError&gt;::or(move _45, move _46) -&gt; [return: bb20, unwind: bb49]; // scope 12 at crates/ra_mbe/src/mbe_expander/transcriber.rs:97:23: 97:32</span>\n</code></pre></div>",
+        "id": 199429438,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1591048882
+    },
+    {
+        "content": "<p>Looks like we can do a lot more \"must not overlap\" validation in the MIR validator, this would have easily caught this case</p>",
+        "id": 199436313,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1591054679
+    },
+    {
+        "content": "<p>Luckily the rust-analyzer test suite started crashing, or I would have to bisect the entire rustc</p>",
+        "id": 199436360,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1591054708
+    },
+    {
+        "content": "<p>Okay, that fixed the rust-analyzer crash, but not the rustc miscompilation. In fact, there is now an additional spurious error emitted :(</p>",
+        "id": 199541773,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1591126378
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"211727\">@Jonas Schievink</span>  so regarding the overlap check, IMO before we add lots of static approximations of what the actual allowed and disallowed overlap behavior of assignments is, and certainly before we have any optimizations that rely on it, we should figure out the dynamic MIR semantics regarding overlap: <a href=\"https://github.com/rust-lang/rust/issues/68364\">https://github.com/rust-lang/rust/issues/68364</a></p>",
+        "id": 201471759,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592648610
+    },
+    {
+        "content": "<p>once we know those, we can determine if a static check is correct by seeing if it conservatively approximates the true dynamic overlap requirement</p>",
+        "id": 201471810,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592648665
+    },
+    {
+        "content": "<p>Makes sense to me, but I don't know what's required to settle that. Your comment <a href=\"https://github.com/rust-lang/rust/issues/68364#issuecomment-614862820\">https://github.com/rust-lang/rust/issues/68364#issuecomment-614862820</a> makes it sound like there's a good solution already.</p>",
+        "id": 201473862,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1592652447
+    },
+    {
+        "content": "<p>there's a reasonable candidate that is neither implemented nor ratified by the lang team</p>",
+        "id": 201474476,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592653584
+    },
+    {
+        "content": "<p>Is that candidate described somewhere <span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span>? :3</p>",
+        "id": 201550637,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1592769858
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"212698\">@Félix Fischer</span> yeah it's in jonas' message above: <a href=\"https://github.com/rust-lang/rust/issues/68364#issuecomment-614862820\">https://github.com/rust-lang/rust/issues/68364#issuecomment-614862820</a></p>",
+        "id": 201556443,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592779910
+    },
+    {
+        "content": "<p>Thank you <span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> <span aria-label=\"two hearts\" class=\"emoji emoji-1f495\" role=\"img\" title=\"two hearts\">:two_hearts:</span></p>",
+        "id": 201558704,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1592784061
+    },
+    {
+        "content": "<p>While we're at it... is there a guide on MIR? Like...</p>",
+        "id": 201558821,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1592784256
+    },
+    {
+        "content": "<p>MIR semantics</p>",
+        "id": 201558824,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1592784265
+    },
+    {
+        "content": "<p>And</p>",
+        "id": 201558825,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1592784269
+    },
+    {
+        "content": "<p>What the Rust~&gt;MIR transform does</p>",
+        "id": 201558832,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1592784295
+    },
+    {
+        "content": "<p>Because while reading these documents I feel like I don't quite understand what's going on, like, I'm missing a lot of context</p>",
+        "id": 201558851,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1592784346
+    },
+    {
+        "content": "<p>I only have superficial understanding of how MIR is built, but the docs at <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_build/build/index.html\">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_build/build/index.html</a> have been helpful for me, in case you haven't read them yet</p>",
+        "id": 201559544,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1592785696
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"212698\">Félix Fischer</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/201558824\">said</a>:</p>\n<blockquote>\n<p>MIR semantics</p>\n</blockquote>\n<p>this has been on my todo list since forever^^</p>",
+        "id": 201574251,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592810565
+    },
+    {
+        "content": "<p>It's something I hope <a href=\"https://github.com/rust-lang/unsafe-code-guidelines/\">the UCG</a> will get to eventually</p>",
+        "id": 201574266,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592810583
+    },
+    {
+        "content": "<p>so far we just have some bits an pieces, and none of that is normative or ratified:<br>\n<a href=\"https://github.com/rust-lang/unsafe-code-guidelines/tree/master/wip\">https://github.com/rust-lang/unsafe-code-guidelines/tree/master/wip</a></p>",
+        "id": 201574286,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592810609
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/201471759\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span>  so regarding the overlap check, IMO before we add lots of static approximations of what the actual allowed and disallowed overlap behavior of assignments is, and certainly before we have any optimizations that rely on it, we should figure out the dynamic MIR semantics regarding overlap: <a href=\"https://github.com/rust-lang/rust/issues/68364\">https://github.com/rust-lang/rust/issues/68364</a></p>\n</blockquote>\n<p>Circling back to this – would it really be such a bad idea to have the validator check for cases that codegen already assumes <em>today</em> won't alias? I'm fairly sure this would have caught almost every recent destination propagation miscompile I had to debug, and if we figure out later that codegen is doing something wrong then we can always relax the validator too. (these assumptions wouldn't be <em>exploited</em> by optimization passes either, in fact I need to do the exact opposite right now)</p>",
+        "id": 201668665,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1592864708
+    },
+    {
+        "content": "<p>it is probably a good idea to already check statically for things that we anyway rely on. I am just worried that we'll stop there, when I think we do need a precise dynamic description of what happens if we want to actually understand things.</p>",
+        "id": 201696382,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592898626
+    },
+    {
+        "content": "<blockquote>\n<p>(these assumptions wouldn't be exploited by optimization passes either, in fact I need to do the exact opposite right now)</p>\n</blockquote>\n<p>interesting, I thought they could be useful but maybe we don't have such optimizations yes?</p>",
+        "id": 201696404,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592898655
+    },
+    {
+        "content": "<p>In a way, codegen relying on this could count as an optimization. I don't think we have anything beyond that at the moment.</p>",
+        "id": 201705352,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1592904957
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Status.20of.20NRVO-like.20optimizations/near/201705352\">said</a>:</p>\n<blockquote>\n<p>In a way, codegen relying on this could count as an optimization.</p>\n</blockquote>\n<p>fair</p>",
+        "id": 201752680,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1592931404
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/issues/72632\">#72632</a> should now be ready for review</p>",
+        "id": 201906903,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1593034547
+    },
+    {
+        "content": "<p>Holy crap, good job!</p>",
+        "id": 201921629,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1593046271
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/issues/72632\">#72632</a> is now waiting on bors.</p>",
+        "id": 210584033,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1600470276
+    },
+    {
+        "content": "<p>And because I can't help myself, I wrote another copy propagation pass: <a href=\"https://github.com/rust-lang/rust/issues/76723\">#76723</a></p>\n<p>This one propagates forwards, and only within individual basic blocks, but runs so fast that it doesn't regress compiler performance measurably. The result is faster incremental builds due to less MIR being stored in the cache, and faster CTFE. The pass is also pretty small and should be relatively easy to understand.</p>",
+        "id": 210584234,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1600470470
+    }
+]

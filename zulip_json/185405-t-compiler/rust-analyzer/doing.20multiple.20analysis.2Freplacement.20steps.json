@@ -1,0 +1,254 @@
+[
+    {
+        "content": "<p>So... I'm trying to get the \"substitute type parameters\" and the \"qualify paths\" steps in the \"add missing impl members\" assist to work together. The problem is that after we've qualified paths, the syntax node we're editing is of course not the actual syntax node anymore, so most analysis doesn't work on it anymore, in particular resolving type parameters.</p>\n<p>One option of course would be to do the type parameter substitution purely on syntax, but I don't like that.</p>\n<p>This is made harder by the fact that while the edits don't collide themselves (something is either a path to qualify or a type parameter), the paths we qualify can contain type arguments that need to be substituted. E.g. let's say we have <code>Foo&lt;T&gt;</code>, then when qualifying we replace that whole node by <code>foo::Foo&lt;T&gt;</code>, and the <code>T</code>is a completely new node.</p>\n<p>The only option I can currently think of is to merge both steps into one, which isn't nice but should at least work <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span> </p>\n<p>Any ideas, <span class=\"user-mention\" data-user-id=\"133169\">@matklad</span> ?</p>",
+        "id": 185318269,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578669167
+    },
+    {
+        "content": "<p>Tough question.</p>\n<p>I think what IntelliJ does in similar situations is that it creates temporary PSI which is attached to some real PSI via a context attributes. On that injected PSI, all the analysis works, so you can just mutate it in place....</p>",
+        "id": 185318540,
+        "sender_full_name": "matklad",
+        "timestamp": 1578669348
+    },
+    {
+        "content": "<p>First, I am confused by the order here.</p>\n<p>It seems like we <em>first</em> should do subst, and then qualification? And not the other way around?</p>",
+        "id": 185318704,
+        "sender_full_name": "matklad",
+        "timestamp": 1578669435
+    },
+    {
+        "content": "<p>I think no, since we don't want to qualify the paths we substituted as if they were in the original module</p>",
+        "id": 185318813,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578669484
+    },
+    {
+        "content": "<p>I noticed this when trying it on <code>chalk_solve::RustIrDatabase</code>, it qualified the <code>TypeFamily</code> parameter to <code>chalk_ir::TypeFamily</code> even though we actually want our own one</p>",
+        "id": 185318915,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578669561
+    },
+    {
+        "content": "<p>Hm, but if we don't have to qualify the path, it won't be qualifed, no?</p>",
+        "id": 185318918,
+        "sender_full_name": "matklad",
+        "timestamp": 1578669565
+    },
+    {
+        "content": "<p>Could you show an example? I think I am just confused as two what goes where :D</p>",
+        "id": 185318945,
+        "sender_full_name": "matklad",
+        "timestamp": 1578669590
+    },
+    {
+        "content": "<p>so, we have in our <code>chalk.rs</code>:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">struct</span> <span class=\"nc\">TypeFamily</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"k\">impl</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;a</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">DB</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"n\">chalk_solve</span>::<span class=\"n\">RustIrDatabase</span><span class=\"o\">&lt;</span><span class=\"n\">TypeFamily</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">ChalkContext</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;a</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">DB</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"p\">...</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>but in <code>chalk_solve</code>, the name <code>TypeFamily</code> resolves to <code>chalk_solve::family::TypeFamily</code>. So adding impls results in e.g.</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">fn</span> <span class=\"nf\">custom_clauses</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"bp\">self</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nb\">Vec</span><span class=\"o\">&lt;</span><span class=\"n\">ProgramClause</span><span class=\"o\">&lt;</span><span class=\"n\">chalk_solve</span>::<span class=\"n\">family</span>::<span class=\"n\">TypeFamily</span><span class=\"o\">&gt;&gt;</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>because the <code>TF</code> parameter gets first substituted to <code>TypeFamily</code>, and that then resolves to <code>chalk_solve::family::TypeFamily</code> (because qualifying paths resolves everything from the definition of the trait) and hence gets qualified</p>",
+        "id": 185319271,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578669818
+    },
+    {
+        "content": "<p>basically, the qualifying-paths step doesn't know that the substituted things are already from the perspective of the module we're inserting into</p>",
+        "id": 185319409,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578669892
+    },
+    {
+        "content": "<p>Ah, so this is a hygiene issue of sorts?</p>",
+        "id": 185319413,
+        "sender_full_name": "matklad",
+        "timestamp": 1578669895
+    },
+    {
+        "content": "<p>kind of, yeah</p>",
+        "id": 185319418,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578669900
+    },
+    {
+        "content": "<p>Hm, I still have a feeling that we should do substitution first, but maybe we shouldn't subst syntactically?</p>",
+        "id": 185319593,
+        "sender_full_name": "matklad",
+        "timestamp": 1578669996
+    },
+    {
+        "content": "<p>Like, if we were <em>rendering</em> <code>hir</code> to syntax, we would first substitute in the hir, and then render a substituted thing</p>",
+        "id": 185319649,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670025
+    },
+    {
+        "content": "<p>what do you mean?</p>",
+        "id": 185319650,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578670025
+    },
+    {
+        "content": "<p>ok yeah, but then we'd have to be able to actually render whole method definitions from hir</p>",
+        "id": 185319703,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578670078
+    },
+    {
+        "content": "<p>So perhaps <code>substitute_type_params</code> should not return and <code>N</code>, but something like <code>FxHashMap&lt;ast::Type, ast::Type&gt;</code>?</p>",
+        "id": 185319708,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670081
+    },
+    {
+        "content": "<p>Than, the qualify thing would skip they <code>keys</code> of that map?</p>",
+        "id": 185319808,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670124
+    },
+    {
+        "content": "<p>well, it would have to do the replacements</p>",
+        "id": 185319859,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578670167
+    },
+    {
+        "content": "<p>because after it's done, the <code>ast::Type</code> keys of that map might not actually exist in the new syntax tree anymore</p>",
+        "id": 185319883,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578670190
+    },
+    {
+        "content": "<p>But I think <code>qual</code> can <em>also</em> return just a <code>Map&lt;SyntaxNode, SyntaxNode&gt;</code>? And the separate layer would then \\cup those two maps?</p>",
+        "id": 185319986,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670243
+    },
+    {
+        "content": "<p>kind of, but that's where the problem comes in that the type args are a child node of the path</p>",
+        "id": 185320021,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578670272
+    },
+    {
+        "content": "<p>FUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU</p>",
+        "id": 185320031,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670286
+    },
+    {
+        "content": "<p>yeah</p>",
+        "id": 185320043,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578670293
+    },
+    {
+        "content": "<p>Hm....</p>\n<p>It seems overall that the core problem is still that in-place syntax modification just erases essential info</p>",
+        "id": 185320223,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670421
+    },
+    {
+        "content": "<p>So, some sort of a more diff-oriented approach seems more approriate..</p>",
+        "id": 185320288,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670444
+    },
+    {
+        "content": "<p>Perhapse we need</p>\n<div class=\"codehilite\"><pre><span></span>type AstSubst = Box&lt;Fn(&amp;SyntaxNode) -&gt; Option&lt;SyntaxNode&gt;&gt;;\n</pre></div>\n\n\n<p>and make <code>qual</code> accept that?</p>",
+        "id": 185320317,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670475
+    },
+    {
+        "content": "<p>Like, the rewsult of <code>qual</code> is actually a similar <code>AstSubst</code>, and looks like one can compose thouse things</p>",
+        "id": 185320362,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670510
+    },
+    {
+        "content": "<p>It just has to be the right solution, because then it will be math :)</p>",
+        "id": 185320381,
+        "sender_full_name": "matklad",
+        "timestamp": 1578670529
+    },
+    {
+        "content": "<p>hmmm</p>",
+        "id": 185320461,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578670573
+    },
+    {
+        "content": "<p>It's also intresing that IntelliJ just adds imoprts, instead of qualifing parhs</p>",
+        "id": 185321381,
+        "sender_full_name": "matklad",
+        "timestamp": 1578671161
+    },
+    {
+        "content": "<p>But it does handle both imports and subts correctly (and that was implemented after I've left :D )</p>",
+        "id": 185321455,
+        "sender_full_name": "matklad",
+        "timestamp": 1578671195
+    },
+    {
+        "content": "<p>would make things easier, but I think in edge cases we would have to qualify paths anyway to avoid collisions, and I personally like giving the choice of importing things afterwards...</p>",
+        "id": 185321479,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578671224
+    },
+    {
+        "content": "<p>This is actually what IntelliJ does: <a href=\"https://github.com/intellij-rust/intellij-rust/blob/d23e13f8a7a9424795e9072f9806e2cbbb997989/src/main/kotlin/org/rust/ide/refactoring/implementMembers/impl.kt#L109\" target=\"_blank\" title=\"https://github.com/intellij-rust/intellij-rust/blob/d23e13f8a7a9424795e9072f9806e2cbbb997989/src/main/kotlin/org/rust/ide/refactoring/implementMembers/impl.kt#L109\">https://github.com/intellij-rust/intellij-rust/blob/d23e13f8a7a9424795e9072f9806e2cbbb997989/src/main/kotlin/org/rust/ide/refactoring/implementMembers/impl.kt#L109</a></p>",
+        "id": 185321652,
+        "sender_full_name": "matklad",
+        "timestamp": 1578671338
+    },
+    {
+        "content": "<p>Hm, if I am reading this correctly, what IntelliJ does is that it <em>renders</em> types</p>",
+        "id": 185321867,
+        "sender_full_name": "matklad",
+        "timestamp": 1578671495
+    },
+    {
+        "content": "<p><a href=\"https://github.com/intellij-rust/intellij-rust/blob/55584ccf5159c0369a690f99aa15a309a681049b/src/main/kotlin/org/rust/lang/core/psi/RsPsiFactory.kt#L501-L502\" target=\"_blank\" title=\"https://github.com/intellij-rust/intellij-rust/blob/55584ccf5159c0369a690f99aa15a309a681049b/src/main/kotlin/org/rust/lang/core/psi/RsPsiFactory.kt#L501-L502\">https://github.com/intellij-rust/intellij-rust/blob/55584ccf5159c0369a690f99aa15a309a681049b/src/main/kotlin/org/rust/lang/core/psi/RsPsiFactory.kt#L501-L502</a></p>",
+        "id": 185321936,
+        "sender_full_name": "matklad",
+        "timestamp": 1578671530
+    },
+    {
+        "content": "<p><code>RsTypeReference</code> is AST, but <code>type</code>, I think, is <code>Ty</code></p>",
+        "id": 185321973,
+        "sender_full_name": "matklad",
+        "timestamp": 1578671557
+    },
+    {
+        "content": "<p>And the rendering is here: <a href=\"https://github.com/intellij-rust/intellij-rust/blob/a92d97755f5458a2ea8ceac10407acaf15595cb9/src/main/kotlin/org/rust/ide/presentation/TypeRendering.kt#L39\" target=\"_blank\" title=\"https://github.com/intellij-rust/intellij-rust/blob/a92d97755f5458a2ea8ceac10407acaf15595cb9/src/main/kotlin/org/rust/ide/presentation/TypeRendering.kt#L39\">https://github.com/intellij-rust/intellij-rust/blob/a92d97755f5458a2ea8ceac10407acaf15595cb9/src/main/kotlin/org/rust/ide/presentation/TypeRendering.kt#L39</a></p>",
+        "id": 185322036,
+        "sender_full_name": "matklad",
+        "timestamp": 1578671604
+    },
+    {
+        "content": "<p>This actually seems like a nice middle ground: we render types, but copy-paste all the rest</p>",
+        "id": 185322262,
+        "sender_full_name": "matklad",
+        "timestamp": 1578671715
+    },
+    {
+        "content": "<p>Hm... I've got the <code>AstSubst</code> approach working now <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 185324632,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578673113
+    },
+    {
+        "content": "<p>I think it's actually quite nice, the question would be whether the additional complexity pays off</p>",
+        "id": 185324720,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578673168
+    },
+    {
+        "content": "<p>We can always rewrite later :D</p>",
+        "id": 185324903,
+        "sender_full_name": "matklad",
+        "timestamp": 1578673281
+    },
+    {
+        "content": "<p>see <a href=\"https://github.com/rust-analyzer/rust-analyzer/pull/2727/commits/0d16dbb340aae3ffccdc80132b61e1c8ced89de4\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/pull/2727/commits/0d16dbb340aae3ffccdc80132b61e1c8ced89de4\">https://github.com/rust-analyzer/rust-analyzer/pull/2727/commits/0d16dbb340aae3ffccdc80132b61e1c8ced89de4</a> for the result</p>",
+        "id": 185333672,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578678814
+    }
+]

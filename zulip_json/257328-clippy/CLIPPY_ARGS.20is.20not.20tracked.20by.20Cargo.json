@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>It seems a <a href=\"https://github.com/rust-lang/rust-clippy/issues#allowingdenying-lints\">known issue</a> that changing the arguments after <code>--</code> does not make Cargo re-check the crate:</p>\n<blockquote>\n<p>Note that if you've run clippy before, this may only take effect after you've modified a file or ran <code>cargo clean</code>.</p>\n</blockquote>\n<div class=\"codehilite\" data-code-language=\"Bash Session\"><pre><span></span><code><span class=\"gp\">$</span> cargo new --vcs none clippy-args --lib\n<span class=\"go\">     Created library `clippy-args` package</span>\n<span class=\"gp\">$</span> <span class=\"nb\">cd</span> clippy-args\n<span class=\"gp\">$</span> cargo clippy --tests -- -Aclippy::eq_op\n<span class=\"go\">    Checking clippy-args v0.1.0</span>\n<span class=\"go\">    Finished dev [unoptimized + debuginfo] target(s) in 0.59s</span>\n<span class=\"gp\">$</span> cargo clippy --tests -- -Fclippy::eq_op\n<span class=\"go\">    Finished dev [unoptimized + debuginfo] target(s) in 0.00s</span>\n</code></pre></div>\n<p>After some digging, I found that the arguments after <code>--</code> are passed by <code>CLIPPY_ARGS</code> environment variable, but Clippy does not do anything to make Cargo aware of that:</p>\n<div class=\"codehilite\" data-code-language=\"Bash Session\"><pre><span></span><code><span class=\"gp\">$</span> rg -F CLIPPY_ARGS\n<span class=\"go\">src/driver.rs</span>\n<span class=\"go\">280:        let clippy_args = env::var(\"CLIPPY_ARGS\")</span>\n\n<span class=\"go\">src/main.rs</span>\n<span class=\"go\">151:            .env(\"CLIPPY_ARGS\", clippy_args)</span>\n</code></pre></div>\n<p><a href=\"https://github.com/rust-lang/rust-clippy/issues/6441\">clippy#6441</a> attempted to fix this, but it then got <a href=\"https://github.com/rust-lang/rust-clippy/pull/6498\">reverted</a>. (I can't find the reason of reverting but <a href=\"https://github.com/rust-lang/rust-clippy/issues/6441\">clippy#6441</a> seems unpractical anyway -- <code>RUSTFLAGS</code> applies to <em>all dependencies</em> and <a href=\"https://github.com/rust-lang/cargo/issues/4423\">has no effect to procedural macro crates and build scripts when cross checking</a>. )</p>\n<p>Currently there's no GitHub issue tracking this. Is there any blocker for fixing this or it's just low-priority? I can imagine Clippy doing something that <code>env!(\"CLIPPY_ARGS\")</code> does to inform Cargo to track the environment variable.</p>",
+        "id": 228583111,
+        "sender_full_name": "hyd-dev",
+        "timestamp": 1614774744
+    },
+    {
+        "content": "<p>There was a problem with this, but I can't remember what it was. <span class=\"user-mention\" data-user-id=\"279272\">@Eduardo Broto</span> do you remember why we reverted this?</p>\n<p>The reason this wasn't fixed yet is that no one has put time into it.</p>",
+        "id": 228584508,
+        "sender_full_name": "flip1995",
+        "timestamp": 1614775418
+    },
+    {
+        "content": "<blockquote>\n<p>The reason this wasn't fixed yet is that no one has put time into it.</p>\n</blockquote>\n<p>Thanks for your response! I understand that as long as no one (at least I don't) specifies or changes the arguments after <code>--</code> <em>very often</em>, this is not very important, so probably not high-priority.</p>",
+        "id": 228585158,
+        "sender_full_name": "hyd-dev",
+        "timestamp": 1614775739
+    },
+    {
+        "content": "<p>The reason it was reverted is because it was a bad approach as noted above. Changing RUSTFLAGS was rebuilding all the crates all the time.</p>\n<p>IIRC the problem is that cargo does not notice the new flags, and there's no good way currently to change this. AFAIU this would require a change in cargo.</p>",
+        "id": 228589160,
+        "sender_full_name": "Eduardo Broto",
+        "timestamp": 1614777564
+    },
+    {
+        "content": "<p>I think this works:</p>\n<div class=\"codehilite\" data-code-language=\"Diff\"><pre><span></span><code><span class=\"gh\">diff --git a/src/driver.rs b/src/driver.rs</span>\n<span class=\"gh\">index d5143e143..d2d35632e 100644</span>\n<span class=\"gd\">--- a/src/driver.rs</span>\n<span class=\"gi\">+++ b/src/driver.rs</span>\n<span class=\"gu\">@@ -11,8 +11,10 @@</span>\n extern crate rustc_driver;\n extern crate rustc_errors;\n extern crate rustc_interface;\n<span class=\"gi\">+extern crate rustc_span;</span>\n\n use rustc_interface::interface;\n<span class=\"gi\">+use rustc_span::symbol::Symbol;</span>\n use rustc_tools_util::VersionInfo;\n\n use std::borrow::Cow;\n<span class=\"gu\">@@ -73,6 +75,11 @@ impl rustc_driver::Callbacks for ClippyCallbacks {</span>\n                 (previous)(sess, lint_store);\n             }\n\n<span class=\"gi\">+            sess.parse_sess.env_depinfo.borrow_mut().insert((</span>\n<span class=\"gi\">+                Symbol::intern(\"CLIPPY_ARGS\"),</span>\n<span class=\"gi\">+                env::var(\"CLIPPY_ARGS\").ok().map(|args| Symbol::intern(&amp;args)),</span>\n<span class=\"gi\">+            ));</span>\n<span class=\"gi\">+</span>\n             let conf = clippy_lints::read_conf(&amp;[], &amp;sess);\n             clippy_lints::register_plugins(&amp;mut lint_store, &amp;sess, &amp;conf);\n             clippy_lints::register_pre_expansion_lints(&amp;mut lint_store);\n</code></pre></div>\n<p>At least the output of <code>--emit=dep-info</code> contains <code>CLIPPY_ARGS</code>:</p>\n<div class=\"codehilite\" data-code-language=\"Bash Session\"><pre><span></span><code><span class=\"gp\">$</span> cargo run --bin clippy-driver --release -- --emit<span class=\"o\">=</span>dep-info /dev/null -o /dev/stdout\n<span class=\"go\">    Finished release [optimized] target(s) in 0.04s</span>\n<span class=\"go\">     Running `target/release/clippy-driver --emit=dep-info /dev/null -o /dev/stdout`</span>\n<span class=\"go\">/dev/stdout: /dev/null</span>\n\n<span class=\"go\">/dev/null:</span>\n\n<span class=\"gp\">#</span> env-dep:CLIPPY_ARGS\n<span class=\"gp\">$</span> <span class=\"nv\">CLIPPY_ARGS</span><span class=\"o\">=</span><span class=\"s1\">'-Aclippy::all'</span> cargo run --bin clippy-driver --release -- --emit<span class=\"o\">=</span>dep-info /dev/null -o /dev/stdout\n<span class=\"go\">    Finished release [optimized] target(s) in 0.04s</span>\n<span class=\"go\">     Running `target/release/clippy-driver --emit=dep-info /dev/null -o /dev/stdout`</span>\n<span class=\"go\">/dev/stdout: /dev/null</span>\n\n<span class=\"go\">/dev/null:</span>\n\n<span class=\"gp\">#</span> env-dep:CLIPPY_ARGS<span class=\"o\">=</span>-Aclippy::all\n</code></pre></div>",
+        "id": 228599088,
+        "sender_full_name": "hyd-dev",
+        "timestamp": 1614781281
+    },
+    {
+        "content": "<p>Oh that is super helpful</p>",
+        "id": 228603221,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614782671
+    },
+    {
+        "content": "<p>I can finally fix the issues with RUSTDOC_LOG not rebuilding lol</p>",
+        "id": 228603270,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614782692
+    },
+    {
+        "content": "<p>hmm, I tried to do this automatically, but I don't have a <code>ParseSess</code> available early enough:</p>\n<div class=\"codehilite\"><pre><span></span><code>error[E0061]: this function takes 1 argument but 0 arguments were supplied\n    --&gt; compiler/rustc_driver/src/lib.rs:1316:5\n     |\n1316 |     init_rustc_env_logger();\n     |     ^^^^^^^^^^^^^^^^^^^^^-- supplied 0 arguments\n     |     |\n     |     expected 1 argument\n</code></pre></div>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span>-&gt; <span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">start_time</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Instant</span>::<span class=\"n\">now</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">start_rss</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">get_resident_set_size</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">init_rustc_env_logger</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// ...</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 228616067,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614787012
+    },
+    {
+        "content": "<p>Clippy doesn't have <code>ParseSess</code> when using <code>CLIPPY_ARGS</code> too. In the patch I posted, I access <code>ParseSess</code> in the <code>Config::register_lints</code>callback (probably not the best place, but I can't find a better one), <em>after</em> <code>CLIPPY_ARGS</code> is used.</p>",
+        "id": 228618485,
+        "sender_full_name": "hyd-dev",
+        "timestamp": 1614787803
+    },
+    {
+        "content": "<p>my current idea is to make the env variable part of <code>options::Config</code> and register it automatically when the session is constructed</p>",
+        "id": 228619405,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614788096
+    },
+    {
+        "content": "<p>that doesn't help CLIPPY_ARGS but it sounds like you have that working anyway</p>",
+        "id": 228619443,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614788108
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/cargo/issues/8374#issuecomment-789861761\">https://github.com/rust-lang/cargo/issues/8374#issuecomment-789861761</a></p>",
+        "id": 228624250,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1614789740
+    },
+    {
+        "content": "<p>/me submitted <a href=\"https://github.com/rust-lang/rust-clippy/issues/6834\">clippy#6834</a>.</p>",
+        "id": 228646362,
+        "sender_full_name": "hyd-dev",
+        "timestamp": 1614797635
+    }
+]

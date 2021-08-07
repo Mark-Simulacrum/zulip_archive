@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> not to derail the <code>-&gt;</code> thread but re: your note that you'd like to make <code>inbounds</code> GEPs a rustc internal optimization rather than an inherent part of field offsets (and presumably more generally <code>offset</code>).</p>\n<p>I also don't care for the vague and apparently useless \"must be in bounds of an object\" part, but <code>inbounds</code> unfortunately ties that together with additonal, rather different, quite useful (and not as onerous for unsafe code) properties: that the address calculation doesn't wrap around and that the offset computation (excepting the addition to the base pointer) doesn't wrap in <em>signed</em> arithmetic. I am already skeptical about how practical it is to teach LLVM (let alone rustc) to figure out the \"in bounds of an allocation\" aspect from <code>derefenceable</code> attributes on related pointers, and the non-wrapping properties require even more reasoning and can also depend on the concrete base address. And unlike the \"in bounds of an allocation\" property, the absence of wrapping does enables a substantial number of optimizations which I'd rather not make dependent on fragile analyses that have work against the language semantics.</p>\n<p>So my long-term hope is to rather separate these aspects in LLVM IR and then free Rust users from having to worry about the \"in bounds\" part but keep the non-wrapping aspects. Which, of course, means keeping <code>-&gt;</code> unsafe, though with fewer proof obligations (and in the case of field offsets, the compiler gives substantial assistance -- creating a type that would lead to field offsets <code>&gt; isize::MAX</code> is a compile time error).</p>",
+        "id": 165022422,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1557179679
+    },
+    {
+        "content": "<p>Hm... I basically had this thought when people said on llvm-dev that GEPi vs GEP does not have a huge amount of impact. But I guess we'd have to collect some data.</p>",
+        "id": 165053018,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1557218480
+    },
+    {
+        "content": "<blockquote>\n<p>I am already skeptical about how practical it is to teach LLVM (let alone rustc) to figure out the \"in bounds of an allocation\" aspect from derefenceable attributes on related pointers, </p>\n</blockquote>\n<p>I think it'd be rather easy for rustc to determine when it can add <code>inbounds</code> -- if we are working on a reference, we can; if we are working on a raw ptr, we cannot.</p>",
+        "id": 165053104,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1557218543
+    },
+    {
+        "content": "<p>The only complication I see there is around accessing the last field of an unsized struct</p>",
+        "id": 165053113,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1557218561
+    },
+    {
+        "content": "<p>In the short term rustc could simply omit the <code>inbounds</code> on that last field. That would still provide safety for the other fields.</p>",
+        "id": 165072779,
+        "sender_full_name": "Tom Phinney",
+        "timestamp": 1557237413
+    },
+    {
+        "content": "<p>Yes, we should measure the impact, but doing this properly is difficult because absence of wrapping often affects rather situational and low-level optimizations which can nevertheless become important in hotspots.</p>\n<p>For example, by a happy coincidence (seeing <a href=\"https://llvm.org/devmtg/2019-04/slides/TechTalk-Northover-A_tale_of_two_ABIs_ILP32_on_AArch64.pdf\" target=\"_blank\" title=\"https://llvm.org/devmtg/2019-04/slides/TechTalk-Northover-A_tale_of_two_ABIs_ILP32_on_AArch64.pdf\">this talk</a>) I can point you at the arm64_32 target where GEPs without <code>inbounds</code> result in much worse machine code (have to mask off high bits after every GEP) than those with <code>inbounds</code>. You couldn't see that while testing on x86 or most other targets, but it's going to be a real pain if someone ever seriously targets this kind of platform with Rust.</p>\n<p>Another major use of \"no wrapping\" I'm aware of is in the analysis of loops whose induction variable is a pointer (see <a href=\"https://github.com/llvm/llvm-project/blob/71e8c6f20fe4c5d9cfd6235c360d602f0d29a6ab/llvm/lib/Analysis/LoopAccessAnalysis.cpp#L1023-L1029\" target=\"_blank\" title=\"https://github.com/llvm/llvm-project/blob/71e8c6f20fe4c5d9cfd6235c360d602f0d29a6ab/llvm/lib/Analysis/LoopAccessAnalysis.cpp#L1023-L1029\">here</a> for example). I'm not sure if you want to change anything about <code>ptr.offset(n)</code> or just built-in field accesses (changing <code>offset</code> is required for fixing the slicing problem that led to that llvm-dev thread), but if <code>offset</code> also loses the <code>inbounds</code>, then e.g. automatic vectorization of loops based on slice iterators could become more fragile.</p>",
+        "id": 165080003,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1557241827
+    },
+    {
+        "content": "<p>note that I am only suggesting this for offset-on-raw-ptr, not for all offsets. but I get your point.</p>",
+        "id": 165108425,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1557261239
+    },
+    {
+        "content": "<p>\"nowrap\" instead of \"inbounds\" would be nice if we used it for <em>all</em> projections (answering questions such as <a href=\"https://github.com/rust-lang/rust/issues/54857\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/54857\">https://github.com/rust-lang/rust/issues/54857</a>). but when it comes to raw ptr projections, as far as spec and Miri complexity goes, both are equally annoying (as on, both need a special case and put extra burden on unsafe code authors in code that already is very hard to get right)</p>",
+        "id": 165108577,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1557261318
+    },
+    {
+        "content": "<blockquote>\n<p>that the offset computation (excepting the addition to the base pointer) doesn't wrap in signed arithmetic</p>\n</blockquote>\n<p>just to be sure I remember correctly, this really was with the base being interpreted unsigned but the offset signed, right?</p>",
+        "id": 165156806,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1557317332
+    },
+    {
+        "content": "<p>Yes. This is the part that actually makes allocations larger than isize::MAX bytes problematic.</p>",
+        "id": 165158114,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1557318601
+    }
+]

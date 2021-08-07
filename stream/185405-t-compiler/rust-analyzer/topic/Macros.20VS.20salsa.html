@@ -1,0 +1,410 @@
+<html>
+<head><meta charset="utf-8"><title>Macros VS salsa · t-compiler/rust-analyzer · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/index.html">t-compiler/rust-analyzer</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html">Macros VS salsa</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="161433043"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161433043" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161433043">(Mar 22 2019 at 09:36)</a>:</h4>
+<p>I've rewritten name resolution to account for macros, and there's this curious bit of code there:</p>
+<p><a href="https://github.com/rust-analyzer/rust-analyzer/blob/2a6544f906818263e2791bc4cdf4fcbdf7260ab9/crates/ra_hir/src/nameres/collector.rs#L343-L350" target="_blank" title="https://github.com/rust-analyzer/rust-analyzer/blob/2a6544f906818263e2791bc4cdf4fcbdf7260ab9/crates/ra_hir/src/nameres/collector.rs#L343-L350">https://github.com/rust-analyzer/rust-analyzer/blob/2a6544f906818263e2791bc4cdf4fcbdf7260ab9/crates/ra_hir/src/nameres/collector.rs#L343-L350</a></p>
+<p>I wonder if we can get some help from salsa to make this better. </p>
+<p>The problem is hard to explain, but the components are as follows:</p>
+<ul>
+<li>we don't want to eagarly expand each and every macro up-front, we need an ability to "expand this particular macro"  "later"</li>
+<li>so, we need a query <code>expand(MacroCall) -&gt; SyntaxTree</code>, where <code>MacroCall</code> is a particular instance of <code>foo!()</code> syntax somewhere, and <code>SyntaxTree</code> is what this call expands to (which depends on what does the name<code> foo</code> means in the context of macro call)</li>
+<li>we need to exapand at least <em>some</em> of the macros during nameresolution</li>
+</ul>
+<p>Because nameres is just a single query, we can't call <code>expand</code> query: <code>expand</code> calls back into name resolution to figure out the definition of macro.  So, during <code>nameres</code> we basically call <code>expand</code> query function directly, bypassing salsa. </p>
+<p>This is bad for two reasons:</p>
+<ul>
+<li>we must manually make sure that query and no-query versions give the same result (which kinda defeats salsa's "correct by construction" memoization)</li>
+<li>we can't play tricks like "if the macro expands to the same set of items (even if their bodies are different), we can reuse old name resolution"</li>
+</ul>
+<p>I wonder if we can do better here...</p>
+
+
+
+<a name="161446126"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161446126" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161446126">(Mar 22 2019 at 13:12)</a>:</h4>
+<p>the comment there says "we can't identify macro_call without adding the whole state of name resolution as a parameter to the query"</p>
+
+
+
+<a name="161446170"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161446170" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161446170">(Mar 22 2019 at 13:13)</a>:</h4>
+<p>would some <del>subset</del> substructure of the name resolution state suffice? Would identifying that subset and factoring it out help?</p>
+
+
+
+<a name="161446587"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161446587" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161446587">(Mar 22 2019 at 13:19)</a>:</h4>
+<p>So, if we literally add "the set of defined macros" to the query, than we'll need to do a lot of hashing/comparisions to find the key in the hash map. I think even if we compress this, it's still would be a huge value, not really fit for being a salsa's key.</p>
+
+
+
+<a name="161446695"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161446695" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161446695">(Mar 22 2019 at 13:20)</a>:</h4>
+<p>It would be interesting to somehow to try to add this state implicitly. For example, instead of passing the literal set of scopes, we can pass the integer stage of name resolution (that idea with explicit fixed point)</p>
+
+
+
+<a name="161448231"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161448231" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161448231">(Mar 22 2019 at 13:41)</a>:</h4>
+<p>hmm. its huge because it wouldn't be just the macros names (or unique identifiers), but also their definitions?</p>
+
+
+
+<a name="161448245"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161448245" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161448245">(Mar 22 2019 at 13:41)</a>:</h4>
+<p>or are you saying that even just a set of unique id's is not an appropriate salsa key?</p>
+
+
+
+<a name="161448343"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161448343" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161448343">(Mar 22 2019 at 13:43)</a>:</h4>
+<p>it wouldn't be only macros, because macro might be called with a path <code>log::error!()</code>.  Here, the state should include enough info to understand what <code>log</code> is</p>
+
+
+
+<a name="161448540"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161448540" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161448540">(Mar 22 2019 at 13:45)</a>:</h4>
+<p>If we do include state, the other problem would be that the code outside of name resolution would probaly want to use the final state anyway.</p>
+<p>That is, code inside nameres calls:</p>
+<p>expand_macro(currest_scopes, foo)</p>
+<p>Code outside of nameres calls:</p>
+<div class="codehilite"><pre><span></span>expand_macro(final_scopes, foo)
+</pre></div>
+
+
+<p>So, these are two queries, and we must ensure manually that they give the same result (which probably means that <code>current_scopes</code> is subset of <code>final_scopes</code>).</p>
+
+
+
+<a name="161448834"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161448834" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161448834">(Mar 22 2019 at 13:48)</a>:</h4>
+<p>I think some kind of dataflow or fixpoint computation support from salsa will be necessary to properly solve this</p>
+
+
+
+<a name="161448895"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161448895" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161448895">(Mar 22 2019 at 13:49)</a>:</h4>
+<p>indeed, ping <span class="user-mention" data-user-id="116009">@nikomatsakis</span> :)</p>
+
+
+
+<a name="161457824"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457824" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457824">(Mar 22 2019 at 15:30)</a>:</h4>
+<p>So, the way I've been expecting to solve this in the case of trait resolution</p>
+
+
+
+<a name="161457829"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457829" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457829">(Mar 22 2019 at 15:30)</a>:</h4>
+<p>Is to pull that sort of "dataflow/fixed-point" state out into a separate mechanism</p>
+
+
+
+<a name="161457835"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457835" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457835">(Mar 22 2019 at 15:30)</a>:</h4>
+<p>Specifically, I was intending to have a volatile query</p>
+
+
+
+<a name="161457838"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457838" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457838">(Mar 22 2019 at 15:30)</a>:</h4>
+<p>Which creates the state</p>
+
+
+
+<a name="161457849"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457849" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457849">(Mar 22 2019 at 15:31)</a>:</h4>
+<p>and then other queries that reach into that state to get their result</p>
+
+
+
+<a name="161457862"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457862" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457862">(Mar 22 2019 at 15:31)</a>:</h4>
+<p>therefore, in a new revision, all of those dependent queries will be invalidated, and the state will be recomputed from scratch</p>
+
+
+
+<a name="161457877"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457877" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457877">(Mar 22 2019 at 15:31)</a>:</h4>
+<p>Basically, this doesn't fit salsa's "tree-based" model</p>
+
+
+
+<a name="161457888"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457888" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457888">(Mar 22 2019 at 15:31)</a>:</h4>
+<p>I do think it might be plausible to extend salsa to accommodate richer cases, but I feel like I want to have a few examples</p>
+
+
+
+<a name="161457891"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457891" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457891">(Mar 22 2019 at 15:31)</a>:</h4>
+<p>before we start to generalize</p>
+
+
+
+<a name="161457954"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457954" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457954">(Mar 22 2019 at 15:32)</a>:</h4>
+<p>(<span class="user-mention" data-user-id="119009">@eddyb</span> has often mentioned building on the way that GLL handles cycles here to do a better job; I confess I don't really understand what they're proposing yet, but I would like to)</p>
+
+
+
+<a name="161457983"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161457983" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161457983">(Mar 22 2019 at 15:32)</a>:</h4>
+<p>That said, I remain a bit nervous -- e.g., within chalk, the way to handle cycles that occur in trait resolution <em>depends on the trait</em></p>
+
+
+
+<a name="161458011"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161458011" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161458011">(Mar 22 2019 at 15:33)</a>:</h4>
+<p>i.e., I  don't know that there is a "one size fits all" answer here</p>
+
+
+
+<a name="161458034"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161458034" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161458034">(Mar 22 2019 at 15:33)</a>:</h4>
+<p>and maybe that's fine, but I'd like to have a better picture of the "menu"</p>
+
+
+
+<a name="161458058"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161458058" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161458058">(Mar 22 2019 at 15:33)</a>:</h4>
+<p>so maybe <span class="user-mention" data-user-id="133169">@matklad</span> we should step back and talk about -- ignoring salsa for a second -- can we build up a manually incremental state that salsa can query into, but where we can reason about the correctness?</p>
+
+
+
+<a name="161458078"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161458078" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161458078">(Mar 22 2019 at 15:34)</a>:</h4>
+<p>This is exactly the work I imagined doing as part of the name resolution crate, and I have some thoughts about it, but it'd be helpful to have a bit of an abstract specification for how things <em>should</em> work</p>
+
+
+
+<a name="161458478"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161458478" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161458478">(Mar 22 2019 at 15:38)</a>:</h4>
+<p>(I definitely <em>don't</em> think that expanding salsa's keys with the state -- which basically memoizes all the steps towards convergence -- feels right.)</p>
+
+
+
+<a name="161458525"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161458525" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161458525">(Mar 22 2019 at 15:39)</a>:</h4>
+<p>Maybe <span class="user-mention" data-user-id="133169">@matklad</span> it'd be helpful to schedule some time to dig into this in more depth? Feels like a good topic for a zoom call (recorded, naturally ;).</p>
+
+
+
+<a name="161469033"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161469033" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161469033">(Mar 22 2019 at 17:49)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> yeah, a zoom call seems like a good idea. </p>
+<p>My current thoughts is that this is not necessary about fixed-point iteration queries per se.  The problem here is that you can't assign IDs based on the current computation. I have a rough idea about a toy example which shows this problem but which doesn't involve fixed point queries. This toy example seems to be  fixed by making queries more fine-grained though, and fixed-point is why we can't apply this strategy in the resolution case. </p>
+<p>I've been thinking about "monotone queries" to handle this. Let's say that we have a big query Q which computes a map, with the constraint that it never overwrites entries in the map. As Q is being computed, it calls some sub queries. I think it could be sound to allow these sub queries to peek into the in-progress map. </p>
+<p>So, let's say Q calls into X, which uses info from partially constructed Q and an input t. We call Q in the current state, which computes the full map, invoking X in the process. X observes partial mapping. Now let's change the input t. I think we can recompute <code>X</code> and, if it returns the same result, we can avoid recomputing Q. Note that X naturally will have access to the full result of Q this second time, but, due to mapping being monotonic, it should be OK.</p>
+<p>Or should we add "timestamps" to values in the map as well? Well, this needs brainstorming with a whiteboard, but I think I explained the general idea :) : we allow intermeidiate queries to peek into the result of in-progress queries and hopefully define some monotonicity conditions under which this is actually sound</p>
+
+
+
+<a name="161469284"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161469284" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161469284">(Mar 22 2019 at 17:52)</a>:</h4>
+<p>In terms of macro expansion, the case I am thinking this this: We have a lazy-static call:</p>
+<div class="codehilite"><pre><span></span>lazy_static! {
+    static ref HASHMAP: HashMap&lt;u32, &amp;&#39;static str&gt; = {
+        let mut m = HashMap::new();
+        m.insert(0, &quot;foo&quot;);
+//        m.insert(1, &quot;bar&quot;);
+        m.insert(2, &quot;baz&quot;);
+        m
+    };
+}
+</pre></div>
+
+
+<p>which we exapnd during name resolution. Than, the user uncomments the line. Instead of re-runing the whole of name resolution (which is done by the current impl), we only re-run lazy_static re-expansion. We notice that it returns the same "result": the actual expansion will be different, of course, but we project only the set of top-level names out of it, and that is still just <code>HASHMAP</code>.</p>
+
+
+
+<a name="161469363"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161469363" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161469363">(Mar 22 2019 at 17:53)</a>:</h4>
+<p>So we say that the result of name-resolution are the same</p>
+
+
+
+<a name="161478599"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161478599" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161478599">(Mar 22 2019 at 19:57)</a>:</h4>
+<p><span class="user-mention" data-user-id="133169">@matklad</span> ok I will try to read this and comment shortly, but let's also schedule some sync time to talk it over. Here is a <a href="https://doodle.com/poll/y9s3s9cq5urg9gav" target="_blank" title="https://doodle.com/poll/y9s3s9cq5urg9gav">doodle poll</a> with some options I can do.</p>
+
+
+
+<a name="161486648"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161486648" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161486648">(Mar 22 2019 at 21:43)</a>:</h4>
+<p>OK, I'm going to schedule 15:00 Boston time -- I'll add to the rustc calendar.</p>
+
+
+
+<a name="161486742"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161486742" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161486742">(Mar 22 2019 at 21:45)</a>:</h4>
+<p><a href="https://calendar.google.com/event?action=TEMPLATE&amp;tmeid=MXY1bHJucjVmaDViaTdmZTdudm9oZTFiMnIgNnU1cnJ0Y2U2bHJ0djA3cGZpM2RhbWdqdXNAZw&amp;tmsrc=6u5rrtce6lrtv07pfi3damgjus%40group.calendar.google.com" target="_blank" title="https://calendar.google.com/event?action=TEMPLATE&amp;tmeid=MXY1bHJucjVmaDViaTdmZTdudm9oZTFiMnIgNnU1cnJ0Y2U2bHJ0djA3cGZpM2RhbWdqdXNAZw&amp;tmsrc=6u5rrtce6lrtv07pfi3damgjus%40group.calendar.google.com">Calendar event is here, with a Zoom link</a></p>
+
+
+
+<a name="161671824"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161671824" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> detrumi <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161671824">(Mar 25 2019 at 18:17)</a>:</h4>
+<p>^ That's in 45 minutes</p>
+
+
+
+<a name="161675413"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675413" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675413">(Mar 25 2019 at 18:51)</a>:</h4>
+<p>Just to check -- do we want to chat over Zoom over Zulip? I'm having trouble finding a closed room to do video conf at this co-working space right now (all in use) but that's ok</p>
+
+
+
+<a name="161675680"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675680" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675680">(Mar 25 2019 at 18:53)</a>:</h4>
+<p>I <em>think</em> audio would work better for brainstorming, but no strong preferences</p>
+
+
+
+<a name="161675758"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675758" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675758">(Mar 25 2019 at 18:54)</a>:</h4>
+<p>actually, audio would be slightly inconvenient for me as well</p>
+
+
+
+<a name="161675767"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675767" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675767">(Mar 25 2019 at 18:54)</a>:</h4>
+<p>so, no preferences</p>
+
+
+
+<a name="161675835"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675835" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675835">(Mar 25 2019 at 18:55)</a>:</h4>
+<p>I'm wondering a bit what our agenda is</p>
+
+
+
+<a name="161675852"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675852" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675852">(Mar 25 2019 at 18:55)</a>:</h4>
+<p>seems like we should start by talking through a bit what you think you want?</p>
+
+
+
+<a name="161675857"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675857" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675857">(Mar 25 2019 at 18:55)</a>:</h4>
+<p>let's try zoom</p>
+
+
+
+<a name="161675870"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675870" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675870">(Mar 25 2019 at 18:55)</a>:</h4>
+<p>I also have a sense it may be slightly better for this purpose</p>
+
+
+
+<a name="161675881"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675881" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675881">(Mar 25 2019 at 18:55)</a>:</h4>
+<p>yeah, I think we should start with goals and assumptions</p>
+
+
+
+<a name="161675894"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675894" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675894">(Mar 25 2019 at 18:55)</a>:</h4>
+<p>(although a lot of times I am surprised by how good zulip can be)</p>
+
+
+
+<a name="161675901"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161675901" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161675901">(Mar 25 2019 at 18:55)</a>:</h4>
+<p>so maybe i'm wrong :)</p>
+
+
+
+<a name="161676139"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161676139" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161676139">(Mar 25 2019 at 18:58)</a>:</h4>
+<p>(regardless, I say we stick with zoom since that's what the calendar invite says...)</p>
+
+
+
+<a name="161676282"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161676282" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161676282">(Mar 25 2019 at 18:59)</a>:</h4>
+<p>I'll try to take part but be partly AFK</p>
+
+
+
+<a name="161676402"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161676402" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> detrumi <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161676402">(Mar 25 2019 at 19:00)</a>:</h4>
+<p>I'm joining, if i can get in the zoom meeting</p>
+
+
+
+<a name="161676449"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161676449" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161676449">(Mar 25 2019 at 19:00)</a>:</h4>
+<p><a href="https://paper.dropbox.com/doc/Name-Resolution-Salsa-Brainstorming--AZ_DB~nTuYIkXcvR_gHbwB~sAg-zsJifAKFqe91sON7wsCRE" target="_blank" title="https://paper.dropbox.com/doc/Name-Resolution-Salsa-Brainstorming--AZ_DB~nTuYIkXcvR_gHbwB~sAg-zsJifAKFqe91sON7wsCRE">Paper doc</a></p>
+
+
+
+<a name="161679639"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161679639" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161679639">(Mar 25 2019 at 19:35)</a>:</h4>
+<p>Awesome, thanks a lot <span class="user-mention" data-user-id="116009">@nikomatsakis</span> ! I was banging my head against this for several days, and we seem to come to the solution in 30-ish minutes :) Hope it actually works <span aria-label="fingers crossed" class="emoji emoji-1f91e" role="img" title="fingers crossed">:fingers_crossed:</span></p>
+
+
+
+<a name="161679682"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161679682" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> detrumi <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161679682">(Mar 25 2019 at 19:35)</a>:</h4>
+<p>There can only be so many walls to bang your head against <span aria-label="slight smile" class="emoji emoji-1f642" role="img" title="slight smile">:slight_smile:</span></p>
+
+
+
+<a name="161679797"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161679797" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161679797">(Mar 25 2019 at 19:36)</a>:</h4>
+<p>To recap, the <em>key</em> idea is to identify the macro not by invocation alone (what I was doing), but by a tuple of (macro_definition, macro invocation). That way, macro expansion don't need to call into nameres, because it already knows the definition! Seems obvious in retrospect :)</p>
+
+
+
+<a name="161679857"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161679857" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161679857">(Mar 25 2019 at 19:37)</a>:</h4>
+<blockquote>
+<p>There can only be so many walls to bang your head against </p>
+</blockquote>
+<p>Well, that depends on the relative speeds of language design and RLS teams :D</p>
+
+
+
+<a name="161686589"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161686589" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161686589">(Mar 25 2019 at 20:56)</a>:</h4>
+<p>(Sorry to have missed the mtg; multiple factors including but not limited to my misunderstanding of when DST ends here)</p>
+
+
+
+<a name="161747219"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161747219" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161747219">(Mar 26 2019 at 10:11)</a>:</h4>
+<p>It seems magical: to implement this idea, I had to basically remove code, and it worked on the first try: <a href="https://github.com/rust-analyzer/rust-analyzer/pull/1055" target="_blank" title="https://github.com/rust-analyzer/rust-analyzer/pull/1055">https://github.com/rust-analyzer/rust-analyzer/pull/1055</a></p>
+
+
+
+<a name="161861860"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161861860" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161861860">(Mar 27 2019 at 14:04)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> do you want to upload the video?</p>
+
+
+
+<a name="161862797"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161862797" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161862797">(Mar 27 2019 at 14:14)</a>:</h4>
+<p>sure I can do that</p>
+
+
+
+<a name="161868187"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Macros%20VS%20salsa/near/161868187" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/185405-t-compiler/rust-analyzer/topic/Macros.20VS.20salsa.html#161868187">(Mar 27 2019 at 15:05)</a>:</h4>
+<p><a href="https://youtu.be/Xr-rBqLr-G4" target="_blank" title="https://youtu.be/Xr-rBqLr-G4">Video will be live at this URL</a> (but it's still uploading)</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

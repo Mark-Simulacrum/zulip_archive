@@ -1,0 +1,74 @@
+<html>
+<head><meta charset="utf-8"><title>Status report on #79519 · t-compiler/wg-incr-comp · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/index.html">t-compiler/wg-incr-comp</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Status.20report.20on.20.2379519.html">Status report on #79519</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="225879302"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Status%20report%20on%20%2379519/near/225879302" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Status.20report.20on.20.2379519.html#225879302">(Feb 10 2021 at 17:50)</a>:</h4>
+<p><span class="user-group-mention" data-user-group-id="3282">@wg-incr-comp</span>: I was watching the last meeting's video, and a status update on <a href="https://github.com/rust-lang/rust/issues/79519">#79519</a> is useful.</p>
+<p>The objective of the PR is to remove all the <code>&amp;[Attribute]</code> slices from the HIR.<br>
+The operational assumption is that attributes only impact one pass of the compilation process (eg: allow one lint). Therefore, removing them from the HIR would allow to reuse a lot of analyses.<br>
+Technically, the attributes are stored out of the HIR tree in a <code>HirId -&gt; &amp;[Attribute]</code> map. This map is accessible through a <code>hir_attrs(HIR owner)</code> query. The commits modify the HIR nodes one by one along with the fallout in other crates. A few commits contain refactorings, btu not nearly enough.<br>
+The first version used nested <code>IndexVec</code>s, and had a ~5% instruction-count regression.<br>
+The latest version uses a <code>BTreeMap&lt;HirId, &amp;[Attribute]&gt;</code>, considering attributes are rare and this map should be sparse. The instruction-count regression is at ~2%.</p>
+<p>I am out of ideas on how to remove this perf regression.</p>
+
+
+
+<a name="225880057"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Status%20report%20on%20%2379519/near/225880057" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Status.20report.20on.20.2379519.html#225880057">(Feb 10 2021 at 17:55)</a>:</h4>
+<p>is the <code>ThinIndexVec</code> idea unlikely to have a better performance profile than the <code>BTreeMap</code> ?</p>
+
+
+
+<a name="225882501"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Status%20report%20on%20%2379519/near/225882501" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Status.20report.20on.20.2379519.html#225882501">(Feb 10 2021 at 18:11)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116083">pnkfelix</span> <a href="#narrow/stream/241847-t-compiler.2Fwg-incr-comp/topic/Status.20report.20on.20.2379519/near/225880057">said</a>:</p>
+<blockquote>
+<p>is the <code>ThinIndexVec</code> idea unlikely to have a better performance profile than the <code>BTreeMap</code> ?</p>
+</blockquote>
+<p>To expand on this, the idea was what I mentioned <a href="https://github.com/rust-lang/rust/pull/79519#issuecomment-766271830">here</a> and to try using a <code>IndexVec&lt;LocalDefId, ThinIndexVec&lt;ItemLocalId, &amp;'tcx [Attribute]&gt;&gt;</code> instead of the original <code>IndexVec&lt;LocalDefId, IndexVec&lt;ItemLocalId, &amp;'tcx [Attribute]&gt;&gt;</code> which is now a <code>BTreeMap</code>. We could then compare the <code>BTreeMap</code> performance vs the <code>IndexVec&lt;LocalDefId, ThinIndexVec&lt;ItemLocalId, &amp;'tcx [Attribute]&gt;&gt;</code> performance and see which is better.</p>
+
+
+
+<a name="225887044"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Status%20report%20on%20%2379519/near/225887044" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Status.20report.20on.20.2379519.html#225887044">(Feb 10 2021 at 18:42)</a>:</h4>
+<p>I haven't tried ThinIndexVec yet (missed that part of your comment).<br>
+I am not sure it would help: going from <code>IndexVec</code> to <code>ThinIndex</code> is a pessimisation in terms of instruction count.<br>
+<code>BTreeMap</code> is already less-bad in instr-count, and a win in max-rss.<br>
+Nevertheless, I will try the ThinIndexVec just to be sure.</p>
+
+
+
+<a name="225896050"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Status%20report%20on%20%2379519/near/225896050" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Status.20report.20on.20.2379519.html#225896050">(Feb 10 2021 at 19:43)</a>:</h4>
+<p>No worries! The <code>BTreeMap</code> helped a lot more than I thought it would but it would still be interesting to compare with the <code>ThinIndexVec</code> idea.</p>
+
+
+
+<a name="225899517"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Status%20report%20on%20%2379519/near/225899517" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Status.20report.20on.20.2379519.html#225899517">(Feb 10 2021 at 20:08)</a>:</h4>
+<p>-&gt; <a href="https://github.com/rust-lang/rust/issues/81970">#81970</a></p>
+
+
+
+<a name="225922878"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Status%20report%20on%20%2379519/near/225922878" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Status.20report.20on.20.2379519.html#225922878">(Feb 10 2021 at 22:40)</a>:</h4>
+<p>Perf results for ThinIndexVec in <a href="https://perf.rust-lang.org/compare.html?start=07194ffcd25b0871ce560b9f702e52db27ac9f77&amp;end=f45ada695c0cefd9467ffed78545a63ef2341bbd">https://perf.rust-lang.org/compare.html?start=07194ffcd25b0871ce560b9f702e52db27ac9f77&amp;end=f45ada695c0cefd9467ffed78545a63ef2341bbd</a></p>
+
+
+
+<a name="225923079"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/241847-t-compiler/wg-incr-comp/topic/Status%20report%20on%20%2379519/near/225923079" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://rust-lang.github.io/zulip_archive/stream/241847-t-compiler/wg-incr-comp/topic/Status.20report.20on.20.2379519.html#225923079">(Feb 10 2021 at 22:42)</a>:</h4>
+<p>Perf regression ~6%, a bit worse than the original IndexVec version. No significant difference on max-rss.</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

@@ -1,0 +1,1478 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span>, <span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> said I should speak to you about this.</p>\n<p>There's an ICE when bootstrapping in stage two. I'll probably mangle this explanation, but here goes. Shims cannot be polymorphized, so I need to detect when they'll be generated and mark some generic parameters as used so they remain monomorphic. I did something similar with vtables, if I saw an unsized cast, I visited the source and target types in an exhaustive mode that visited closures, this meant that more generic parameters were marked as used and vtables would not be generated. However, with drop shims, while I can make a similar change, my analysis needs to be transitive for it to work.. but that causes cycle errors. I can't figure a way to work around the cycle errors, and because my query is for each individual function, there's no way for me to keep track of where I've been. <span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> linked me to <a href=\"https://github.com/rust-lang/rust/issues/68828\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/68828\">#68828</a>, and as far as I can gather from that, there's no consensus on how to deal with cycle errors.</p>\n<p>The only other idea that <span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> had was to use <code>ty::Placeholder</code> (or <code>ty::Erased</code>, something like that), instead of <code>ty::Param</code> when I use the results of my analysis, and then told me to speak to you about it.</p>\n<p>I'm slightly concerned because this seems to be about the last blocker to have this whole thing working, but a solution to cycle errors doesn't seem to becoming soon, and re-working shims to avoid the issue would probably take a while; it's getting very close to when I need to start evaluating and writing my final paper on this (which is my fault for not getting further earlier - though, if I hadn't run into this blocker, I'd be about on schedule).</p>",
+        "id": 190024032,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583693999
+    },
+    {
+        "content": "<p>(<a href=\"https://github.com/rust-lang/rust/issues/69749\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/69749\">#69749</a> doesn't yet contain the patch to deal with drop shims that don't require the analysis be transitive, but it does contain the patch that I used for vtables)</p>",
+        "id": 190024082,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583694055
+    },
+    {
+        "content": "<p>Wrapping up for today, didn't make much progress on resolving this issue (<a href=\"https://github.com/rust-lang/rust/pull/69749#issuecomment-596208496\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/69749#issuecomment-596208496\">today's progress before hitting this issue</a>). Here's what I've got uncommitted:</p>\n<ul>\n<li><a href=\"http://sprunge.us/ME3r4H\" target=\"_blank\" title=\"http://sprunge.us/ME3r4H\">Test that exercises drop shim issue</a>.</li>\n<li><a href=\"http://sprunge.us/nX5lDB\" target=\"_blank\" title=\"http://sprunge.us/nX5lDB\">Test that exercises drop shim issue (transitive)</a> - this is the harder case which is challenging without hitting cycle errors.</li>\n<li><a href=\"http://sprunge.us/5BixNZ\" target=\"_blank\" title=\"http://sprunge.us/5BixNZ\">Almost working, really hacky, fix</a> - this does awful things to detect when invoking the query would result in a query error, and then implements a transitive analysis based on that. In addition, it makes the query return more detailed information about why a type was used (in a drop or not) - this can be used with the transitive analysis to know when the transitive results mean that an exhaustive type visitor should be used, or not (e.g. if a closure is passed to a function and just called, then the closure doesn't need to be monomorphised, there won't be a drop shim; but if it is dropped, then it needs to be monomorphised - this lets us work that out). I suspect that this approach wouldn't pass review, because it is hacky, but I couldn't think of anything better and wanted to feel like I was making progress.</li>\n</ul>",
+        "id": 190032307,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583709840
+    },
+    {
+        "content": "<p>Probably a stupid question, but why why does the shim need to be monomorphic? Is the closure dropped in a different way depending on its context? Or am I misunderstanding?</p>",
+        "id": 190038272,
+        "sender_full_name": "mark-i-m",
+        "timestamp": 1583722318
+    },
+    {
+        "content": "<p>I don’t understand completely, it’s a limitation of the infrastructure for that in the compiler.</p>",
+        "id": 190047222,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583740862
+    },
+    {
+        "content": "<p>Thinking on it more, I assume it's because the drop shim needs to identify the specific <code>Drop</code> impl, so it can call <code>Drop::drop</code> - it's intuitive that would inherently require all the generic parameters be known? </p>\n<p>It works fine for regular types, but because closures inherit the generic arguments of their parent, I need to make sure that those parameters are marked used when a closure is getting dropped - the issue is knowing when I should do that. </p>\n<p>For a normal generic parameter, if it is used in the call to another function, I mark it as used - easy, that function can mark it as used if it drops it. For closures, the type parameters that I need to mark as used are the ones that it inherits from the parent, those are in the current function, so if it is used in the call to another function, I need to know if that function will drop it, because the current function needs to mark parameters as used - that's the key difference, which function needs to mark the parameters as used -  which requires a transitive analysis. </p>\n<p>If I were pessimistic and assume that closures might always be dropped, then that renders the whole analysis pointless, the saving we're hoping for comes from closures not having all their parameters marked as used.</p>",
+        "id": 190054387,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583748581
+    },
+    {
+        "content": "<p>The only solution I've been able to come up with (lacking sufficient knowledge of drop shims to tackle the problem from that angle) is to make the analysis transitive - which I can do, it's not too hard - but I'd need to have a function like this to avoid cycle errors:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">fn</span> <span class=\"nf\">would_cause_query_error</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;tcx</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">tcx</span>: <span class=\"nc\">TyCtxt</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;tcx</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">def_id</span>: <span class=\"nc\">DefId</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">bool</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">query_map</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">tcx</span><span class=\"p\">.</span><span class=\"n\">queries</span><span class=\"p\">.</span><span class=\"n\">try_collect_active_jobs</span><span class=\"p\">().</span><span class=\"n\">unwrap</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">current_job</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">ty</span>::<span class=\"n\">tls</span>::<span class=\"n\">with_related_context</span><span class=\"p\">(</span><span class=\"n\">tcx</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"n\">icx</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"n\">icx</span><span class=\"p\">.</span><span class=\"n\">query</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">while</span><span class=\"w\"> </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">job</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">current_job</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">info</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">query_map</span><span class=\"p\">.</span><span class=\"n\">get</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">job</span><span class=\"p\">).</span><span class=\"n\">unwrap</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">ty</span>::<span class=\"n\">query</span>::<span class=\"n\">Query</span>::<span class=\"n\">used_generic_params</span><span class=\"p\">(</span><span class=\"n\">other_def_id</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">info</span><span class=\"p\">.</span><span class=\"n\">info</span><span class=\"p\">.</span><span class=\"n\">query</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">other_def_id</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"n\">def_id</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"k\">return</span><span class=\"w\"> </span><span class=\"kc\">true</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"w\">        </span><span class=\"n\">current_job</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">info</span><span class=\"p\">.</span><span class=\"n\">job</span><span class=\"p\">.</span><span class=\"n\">parent</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"kc\">false</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>I could probably make that function faster by exiting early as soon as I see a query that isn't <code>used_generic_params</code>, since if the analysis is transitive, there won't be any other queries in-between calls to <code>used_generic_params</code>.</p>",
+        "id": 190057112,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583750921
+    },
+    {
+        "content": "<p>The mir inliner has the same problem: <a href=\"https://github.com/rust-lang/rust/pull/68828\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/68828\">https://github.com/rust-lang/rust/pull/68828</a></p>",
+        "id": 190058658,
+        "sender_full_name": "oli",
+        "timestamp": 1583752198
+    },
+    {
+        "content": "<p>Yeah, <span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> linked me to that PR, I referenced it in the initial message.</p>",
+        "id": 190058953,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583752451
+    },
+    {
+        "content": "<p>Well... true cycle detection in the query system isn't possible, but if you can split your problem in into a pre cycle part and a post cycle part, you can do cycle detection on the pre cycle part</p>",
+        "id": 190064196,
+        "sender_full_name": "oli",
+        "timestamp": 1583757866
+    },
+    {
+        "content": "<p>I'm struggling to imagine an example of what that would look like (not just for the polymorphization case, but more generally too).</p>",
+        "id": 190064406,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583758062
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> hmm</p>",
+        "id": 190100110,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583777663
+    },
+    {
+        "content": "<p>I might need to get more of an overview of exactly how your analysis works</p>",
+        "id": 190100201,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583777724
+    },
+    {
+        "content": "<p>maybe we can find a time to chat about this? I have to leave early today but plausibly could chat tomorrow or (maybe easier) Wed morning (my time)</p>",
+        "id": 190100247,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583777757
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/issues/69749\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/69749\">#69749</a> has all of the code (minus the change to get drop shims working w/out transitivity)</p>",
+        "id": 190100300,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777772
+    },
+    {
+        "content": "<p>I can do that</p>",
+        "id": 190100311,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777777
+    },
+    {
+        "content": "<p>Would you recommend I start by trying to read your PR? Maybe that's best</p>",
+        "id": 190100333,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583777785
+    },
+    {
+        "content": "<p>Tomorrow or Wednesday afternoon (my time) works for me.</p>",
+        "id": 190100352,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777800
+    },
+    {
+        "content": "<p>but I was assuming it'd be a lot of code :)</p>",
+        "id": 190100358,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583777803
+    },
+    {
+        "content": "<p>It's not a huge amount.</p>",
+        "id": 190100362,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777809
+    },
+    {
+        "content": "<p>Having some familiarity from the PR would be helpful.</p>",
+        "id": 190100394,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777832
+    },
+    {
+        "content": "<p>(Which reminds me that this might make a nice addition to rustc-dev-guide)</p>",
+        "id": 190100402,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583777837
+    },
+    {
+        "content": "<p>(That is, some notes on how it works)</p>",
+        "id": 190100409,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583777844
+    },
+    {
+        "content": "<p>I'll make a note to do that</p>",
+        "id": 190100421,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777859
+    },
+    {
+        "content": "<p>I guess src/librustc_mir/monomorphize/polymorphize.rs is sort of the \"main file\"?</p>",
+        "id": 190100424,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583777863
+    },
+    {
+        "content": "<p>Yeah, that's the analysis itself.</p>",
+        "id": 190100441,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777872
+    },
+    {
+        "content": "<p>There's a <code>polymorphize</code> function in <code>rustc/ty/instance.rs</code> which applies the results to an <code>Instance</code>.</p>",
+        "id": 190100517,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777898
+    },
+    {
+        "content": "<p>There's a minor change to <code>rustc_mir/monomorphize/collector.rs</code> which uses that in <code>create_fn_mono_item</code>.</p>",
+        "id": 190100559,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777918
+    },
+    {
+        "content": "<p>And a handful of places in <code>rustc_codegen_ssa</code> which also use that function.</p>",
+        "id": 190100591,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777937
+    },
+    {
+        "content": "<p>The majority of the work has been debugging where the analysis needed updated to fix obscure substitution failures from later in the compiler.</p>",
+        "id": 190100636,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583777966
+    },
+    {
+        "content": "<blockquote>\n<p>(Which reminds me that this might make a nice addition to rustc-dev-guide)</p>\n</blockquote>\n<p>Funny you should mention that... <a href=\"https://github.com/rust-lang/rustc-guide/pull/605/files#diff-d504f9659c36662fe3433e5a64d139ac\" target=\"_blank\" title=\"https://github.com/rust-lang/rustc-guide/pull/605/files#diff-d504f9659c36662fe3433e5a64d139ac\">https://github.com/rust-lang/rustc-guide/pull/605/files#diff-d504f9659c36662fe3433e5a64d139ac</a></p>",
+        "id": 190102663,
+        "sender_full_name": "mark-i-m",
+        "timestamp": 1583779019
+    },
+    {
+        "content": "<p>It's just a stub currently, since I don't know much, but whenever you have time, expanding on it would be great!</p>",
+        "id": 190102728,
+        "sender_full_name": "mark-i-m",
+        "timestamp": 1583779066
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> do you want to schedule a chat for tomorrow or wednesday then?</p>",
+        "id": 190107810,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583781963
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> ping; have you had an opportunity to look into this at all? I've got time tomorrow that I'd like to be able to use to make progress on this.</p>",
+        "id": 190228814,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583876481
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> I was totally slammed today, but I could take a look first thing tomorrow morning (9am my time, more or less)</p>",
+        "id": 190234435,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583880312
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> I’d appreciate that, I’ll be around at that time.</p>",
+        "id": 190236535,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583882531
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> got a spotty wifi but I'm around :)</p>",
+        "id": 190279456,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583932698
+    },
+    {
+        "content": "<p>o/</p>",
+        "id": 190279459,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583932703
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> the primary issue at the moment is that I don't know how to support drop shims w/ the analysis, so I'm blocked on being able to get it passing CI and then landed.</p>",
+        "id": 190279755,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583932913
+    },
+    {
+        "content": "<p>right</p>",
+        "id": 190279856,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583932964
+    },
+    {
+        "content": "<p>Because drop shims need to be monomorphic (I don't understand the infrastructure around that enough to feel confident in my understanding of why that is) and because closures inherit type parameters, if a function passes a closure to another function, which is then dropped, then that causes a substitution failure (and presumably more failures later on that we don't get to) - to detect this case in the analysis of the original function which defines the closure, the analysis needs  to be transitive, which is hard because of cycle errors.</p>",
+        "id": 190280087,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583933096
+    },
+    {
+        "content": "<p>If <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> is around, they might be able to explain this better.</p>",
+        "id": 190280168,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583933152
+    },
+    {
+        "content": "<p>uhhhhhhh</p>",
+        "id": 190280226,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933171
+    },
+    {
+        "content": "<p>I should've been around this topic from the start, so sorry</p>",
+        "id": 190280240,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933179
+    },
+    {
+        "content": "<p>so the explanation is that shims are fake MIR bodies for <em>a real definition</em></p>",
+        "id": 190280259,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933197
+    },
+    {
+        "content": "<p>e.g. <code>drop_in_place::&lt;Foo&gt;</code> gets a shim <code>Instance</code> that has <code>substs=[Foo]</code></p>",
+        "id": 190280298,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933225
+    },
+    {
+        "content": "<p>and the problem is that is that <code>Foo</code> is also in the <code>InstanceDef</code> determining the shim MIR body</p>",
+        "id": 190280312,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933246
+    },
+    {
+        "content": "<p>so if there are any generic parameters in the <code>InstanceDef</code> (which contains <code>Foo</code> in my example above), they would be attempted to be substituted with <code>{ #0 -&gt; Foo }</code></p>",
+        "id": 190280435,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933317
+    },
+    {
+        "content": "<p>I'm not sure I quite follow, <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> -- I think you're saying that <code>Foo</code> is \"hard-coded\" in the <code>InstanceDef</code>, so just changing the substitution doesn't suffice?</p>",
+        "id": 190280621,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933417
+    },
+    {
+        "content": "<p>so <code>drop_in_place::&lt;Vec&lt;#0&gt;&gt;</code> (I'm using <code>#0</code> but this could be <code>T</code>) produces a MIR body referring to <code>Vec&lt;#0&gt;</code> but which also is going to get monomorphized by <code>{ #0 -&gt; Vec&lt;#0&gt; }</code></p>",
+        "id": 190280635,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933427
+    },
+    {
+        "content": "<p>so you'll create <code>Vec&lt;Vec&lt;#0&gt;&gt;</code> which is absurd</p>",
+        "id": 190280656,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933441
+    },
+    {
+        "content": "<p>I'm trying in any case to read more into the PR because I don't quite understand where the cycle comes from</p>",
+        "id": 190280670,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933447
+    },
+    {
+        "content": "<p>that is, what is the query involved</p>",
+        "id": 190280702,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933466
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> there's both a type in <code>InstanceDef</code> but also the substs for the original definition (or declaration if you want) that is getting shimmed</p>",
+        "id": 190280704,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933470
+    },
+    {
+        "content": "<p>wait what cycle</p>",
+        "id": 190280720,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933476
+    },
+    {
+        "content": "<p>oh I'm not talking about the cycle</p>",
+        "id": 190280730,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933483
+    },
+    {
+        "content": "<p><code>.used_generic_params</code> I guess?</p>",
+        "id": 190280732,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933484
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> the cycle is like MIR inlining</p>",
+        "id": 190280748,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933493
+    },
+    {
+        "content": "<p>recursive functions result in recursive queries etc.</p>",
+        "id": 190280758,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933501
+    },
+    {
+        "content": "<p><a href=\"http://sprunge.us/ME3r4H\" target=\"_blank\" title=\"http://sprunge.us/ME3r4H\">This code</a> demonstrates a case where this causes the PR to break; but that case can be fixed. But as soon as you extend it, <a href=\"http://sprunge.us/nX5lDB\" target=\"_blank\" title=\"http://sprunge.us/nX5lDB\">like this</a>, the analysis would need to be transitive (calling itself on functions the current MIR body invokes) to detect the problematic case, but that can cause cycle errors where (<code>foo</code> -&gt; <code>bar</code> -&gt; <code>foo</code>) - the PR, right now, doesn't do that, because it cycle errors.</p>",
+        "id": 190280778,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583933515
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> making the analysis transitive is likely much harder than fixing shims and vtables</p>",
+        "id": 190280863,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933544
+    },
+    {
+        "content": "<p>So basically it's that same problem of needing to anayze / walk the call graph?</p>",
+        "id": 190280874,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933551
+    },
+    {
+        "content": "<p>I'm sorry I didn't explain this better</p>",
+        "id": 190280882,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933556
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190280874\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190280874\">said</a>:</p>\n<blockquote>\n<p>So basically it's that same problem of needing to anayze / walk the call graph?</p>\n</blockquote>\n<p>yupp</p>",
+        "id": 190280887,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933558
+    },
+    {
+        "content": "<p>I'm not sure how much experimentation has been done there?</p>",
+        "id": 190280909,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933573
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190280621\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190280621\">said</a>:</p>\n<blockquote>\n<p>I'm not sure I quite follow, <span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> -- I think you're saying that <code>Foo</code> is \"hard-coded\" in the <code>InstanceDef</code>, so just changing the substitution doesn't suffice?</p>\n</blockquote>\n<p>it's just that right now we have <code>Foo</code> in two places and that basically causes double substitution if it has any generic parameters in it</p>",
+        "id": 190280958,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933607
+    },
+    {
+        "content": "<p>Personally, I still favor introducing a \"construct the call graph query\" and seeing how well that works, but I think that extending the query system to better accommodate cycles in this case would also be ok. It seems like <em>this</em> case is different from MIR inlining in some particulars.</p>",
+        "id": 190280993,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933640
+    },
+    {
+        "content": "<p>we could probably solve this by not not using <code>instance.substs</code> when <code>instance.def</code> is a shim and we're working with the MIR body of the shim</p>",
+        "id": 190281061,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933662
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> ok, I admit I still don't <em>really</em> follow what you're talking about, though I think I have a sense for it,</p>",
+        "id": 190281102,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933688
+    },
+    {
+        "content": "<p>are you saying that this would obviate the need for cyclic queries / walking call graph in some sense?</p>",
+        "id": 190281120,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933701
+    },
+    {
+        "content": "<p>it's that PR of mine that asserts that doesn't resolve polymorphic shims</p>",
+        "id": 190281134,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933705
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> it would fix the problems that led <span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> down the eldritch path of trying to make the analysis transitive</p>",
+        "id": 190281166,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933728
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190280993\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190280993\">said</a>:</p>\n<blockquote>\n<p>Personally, I still favor introducing a \"construct the call graph query\" and seeing how well that works, but I think that extending the query system to better accommodate cycles in this case would also be ok. It seems like <em>this</em> case is different from MIR inlining in some particulars.</p>\n</blockquote>\n<p>to elaborate on this: I feel like we could have some way to say \"cyclic queries are ok as long as all the members of the cycle are the same query and it is appropriately annotated\", though we'd have to be careful about explaining the rules that permit a query to be so annotated</p>",
+        "id": 190281178,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933746
+    },
+    {
+        "content": "<p>The issue with making the analysis transitive and that causing cycle errors is just a symptom of one potential solution (changing the analysis) in response to the root problem - substs in <code>Instance</code> for shims.</p>",
+        "id": 190281182,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583933750
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116107\">davidtwco</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190281182\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190281182\">said</a>:</p>\n<blockquote>\n<p>The issue with making the analysis transitive and that causing cycle errors is just a symptom of one potential solution (changing the analysis) in response to the root problem - substs in <code>Instance</code> for shims.</p>\n</blockquote>\n<p>I think I confused this in my messaging, sorry.</p>",
+        "id": 190281234,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583933771
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190281134\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190281134\">said</a>:</p>\n<blockquote>\n<p>it's that PR of mine that asserts that doesn't resolve polymorphic shims</p>\n</blockquote>\n<p>yeah, I remember that PR, but</p>",
+        "id": 190281250,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933789
+    },
+    {
+        "content": "<p>I was really happy when <span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> initially told me the analysis isn't transitive, because that means we can land and enable it in a reasonable timeframe</p>",
+        "id": 190281255,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933794
+    },
+    {
+        "content": "<p>instead of wasting months trying to do cyclic nonsense</p>",
+        "id": 190281273,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933812
+    },
+    {
+        "content": "<p>can someone clarify for me what is meant by the analysis being intransitive</p>",
+        "id": 190281293,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933830
+    },
+    {
+        "content": "<p>It's much simpler without being transitive, it seems to be <em>only</em> this case that \"needs\" it.</p>",
+        "id": 190281300,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583933833
+    },
+    {
+        "content": "<p>it analyzes the fn body but not callees, I guess..?</p>",
+        "id": 190281310,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933840
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190281310\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190281310\">said</a>:</p>\n<blockquote>\n<p>it analyzes the fn body but not callees, I guess..?</p>\n</blockquote>\n<p>Exactly this.</p>",
+        "id": 190281325,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583933848
+    },
+    {
+        "content": "<p>yes, assumes callees use all of their substs</p>",
+        "id": 190281331,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933851
+    },
+    {
+        "content": "<p>that will clearly lose precision</p>",
+        "id": 190281368,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933874
+    },
+    {
+        "content": "<p>but we are saying \"that's ok\"</p>",
+        "id": 190281373,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933877
+    },
+    {
+        "content": "<p>it only solves closures, really, since it's transitive through those</p>",
+        "id": 190281376,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933878
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> it's unattainable precision without a lot of effort nobody has time for</p>",
+        "id": 190281433,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933888
+    },
+    {
+        "content": "<p>that's my position</p>",
+        "id": 190281445,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933895
+    },
+    {
+        "content": "<p>I'm not arguing necessarily, just trying to understand</p>",
+        "id": 190281462,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933905
+    },
+    {
+        "content": "<p>I agree it's a reasonable \"first cut\"</p>",
+        "id": 190281469,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933909
+    },
+    {
+        "content": "<p>so we're not losing anything by starting without it because we could never \"just do it\"</p>",
+        "id": 190281481,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933915
+    },
+    {
+        "content": "<p>and closures are arguably important enough</p>",
+        "id": 190281498,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933929
+    },
+    {
+        "content": "<p>I mostly wanted to be sure I wasn't missing something</p>",
+        "id": 190281509,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933935
+    },
+    {
+        "content": "<p>(I'm happy to sink time into it in future, but right now, an intransitive approach is desirable because it's 95% done and I've got a paper to write <span aria-label=\"sad\" class=\"emoji emoji-2639\" role=\"img\" title=\"sad\">:sad:</span>)</p>",
+        "id": 190281520,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583933942
+    },
+    {
+        "content": "<p>i.e., it's not like it wouldn't be <em>useful</em> in the abstract</p>",
+        "id": 190281524,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583933944
+    },
+    {
+        "content": "<p>right, I'm happy about avoiding the complexity <em>upfront</em></p>",
+        "id": 190281583,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583933982
+    },
+    {
+        "content": "<p>Making the analysis transitive is <em>a</em> solution to the problem that <span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> was describing initially.</p>",
+        "id": 190281586,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583933984
+    },
+    {
+        "content": "<p>I never meant to imply it was a reasonable solution, and it's probably not even that hard to make the shims work correctly when polymorphic tbh</p>",
+        "id": 190281683,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583934027
+    },
+    {
+        "content": "<p>(to the extent that they can be polymorphic, I mean)</p>",
+        "id": 190281732,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583934065
+    },
+    {
+        "content": "<p>So maybe we should come back a bit to the problem</p>",
+        "id": 190281862,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934155
+    },
+    {
+        "content": "<p>but first, one other question</p>",
+        "id": 190281867,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934161
+    },
+    {
+        "content": "<p>would landing your PR <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> allow this PR to land?</p>",
+        "id": 190281878,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934172
+    },
+    {
+        "content": "<p>I feel like I r+'d it</p>",
+        "id": 190281887,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934177
+    },
+    {
+        "content": "<p>but maybe I didn't :)</p>",
+        "id": 190281888,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934179
+    },
+    {
+        "content": "<p>I'm having a hard time keeping up with reviews</p>",
+        "id": 190281896,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934186
+    },
+    {
+        "content": "<p>no, it only acts as an early detection for the problem</p>",
+        "id": 190281900,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583934189
+    },
+    {
+        "content": "<p>I don't think so.</p>",
+        "id": 190281903,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934190
+    },
+    {
+        "content": "<p>it still causes an ICE or w/e</p>",
+        "id": 190281906,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583934193
+    },
+    {
+        "content": "<p>but I still don't have a good \"gut understanding\" of the problem and i'd kind of like to</p>",
+        "id": 190281907,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934193
+    },
+    {
+        "content": "<p>okok</p>",
+        "id": 190281912,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934197
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116107\">davidtwco</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190280778\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190280778\">said</a>:</p>\n<blockquote>\n<p><a href=\"http://sprunge.us/ME3r4H\" target=\"_blank\" title=\"http://sprunge.us/ME3r4H\">This code</a> demonstrates a case where this causes the PR to break; but that case can be fixed. But as soon as you extend it, <a href=\"http://sprunge.us/nX5lDB\" target=\"_blank\" title=\"http://sprunge.us/nX5lDB\">like this</a>, the analysis would need to be transitive (calling itself on functions the current MIR body invokes) to detect the problematic case, but that can cause cycle errors where (<code>foo</code> -&gt; <code>bar</code> -&gt; <code>foo</code>) - the PR, right now, doesn't do that, because it cycle errors.</p>\n</blockquote>",
+        "id": 190281919,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934201
+    },
+    {
+        "content": "<p>it's not a fix, it's just enforcing the implicit rules</p>",
+        "id": 190281930,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583934206
+    },
+    {
+        "content": "<p>It would have saved me some time working out what the problem was, had <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span>'s PR landed.</p>",
+        "id": 190281941,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934214
+    },
+    {
+        "content": "<p>oops</p>",
+        "id": 190281954,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583934220
+    },
+    {
+        "content": "<p>I should finish it</p>",
+        "id": 190281961,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583934224
+    },
+    {
+        "content": "<p>I don't quite understand the example you gave <span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span></p>",
+        "id": 190282100,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934298
+    },
+    {
+        "content": "<p>first of all, is the <code>F: Fn()</code> bound significant?</p>",
+        "id": 190282161,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934334
+    },
+    {
+        "content": "<p>all examples are going to be weird since only closures can really introduce this problem</p>",
+        "id": 190282171,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583934341
+    },
+    {
+        "content": "<p>It's a minimization of the ICE that comes out of the <code>rustc</code> crate when compiled with my stage one. I think it's about as small as it can get.</p>",
+        "id": 190282193,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934358
+    },
+    {
+        "content": "<p>I'm guessing no</p>",
+        "id": 190282264,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934375
+    },
+    {
+        "content": "<p>I don't think it is.</p>",
+        "id": 190282286,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934398
+    },
+    {
+        "content": "<p>(there goes it being as small as it could be)</p>",
+        "id": 190282298,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934408
+    },
+    {
+        "content": "<p>so the desired effect here</p>",
+        "id": 190282340,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934445
+    },
+    {
+        "content": "<p>is that R, S are unused for <code>foo</code>?</p>",
+        "id": 190282345,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934451
+    },
+    {
+        "content": "<p>except they are not, because</p>",
+        "id": 190282370,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934470
+    },
+    {
+        "content": "<p>well, they are, right? :)</p>",
+        "id": 190282376,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934476
+    },
+    {
+        "content": "<p>The analysis correctly determines that <code>R</code> and <code>S</code> are unused in <code>foo</code> and <code>foo::{{closure}}</code> and <code>foo::{{closure}}::{{closure}}</code>- but that causes an issue.</p>",
+        "id": 190282397,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934482
+    },
+    {
+        "content": "<p>and the issue is?</p>",
+        "id": 190282434,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934493
+    },
+    {
+        "content": "<p>ok, I'm starting to maybe see the connection to the drop shim</p>",
+        "id": 190282459,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934512
+    },
+    {
+        "content": "<p>That code results in a drop shim <code>Instance</code> being created.</p>",
+        "id": 190282473,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934515
+    },
+    {
+        "content": "<p>we have a drop shim for <code>OnDrop</code></p>",
+        "id": 190282484,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934520
+    },
+    {
+        "content": "<p>or rather <code>OnDrop&lt;foo::{{closure}}::{{closure}}&gt;</code></p>",
+        "id": 190282514,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934541
+    },
+    {
+        "content": "<p>which I will shorten to \"fcc\" :)</p>",
+        "id": 190282536,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934556
+    },
+    {
+        "content": "<p>and that fcc type has a substs that would include R, S ..</p>",
+        "id": 190282568,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934571
+    },
+    {
+        "content": "<p>and .. somehow .. this leads to ICE, right?</p>",
+        "id": 190282585,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934584
+    },
+    {
+        "content": "<p>one thing I don't know: in your PR, if we determine a parameter is unused, during monomorphization, are we using <code>ty::Param</code> as its value?</p>",
+        "id": 190282655,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934609
+    },
+    {
+        "content": "<p>I think this is what <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> advocated for some time back</p>",
+        "id": 190282672,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934616
+    },
+    {
+        "content": "<p>My understanding of the root problem is slightly flakey, but because <code>Instance</code> will contain the type parameters in both the <code>instance.def = InstanceDef::DropShim</code> (which contains the type because that's used for the MIR shim part), and the <code>instance.substs</code>, that causes double substitution - and an ICE as a result. I'm not sure if there are more issues with drop shims and type parameters that follow after that one, because I've not got that far.</p>",
+        "id": 190282718,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934645
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190282655\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190282655\">said</a>:</p>\n<blockquote>\n<p>one thing I don't know: in your PR, if we determine a parameter is unused, during monomorphization, are we using <code>ty::Param</code> as its value?</p>\n</blockquote>\n<p>We replace unused parameters with the identity substitution.</p>",
+        "id": 190282741,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934657
+    },
+    {
+        "content": "<p>ok so</p>",
+        "id": 190282753,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934664
+    },
+    {
+        "content": "<p>let me go look at instance <em>but</em></p>",
+        "id": 190282763,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934667
+    },
+    {
+        "content": "<p>well let me go look at instance, I sort of understand</p>",
+        "id": 190282785,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934677
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116107\">davidtwco</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190282741\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/cycles/near/190282741\">said</a>:</p>\n<blockquote>\n<p>We replace unused parameters with the identity substitution.</p>\n</blockquote>\n<p>OK, I think that's a \"yes\"</p>",
+        "id": 190282813,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934693
+    },
+    {
+        "content": "<p>It is, sorry.</p>",
+        "id": 190282843,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583934714
+    },
+    {
+        "content": "<p>Btw, I'm enjoying being a fly on the wall for this conversation. Thanks for having it in the open!</p>",
+        "id": 190283263,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1583934930
+    },
+    {
+        "content": "<p>OK, I swas looking at <code>InstanceDef</code></p>",
+        "id": 190283385,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934987
+    },
+    {
+        "content": "<p>I guess I should review what <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> wrote earlier</p>",
+        "id": 190283398,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583934994
+    },
+    {
+        "content": "<p>I only really started understanding the ICE that I spent Sunday looking at after reading <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span>'s earlier messages today.</p>",
+        "id": 190283438,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583935032
+    },
+    {
+        "content": "<p>I'm guessing part of the problem is that we treat <code>instance.def</code> as if it were .. huh, what's the term... not something that needs substitution, anyway</p>",
+        "id": 190283634,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583935146
+    },
+    {
+        "content": "<p>like a <code>DefId</code></p>",
+        "id": 190283642,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583935150
+    },
+    {
+        "content": "<p>I think so..</p>",
+        "id": 190283700,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583935195
+    },
+    {
+        "content": "<p>OK, I have to run for a bit, I will re-read what <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> wrote, but I guess the question for <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> is whether they think they've got a solution in mind :)</p>",
+        "id": 190283887,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583935290
+    },
+    {
+        "content": "<p>if so, you should probably do that, and I'll try to catch up :)</p>",
+        "id": 190283893,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583935296
+    },
+    {
+        "content": "<p>I'm trying to find the code where we create an <code>InstanceDef::DropGlue</code>, to start</p>",
+        "id": 190284027,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583935352
+    },
+    {
+        "content": "<ol>\n<li><a href=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_mir/monomorphize/collector.rs#L615-L624\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_mir/monomorphize/collector.rs#L615-L624\">https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_mir/monomorphize/collector.rs#L615-L624</a></li>\n<li><a href=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_mir/monomorphize/collector.rs#L650-L658\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_mir/monomorphize/collector.rs#L650-L658\">https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_mir/monomorphize/collector.rs#L650-L658</a></li>\n<li><a href=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc/ty/instance.rs#L340-L344\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc/ty/instance.rs#L340-L344\">https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc/ty/instance.rs#L340-L344</a></li>\n<li><a href=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_ty/instance.rs#L35-L44\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_ty/instance.rs#L35-L44\">https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_ty/instance.rs#L35-L44</a></li>\n</ol>",
+        "id": 190284235,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583935472
+    },
+    {
+        "content": "<p>You can see that in (1) above, if the type contains type parameters, then that ends up being both in <code>instance.def</code> and <code>instance.substs</code> at (3) (I think), so you end up with the sort of scenario that <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> described above:</p>\n<blockquote>\n<p>so <code>drop_in_place::&lt;Vec&lt;#0&gt;&gt;</code> (I'm using <code>#0</code> but this could be <code>T</code>) produces a MIR body referring to <code>Vec&lt;#0&gt;</code> but which also is going to get monomorphized by <code>{ #0 -&gt; Vec&lt;#0&gt; }</code></p>\n</blockquote>",
+        "id": 190284528,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583935654
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> the problem is that <code>InstanceDef::DropGlue</code> contains a type with parameters in it, <em>and that ends up in the MIR body for the shim</em>, but those parameters shouldn't be substituted by <code>Instance</code>'s <code>substs</code> (which are for the <code>DefId</code> that we resolved to a shim, not for the shim itself)</p>",
+        "id": 190284538,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583935657
+    },
+    {
+        "content": "<p>you still need <code>Instance</code> to have <code>substs</code> because we still rely on <code>(instance.def_id(), instance.substs)</code> for e.g. getting the signature</p>",
+        "id": 190284624,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583935693
+    },
+    {
+        "content": "<p>but the <em>MIR body</em> is the one that needs to be treated differently</p>",
+        "id": 190284666,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583935714
+    },
+    {
+        "content": "<p>codegen, miri and MIR inlining all substitute MIR bodies</p>",
+        "id": 190284690,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583935728
+    },
+    {
+        "content": "<p>That clarifies things a lot.</p>",
+        "id": 190284796,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583935797
+    },
+    {
+        "content": "<p>So do you think the solution for this is to modify these substitutions in some way so that drop shims can be polymorphic?</p>",
+        "id": 190284926,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583935847
+    },
+    {
+        "content": "<p>yeah</p>",
+        "id": 190284964,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583935865
+    },
+    {
+        "content": "<p>basically only subst for <code>InstanceDef::Item</code></p>",
+        "id": 190284984,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583935877
+    },
+    {
+        "content": "<p>you'll probably get to this before I do, lol</p>",
+        "id": 190285017,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583935895
+    },
+    {
+        "content": "<p>I can start on this right away.</p>",
+        "id": 190285022,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583935901
+    },
+    {
+        "content": "<p>It doesn't <em>sound</em> like a large amount of work..?</p>",
+        "id": 190285100,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583935930
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/pull/69036#issuecomment-597655036\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/69036#issuecomment-597655036\">https://github.com/rust-lang/rust/pull/69036#issuecomment-597655036</a></p>",
+        "id": 190285119,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583935941
+    },
+    {
+        "content": "<p>(in that I might actually be able to do it)</p>",
+        "id": 190285123,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583935942
+    },
+    {
+        "content": "<p>Could you link where the MIR body gets substituted? I can only find <a href=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_mir/shim.rs#L172\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/303d8aff6092709edd4dbd35b1c88e9aa40bf6d8/src/librustc_mir/shim.rs#L172\">this line</a> - nothing else in that file or at callers of the query.</p>",
+        "id": 190285692,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583936230
+    },
+    {
+        "content": "<p>Also, would this remove the need for the vtable special-casing in the analysis, <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span>?</p>",
+        "id": 190285912,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583936348
+    },
+    {
+        "content": "<p>ughhhh who murdered <code>ty::instance</code></p>",
+        "id": 190286143,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583936481
+    },
+    {
+        "content": "<p>oh wow this is bold <a href=\"https://github.com/rust-lang/rust/commit/0e652c550711b301086b8f5ead2f6c90418fe7a1\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/commit/0e652c550711b301086b8f5ead2f6c90418fe7a1\">https://github.com/rust-lang/rust/commit/0e652c550711b301086b8f5ead2f6c90418fe7a1</a></p>",
+        "id": 190286179,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583936503
+    },
+    {
+        "content": "<p>I hope it gets querified quick</p>",
+        "id": 190286190,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583936512
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> usually it's in a <code>fn monomorphize</code> or similar</p>",
+        "id": 190289070,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583937995
+    },
+    {
+        "content": "<p>it's something like <code>subst_and_normalize</code> or similar</p>",
+        "id": 190289099,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583938004
+    },
+    {
+        "content": "<p>I looked through calls to both those and nothing jumped out at me.</p>",
+        "id": 190289153,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583938028
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_codegen_ssa/mir/mod.rs#L91-L95\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/master/src/librustc_codegen_ssa/mir/mod.rs#L91-L95\">https://github.com/rust-lang/rust/blob/master/src/librustc_codegen_ssa/mir/mod.rs#L91-L95</a></p>",
+        "id": 190289215,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583938063
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> I'm not sure I understand, let me check if I do.</p>",
+        "id": 190289315,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583938112
+    },
+    {
+        "content": "<p>Yeah, I just couldn't find the callsite where the MIR body was passed to it, or am I misunderstanding?</p>",
+        "id": 190289317,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583938113
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> ah no only MIR inlining does that, it's a bit absurd to do it because it unnecessarily allocates</p>",
+        "id": 190289347,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583938137
+    },
+    {
+        "content": "<p><code>monomorphize</code> functions are called on the fly with various bits of the original MIR</p>",
+        "id": 190289365,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583938148
+    },
+    {
+        "content": "<p>I understand, alright.</p>",
+        "id": 190289377,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583938155
+    },
+    {
+        "content": "<p>Is there some more specific circumstance than just \"not an <code>InstanceDef::Item</code>\" where I shouldn't substitute?</p>",
+        "id": 190293105,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583939927
+    },
+    {
+        "content": "<p>A trivial change that only calls <code>subst_and_normalize_erasing_regions</code> for <code>InstanceDef::Item</code>, and <code>normalize_erasing_regions</code> otherwise doesn't quite work.</p>",
+        "id": 190293155,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583939953
+    },
+    {
+        "content": "<p>(initially, a <code>ClosureOnceShim</code> had a <code>could not fully normalize `&lt;Self as ops::function::FnOnce&lt;Args&gt;&gt;::Output` </code>, then a <code>DropGlue</code> resulted in a <code>failed to get layout for `*mut T`: the type `T` has an unknown layout</code> if I skip <code>ClosureOnceShim</code>)</p>",
+        "id": 190293522,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583940115
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> hmm can you limit it to these 3 <a href=\"https://github.com/rust-lang/rust/pull/69036/files#diff-44a4a8b18aebfe4cd2261ccc019a1f0fR42-R75\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/69036/files#diff-44a4a8b18aebfe4cd2261ccc019a1f0fR42-R75\">https://github.com/rust-lang/rust/pull/69036/files#diff-44a4a8b18aebfe4cd2261ccc019a1f0fR42-R75</a></p>",
+        "id": 190293831,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583940251
+    },
+    {
+        "content": "<p>trying that</p>",
+        "id": 190293999,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583940325
+    },
+    {
+        "content": "<p>It still ICEs,  <code>could not fully normalize `(i32, &lt;F as float::Float&gt;::Int)` </code> somewhere in <code>libcore</code>.</p>",
+        "id": 190294544,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583940590
+    },
+    {
+        "content": "<p>nevermind, user error</p>",
+        "id": 190294856,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583940719
+    },
+    {
+        "content": "<p>Alright, that gets me back to the layout error that I sent previously - which makes sense, last time when I stopped doing <code>ClosureOnceShim</code>, the next failure was from a <code>DropGlue</code>, makes sense that it would be first now.</p>",
+        "id": 190295086,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583940809
+    },
+    {
+        "content": "<p>is this with polymorphization turned on or not?</p>",
+        "id": 190295362,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583940938
+    },
+    {
+        "content": "<p>Ugh, viewing the logs gives me a different ICE.</p>",
+        "id": 190295371,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583940941
+    },
+    {
+        "content": "<p>On</p>",
+        "id": 190295373,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583940943
+    },
+    {
+        "content": "<p>Just in my current working directory</p>",
+        "id": 190295398,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583940952
+    },
+    {
+        "content": "<p>(without any of the fixes I did for drop shims, just what the PR has)</p>",
+        "id": 190295459,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583940971
+    },
+    {
+        "content": "<p>(sorry for the topic change but it was bothering me)</p>",
+        "id": 190295530,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941021
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> so uhh I would always try something like this on fresh master</p>",
+        "id": 190295554,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941036
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116107\">davidtwco</span> [said](<a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/polymorphizing.20shims.20vs.20transitive.20analysis.20(w.2F.20cycle.20haz.2E.2E.2E/near/190295371)\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/polymorphizing.20shims.20vs.20transitive.20analysis.20(w.2F.20cycle.20haz.2E.2E.2E/near/190295371)\">https://rust-lang.zulipchat.com/#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/polymorphizing.20shims.20vs.20transitive.20analysis.20(w.2F.20cycle.20haz.2E.2E.2E/near/190295371)</a>:</p>\n<blockquote>\n<p>Ugh, viewing the logs gives me a different ICE.</p>\n</blockquote>\n<p>egads I hate that so much :)</p>",
+        "id": 190295584,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1583941057
+    },
+    {
+        "content": "<p>oh uh the parens break links so sorry</p>",
+        "id": 190295610,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941078
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/polymorphizing.20shims.20vs.20transitive.20analysis.20w.2F.20cycles/near/190295610\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/polymorphizing.20shims.20vs.20transitive.20analysis.20w.2F.20cycles/near/190295610\">said</a>:</p>\n<blockquote>\n<p>oh uh the parens break links so sorry</p>\n</blockquote>\n<p>should file this upstream with Zulip, will make a note to</p>",
+        "id": 190295714,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583941125
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> <a href=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/polymorphizing.20shims.20vs.20transitive.20analysis.20w.2F.20cycles/near/190295554\" title=\"#narrow/stream/216091-t-compiler.2Fwg-polymorphization/topic/polymorphizing.20shims.20vs.20transitive.20analysis.20w.2F.20cycles/near/190295554\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"116107\">davidtwco</span> so uhh I would always try something like this on fresh master</p>\n</blockquote>\n<p>that is, to iron out the kinks without any interference</p>",
+        "id": 190295731,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941133
+    },
+    {
+        "content": "<p>I probably should do that.</p>",
+        "id": 190296189,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583941346
+    },
+    {
+        "content": "<p><code>drop_in_place</code> with substs <code>&amp;[u8]</code> is what has the <code>*mut T</code>comes from.</p>",
+        "id": 190296256,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583941388
+    },
+    {
+        "content": "<p>aaaaah</p>",
+        "id": 190296445,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941461
+    },
+    {
+        "content": "<p>wait what</p>",
+        "id": 190296461,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941468
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> can you get a backtrace?</p>",
+        "id": 190296478,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941481
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> presumably the shim building code needs to be changed not to do that :P</p>",
+        "id": 190296593,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941536
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span>[DEBUG rustc_codegen_ssa::mir::analyze] non_ssa_locals: fx.instance=Instance { def: DropGlue(DefId(0:1502 ~ core[9627]::ptr[0]::drop_in_place[0]), None), substs: [&amp;u8] }\n[DEBUG rustc_codegen_ssa::mir::analyze] non_ssa_locals: fx.instance=Instance { def: DropGlue(DefId(0:1502 ~ core[9627]::ptr[0]::drop_in_place[0]), None), substs: [&amp;u8] }\nerror: internal compiler error: src/librustc_codegen_llvm/context.rs:900: failed to get layout for `*mut T`: the type `T` has an unknown layout\n\nthread &#39;rustc&#39; panicked at &#39;Box&lt;Any&gt;&#39;, src/librustc_errors/lib.rs:875:9\nstack backtrace:\n   0: backtrace::backtrace::libunwind::trace\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/backtrace-0.3.44/src/backtrace/libunwind.rs:86\n   1: backtrace::backtrace::trace_unsynchronized\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/backtrace-0.3.44/src/backtrace/mod.rs:66\n   2: std::sys_common::backtrace::_print_fmt\n             at src/libstd/sys_common/backtrace.rs:78\n   3: &lt;std::sys_common::backtrace::_print::DisplayBacktrace as core::fmt::Display&gt;::fmt\n             at src/libstd/sys_common/backtrace.rs:59\n   4: core::fmt::write\n             at src/libcore/fmt/mod.rs:1053\n   5: std::io::Write::write_fmt\n             at src/libstd/io/mod.rs:1428\n   6: std::sys_common::backtrace::_print\n             at src/libstd/sys_common/backtrace.rs:62\n   7: std::sys_common::backtrace::print\n             at src/libstd/sys_common/backtrace.rs:49\n   8: std::panicking::default_hook::{{closure}}\n             at src/libstd/panicking.rs:204\n   9: std::panicking::default_hook\n             at src/libstd/panicking.rs:224\n  10: &lt;alloc::boxed::Box&lt;F&gt; as core::ops::function::Fn&lt;A&gt;&gt;::call\n             at ./src/liballoc/boxed.rs:1031\n  11: rustc_driver::report_ice\n             at src/librustc_driver/lib.rs:1183\n  12: std::panicking::rust_panic_with_hook\n             at src/libstd/panicking.rs:474\n  13: std::panicking::begin_panic\n             at ./src/libstd/panicking.rs:397\n  14: rustc_errors::HandlerInner::bug\n             at src/librustc_errors/lib.rs:875\n  15: rustc_errors::Handler::bug\n             at src/librustc_errors/lib.rs:646\n  16: rustc::util::bug::opt_span_bug_fmt::{{closure}}\n             at src/librustc/util/bug.rs:36\n  17: rustc::ty::context::tls::with_opt::{{closure}}\n             at src/librustc/ty/context.rs:1829\n  18: rustc::ty::context::tls::with_context_opt\n             at src/librustc/ty/context.rs:1781\n  19: rustc::ty::context::tls::with_opt\n             at src/librustc/ty/context.rs:1829\n  20: rustc::util::bug::opt_span_bug_fmt\n             at src/librustc/util/bug.rs:32\n  21: rustc::util::bug::bug_fmt\n             at src/librustc/util/bug.rs:12\n  22: &lt;rustc_codegen_llvm::context::CodegenCx as rustc_target::abi::LayoutOf&gt;::spanned_layout_of::{{closure}}\n             at src/librustc_codegen_llvm/context.rs:900\n  23: core::result::Result&lt;T,E&gt;::unwrap_or_else\n             at ./src/libcore/result.rs:851\n  24: &lt;rustc_codegen_llvm::context::CodegenCx as rustc_target::abi::LayoutOf&gt;::spanned_layout_of\n             at src/librustc_codegen_llvm/context.rs:896\n  25: rustc_codegen_ssa::mir::analyze::non_ssa_locals\n             at ./src/librustc_codegen_ssa/mir/analyze.rs:29\n  26: rustc_codegen_ssa::mir::codegen_mir\n             at ./src/librustc_codegen_ssa/mir/mod.rs:196\n  27: rustc_codegen_ssa::base::codegen_instance\n             at ./src/librustc_codegen_ssa/base.rs:389\n  28: &lt;rustc::mir::mono::MonoItem as rustc_codegen_ssa::mono_item::MonoItemExt&gt;::define\n             at ./src/librustc_codegen_ssa/mono_item.rs:42\n  29: rustc_codegen_llvm::base::compile_codegen_unit::module_codegen\n             at src/librustc_codegen_llvm/base.rs:130\n  30: rustc::dep_graph::graph::DepGraph::with_task_impl::{{closure}}::{{closure}}\n             at ./src/librustc/dep_graph/graph.rs:286\n  31: rustc::ty::context::tls::enter_context::{{closure}}\n             at ./src/librustc/ty/context.rs:1720\n  32: rustc::ty::context::tls::set_tlv\n             at ./src/librustc/ty/context.rs:1704\n  33: rustc::ty::context::tls::enter_context\n             at ./src/librustc/ty/context.rs:1720\n  34: rustc::dep_graph::graph::DepGraph::with_task_impl::{{closure}}\n             at ./src/librustc/dep_graph/graph.rs:286\n  35: rustc::ty::context::tls::with_context::{{closure}}\n             at ./src/librustc/ty/context.rs:1792\n  36: rustc::ty::context::tls::with_context_opt\n             at ./src/librustc/ty/context.rs:1781\n  37: rustc::ty::context::tls::with_context\n             at ./src/librustc/ty/context.rs:1792\n  38: rustc::dep_graph::graph::DepGraph::with_task_impl\n             at ./src/librustc/dep_graph/graph.rs:282\n  39: rustc::dep_graph::graph::DepGraph::with_task\n             at ./src/librustc/dep_graph/graph.rs:209\n  40: rustc_codegen_llvm::base::compile_codegen_unit\n             at src/librustc_codegen_llvm/base.rs:109\n  41: &lt;rustc_codegen_llvm::LlvmCodegenBackend as rustc_codegen_ssa::traits::backend::ExtraBackendMethods&gt;::compile_codegen_unit\n             at src/librustc_codegen_llvm/lib.rs:109\n  42: rustc_codegen_ssa::base::codegen_crate\n             at ./src/librustc_codegen_ssa/base.rs:678\n  43: &lt;rustc_codegen_llvm::LlvmCodegenBackend as rustc_codegen_utils::codegen_backend::CodegenBackend&gt;::codegen_crate\n             at src/librustc_codegen_llvm/lib.rs:259\n  44: rustc_interface::passes::start_codegen::{{closure}}\n             at src/librustc_interface/passes.rs:964\n  45: rustc_data_structures::profiling::VerboseTimingGuard::run\n             at ./src/librustc_data_structures/profiling.rs:569\n  46: rustc_session::utils::&lt;impl rustc_session::session::Session&gt;::time\n             at ./src/librustc_session/utils.rs:9\n  47: rustc_interface::passes::start_codegen\n             at src/librustc_interface/passes.rs:963\n  48: rustc_interface::queries::Queries::ongoing_codegen::{{closure}}::{{closure}}\n             at src/librustc_interface/queries.rs:280\n  49: rustc_interface::passes::QueryContext::enter::{{closure}}\n             at src/librustc_interface/passes.rs:696\n  50: rustc::ty::context::tls::enter_global::{{closure}}\n             at ./src/librustc/ty/context.rs:1743\n  51: rustc::ty::context::tls::enter_context::{{closure}}\n             at ./src/librustc/ty/context.rs:1720\n  52: rustc::ty::context::tls::set_tlv\n             at ./src/librustc/ty/context.rs:1704\n  53: rustc::ty::context::tls::enter_context\n             at ./src/librustc/ty/context.rs:1720\n  54: rustc::ty::context::tls::enter_global\n             at ./src/librustc/ty/context.rs:1743\n  55: rustc_interface::passes::QueryContext::enter\n             at src/librustc_interface/passes.rs:696\n  56: rustc_interface::queries::Queries::ongoing_codegen::{{closure}}\n             at src/librustc_interface/queries.rs:274\n  57: rustc_interface::queries::Query&lt;T&gt;::compute\n             at src/librustc_interface/queries.rs:33\n  58: rustc_interface::queries::Queries::ongoing_codegen\n             at src/librustc_interface/queries.rs:272\n  59: rustc_driver::run_compiler::{{closure}}::{{closure}}\n             at src/librustc_driver/lib.rs:402\n  60: rustc_interface::queries::&lt;impl rustc_interface::interface::Compiler&gt;::enter\n             at ./src/librustc_interface/queries.rs:339\n  61: rustc_driver::run_compiler::{{closure}}\n             at src/librustc_driver/lib.rs:292\n  62: rustc_interface::interface::run_compiler_in_existing_thread_pool\n             at ./src/librustc_interface/interface.rs:199\n  63: rustc_interface::interface::run_compiler::{{closure}}\n             at ./src/librustc_interface/interface.rs:213\n  64: rustc_interface::util::spawn_thread_pool::{{closure}}::{{closure}}::{{closure}}\n             at ./src/librustc_interface/util.rs:155\n  65: scoped_tls::ScopedKey&lt;T&gt;::set\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/scoped-tls-1.0.0/src/lib.rs:137\n  66: rustc_interface::util::spawn_thread_pool::{{closure}}::{{closure}}\n             at ./src/librustc_interface/util.rs:151\n  67: scoped_tls::ScopedKey&lt;T&gt;::set\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/scoped-tls-1.0.0/src/lib.rs:137\n  68: rustc_ast::attr::with_globals::{{closure}}\n             at ./src/librustc_ast/attr/mod.rs:44\n  69: scoped_tls::ScopedKey&lt;T&gt;::set\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/scoped-tls-1.0.0/src/lib.rs:137\n  70: rustc_ast::attr::with_globals\n             at ./src/librustc_ast/attr/mod.rs:44\n  71: rustc_interface::util::spawn_thread_pool::{{closure}}\n             at ./src/librustc_interface/util.rs:150\n  72: rustc_interface::util::scoped_thread::{{closure}}\n             at ./src/librustc_interface/util.rs:125\nnote: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.\n\nnote: the compiler unexpectedly panicked. this is a bug.\n\nnote: we would appreciate a bug report: https://github.com/rust-lang/rust/blob/master/CONTRIBUTING.md#bug-reports\n\nnote: rustc 1.43.0-dev running on x86_64-unknown-linux-gnu\n\nnote: compiler flags: -Z macro-backtrace -Z binary-dep-depinfo -Z force-unstable-if-unmarked -C opt-level=3 -C debuginfo=1 -C incremental -C link-args=-Wl,-rpath,$ORIGIN/../lib -C prefer-dynamic -C llvm-args=-import-instr-limit=10 -C debug-assertions=y --crate-type lib\n\nnote: some of the compiler flags provided by cargo are hidden\n\nquery stack during panic:\nend of query stack\nerror: aborting due to previous error\n\nerror: could not compile `core`.\nwarning: build failed, waiting for other jobs to finish...\n</pre></div>",
+        "id": 190296604,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583941544
+    },
+    {
+        "content": "<p>okay so it's an argument local</p>",
+        "id": 190296732,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941594
+    },
+    {
+        "content": "<p>(I added that log statement to <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_codegen_ssa/mir/analyze.rs#L28\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/master/src/librustc_codegen_ssa/mir/analyze.rs#L28\">just before this line</a> with a <code>target: </code> so I could enable that and not anything else)</p>",
+        "id": 190296747,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583941604
+    },
+    {
+        "content": "<p>OOOOH <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/shim.rs#L175-L179\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/shim.rs#L175-L179\">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/shim.rs#L175-L179</a></p>",
+        "id": 190296812,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941637
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> <span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> we kind of have a <code>DropTrivial</code> polymorphic shim already lmao</p>",
+        "id": 190296860,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941655
+    },
+    {
+        "content": "<p>you need to special-case <code>DropGlue { ty: Some(_)</code> only</p>",
+        "id": 190296899,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941672
+    },
+    {
+        "content": "<p>when it's <code>None</code> it's the noop version</p>",
+        "id": 190296962,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941688
+    },
+    {
+        "content": "<p>to clarify, special-case to not subst when <code>Some(_)</code>, or the opposite?</p>",
+        "id": 190297054,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583941747
+    },
+    {
+        "content": "<p>former</p>",
+        "id": 190297080,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941753
+    },
+    {
+        "content": "<p>because in the <code>None</code> case substitution is necessary since it's exactly as polymorphic as <code>DefId</code></p>",
+        "id": 190297136,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583941775
+    },
+    {
+        "content": "<p>Ooo, now I get the ICE that I got when I had logs.</p>",
+        "id": 190297316,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583941853
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116107\">@davidtwco</span> the suspense is killing me :P</p>",
+        "id": 190298395,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942338
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span>[DEBUG rustc_codegen_ssa::mir::analyze] process_place: base_ty=PlaceTy { ty: Args, variant_index: None } self.instance=Instance { def: FnPtrShim(DefId(0:2087 ~ core[9627]::ops[0]::function[0]::FnOnce[0]::call_once[0]), for&lt;&#39;r, &#39;s&gt; fn(&amp;&#39;r usize, &amp;&#39;s usize) -&gt; cmp::Ordering {&lt;usize as cmp::Ord&gt;::cmp}), substs: [for&lt;&#39;r, &#39;s&gt; fn(&amp;&#39;r usize, &amp;&#39;s usize) -&gt; cmp::Ordering {&lt;usize as cmp::Ord&gt;::cmp}, (&amp;usize, &amp;usize)] }\nerror: internal compiler error: src/librustc_codegen_llvm/context.rs:900: failed to get layout for `Args`: the type `Args` has an unknown layout\n\nthread &#39;rustc&#39; panicked at &#39;Box&lt;Any&gt;&#39;, src/librustc_errors/lib.rs:875:9\nstack backtrace:\n   0: backtrace::backtrace::libunwind::trace\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/backtrace-0.3.44/src/backtrace/libunwind.rs:86\n   1: backtrace::backtrace::trace_unsynchronized\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/backtrace-0.3.44/src/backtrace/mod.rs:66\n   2: std::sys_common::backtrace::_print_fmt\n             at src/libstd/sys_common/backtrace.rs:78\n   3: &lt;std::sys_common::backtrace::_print::DisplayBacktrace as core::fmt::Display&gt;::fmt\n             at src/libstd/sys_common/backtrace.rs:59\n   4: core::fmt::write\n             at src/libcore/fmt/mod.rs:1053\n   5: std::io::Write::write_fmt\n             at src/libstd/io/mod.rs:1428\n   6: std::sys_common::backtrace::_print\n             at src/libstd/sys_common/backtrace.rs:62\n   7: std::sys_common::backtrace::print\n             at src/libstd/sys_common/backtrace.rs:49\n   8: std::panicking::default_hook::{{closure}}\n             at src/libstd/panicking.rs:204\n   9: std::panicking::default_hook\n             at src/libstd/panicking.rs:224\n  10: &lt;alloc::boxed::Box&lt;F&gt; as core::ops::function::Fn&lt;A&gt;&gt;::call\n             at ./src/liballoc/boxed.rs:1031\n  11: rustc_driver::report_ice\n             at src/librustc_driver/lib.rs:1183\n  12: std::panicking::rust_panic_with_hook\n             at src/libstd/panicking.rs:474\n  13: std::panicking::begin_panic\n             at ./src/libstd/panicking.rs:397\n  14: rustc_errors::HandlerInner::bug\n             at src/librustc_errors/lib.rs:875\n  15: rustc_errors::Handler::bug\n             at src/librustc_errors/lib.rs:646\n  16: rustc::util::bug::opt_span_bug_fmt::{{closure}}\n             at src/librustc/util/bug.rs:36\n  17: rustc::ty::context::tls::with_opt::{{closure}}\n             at src/librustc/ty/context.rs:1829\n  18: rustc::ty::context::tls::with_context_opt\n             at src/librustc/ty/context.rs:1781\n  19: rustc::ty::context::tls::with_opt\n             at src/librustc/ty/context.rs:1829\n  20: rustc::util::bug::opt_span_bug_fmt\n             at src/librustc/util/bug.rs:32\n  21: rustc::util::bug::bug_fmt\n             at src/librustc/util/bug.rs:12\n  22: &lt;rustc_codegen_llvm::context::CodegenCx as rustc_target::abi::LayoutOf&gt;::spanned_layout_of::{{closure}}\n             at src/librustc_codegen_llvm/context.rs:900\n  23: core::result::Result&lt;T,E&gt;::unwrap_or_else\n             at ./src/libcore/result.rs:851\n  24: &lt;rustc_codegen_llvm::context::CodegenCx as rustc_target::abi::LayoutOf&gt;::spanned_layout_of\n             at src/librustc_codegen_llvm/context.rs:896\n  25: rustc_codegen_ssa::mir::analyze::LocalAnalyzer&lt;Bx&gt;::process_place\n             at ./src/librustc_codegen_ssa/mir/analyze.rs:134\n  26: &lt;rustc_codegen_ssa::mir::analyze::LocalAnalyzer&lt;Bx&gt; as rustc::mir::visit::Visitor&gt;::visit_place\n             at ./src/librustc_codegen_ssa/mir/analyze.rs:266\n  27: rustc::mir::visit::Visitor::super_operand\n             at ./src/librustc/mir/visit.rs:677\n  28: rustc::mir::visit::Visitor::visit_operand\n             at ./src/librustc/mir/visit.rs:141\n  29: rustc::mir::visit::Visitor::super_terminator_kind\n             at ./src/librustc/mir/visit.rs:494\n  30: &lt;rustc_codegen_ssa::mir::analyze::LocalAnalyzer&lt;Bx&gt; as rustc::mir::visit::Visitor&gt;::visit_terminator_kind\n             at ./src/librustc_codegen_ssa/mir/analyze.rs:261\n  31: rustc::mir::visit::Visitor::super_terminator\n             at ./src/librustc/mir/visit.rs:432\n  32: rustc::mir::visit::Visitor::visit_terminator\n             at ./src/librustc/mir/visit.rs:117\n  33: rustc::mir::visit::Visitor::super_basic_block_data\n             at ./src/librustc/mir/visit.rs:328\n  34: rustc::mir::visit::Visitor::visit_basic_block_data\n             at ./src/librustc/mir/visit.rs:93\n  35: rustc::mir::visit::Visitor::super_body\n             at ./src/librustc/mir/visit.rs:275\n  36: rustc::mir::visit::Visitor::visit_body\n             at ./src/librustc/mir/visit.rs:87\n  37: rustc_codegen_ssa::mir::analyze::non_ssa_locals\n             at ./src/librustc_codegen_ssa/mir/analyze.rs:23\n  38: rustc_codegen_ssa::mir::codegen_mir\n             at ./src/librustc_codegen_ssa/mir/mod.rs:196\n  39: rustc_codegen_ssa::base::codegen_instance\n             at ./src/librustc_codegen_ssa/base.rs:389\n  40: &lt;rustc::mir::mono::MonoItem as rustc_codegen_ssa::mono_item::MonoItemExt&gt;::define\n             at ./src/librustc_codegen_ssa/mono_item.rs:42\n  41: rustc_codegen_llvm::base::compile_codegen_unit::module_codegen\n             at src/librustc_codegen_llvm/base.rs:130\n  42: rustc::dep_graph::graph::DepGraph::with_task_impl::{{closure}}::{{closure}}\n             at ./src/librustc/dep_graph/graph.rs:286\n  43: rustc::ty::context::tls::enter_context::{{closure}}\n             at ./src/librustc/ty/context.rs:1720\n  44: rustc::ty::context::tls::set_tlv\n             at ./src/librustc/ty/context.rs:1704\n  45: rustc::ty::context::tls::enter_context\n             at ./src/librustc/ty/context.rs:1720\n  46: rustc::dep_graph::graph::DepGraph::with_task_impl::{{closure}}\n             at ./src/librustc/dep_graph/graph.rs:286\n  47: rustc::ty::context::tls::with_context::{{closure}}\n             at ./src/librustc/ty/context.rs:1792\n  48: rustc::ty::context::tls::with_context_opt\n             at ./src/librustc/ty/context.rs:1781\n  49: rustc::ty::context::tls::with_context\n             at ./src/librustc/ty/context.rs:1792\n  50: rustc::dep_graph::graph::DepGraph::with_task_impl\n             at ./src/librustc/dep_graph/graph.rs:282\n  51: rustc::dep_graph::graph::DepGraph::with_task\n             at ./src/librustc/dep_graph/graph.rs:209\n  52: rustc_codegen_llvm::base::compile_codegen_unit\n             at src/librustc_codegen_llvm/base.rs:109\n  53: &lt;rustc_codegen_llvm::LlvmCodegenBackend as rustc_codegen_ssa::traits::backend::ExtraBackendMethods&gt;::compile_codegen_unit\n             at src/librustc_codegen_llvm/lib.rs:109\n  54: rustc_codegen_ssa::base::codegen_crate\n             at ./src/librustc_codegen_ssa/base.rs:678\n  55: &lt;rustc_codegen_llvm::LlvmCodegenBackend as rustc_codegen_utils::codegen_backend::CodegenBackend&gt;::codegen_crate\n             at src/librustc_codegen_llvm/lib.rs:259\n  56: rustc_interface::passes::start_codegen::{{closure}}\n             at src/librustc_interface/passes.rs:964\n  57: rustc_data_structures::profiling::VerboseTimingGuard::run\n             at ./src/librustc_data_structures/profiling.rs:569\n  58: rustc_session::utils::&lt;impl rustc_session::session::Session&gt;::time\n             at ./src/librustc_session/utils.rs:9\n  59: rustc_interface::passes::start_codegen\n             at src/librustc_interface/passes.rs:963\n  60: rustc_interface::queries::Queries::ongoing_codegen::{{closure}}::{{closure}}\n             at src/librustc_interface/queries.rs:280\n  61: rustc_interface::passes::QueryContext::enter::{{closure}}\n             at src/librustc_interface/passes.rs:696\n  62: rustc::ty::context::tls::enter_global::{{closure}}\n             at ./src/librustc/ty/context.rs:1743\n  63: rustc::ty::context::tls::enter_context::{{closure}}\n             at ./src/librustc/ty/context.rs:1720\n  64: rustc::ty::context::tls::set_tlv\n             at ./src/librustc/ty/context.rs:1704\n  65: rustc::ty::context::tls::enter_context\n             at ./src/librustc/ty/context.rs:1720\n  66: rustc::ty::context::tls::enter_global\n             at ./src/librustc/ty/context.rs:1743\n  67: rustc_interface::passes::QueryContext::enter\n             at src/librustc_interface/passes.rs:696\n  68: rustc_interface::queries::Queries::ongoing_codegen::{{closure}}\n             at src/librustc_interface/queries.rs:274\n  69: rustc_interface::queries::Query&lt;T&gt;::compute\n             at src/librustc_interface/queries.rs:33\n  70: rustc_interface::queries::Queries::ongoing_codegen\n             at src/librustc_interface/queries.rs:272\n  71: rustc_driver::run_compiler::{{closure}}::{{closure}}\n             at src/librustc_driver/lib.rs:402\n  72: rustc_interface::queries::&lt;impl rustc_interface::interface::Compiler&gt;::enter\n             at ./src/librustc_interface/queries.rs:339\n  73: rustc_driver::run_compiler::{{closure}}\n             at src/librustc_driver/lib.rs:292\n  74: rustc_interface::interface::run_compiler_in_existing_thread_pool\n             at ./src/librustc_interface/interface.rs:199\n  75: rustc_interface::interface::run_compiler::{{closure}}\n             at ./src/librustc_interface/interface.rs:213\n  76: rustc_interface::util::spawn_thread_pool::{{closure}}::{{closure}}::{{closure}}\n             at ./src/librustc_interface/util.rs:155\n  77: scoped_tls::ScopedKey&lt;T&gt;::set\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/scoped-tls-1.0.0/src/lib.rs:137\n  78: rustc_interface::util::spawn_thread_pool::{{closure}}::{{closure}}\n             at ./src/librustc_interface/util.rs:151\n  79: scoped_tls::ScopedKey&lt;T&gt;::set\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/scoped-tls-1.0.0/src/lib.rs:137\n  80: rustc_ast::attr::with_globals::{{closure}}\n             at ./src/librustc_ast/attr/mod.rs:44\n  81: scoped_tls::ScopedKey&lt;T&gt;::set\n             at /home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/scoped-tls-1.0.0/src/lib.rs:137\n  82: rustc_ast::attr::with_globals\n             at ./src/librustc_ast/attr/mod.rs:44\n...\n</pre></div>",
+        "id": 190298402,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942342
+    },
+    {
+        "content": "<p>I was trying to work something out before stealing more of your time, but there you go.</p>",
+        "id": 190298427,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942358
+    },
+    {
+        "content": "<p>oh that's a <code>Fn</code> traits shim</p>",
+        "id": 190298456,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942369
+    },
+    {
+        "content": "<p>you can comment out <code>FnPtrShim</code> for now and leave a FIXME comment I guess?</p>",
+        "id": 190298595,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942437
+    },
+    {
+        "content": "<p>presumably <code>Args</code> is the pseudo-VG tuple type parameter and it's obtained from the <code>substs</code></p>",
+        "id": 190298654,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942471
+    },
+    {
+        "content": "<p>wait why would <code>FnPtrShim</code> need to exist like that</p>",
+        "id": 190298683,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942489
+    },
+    {
+        "content": "<p>As far as I can tell, that <code>Ord</code> impl is implemented by the derive.</p>",
+        "id": 190298784,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942524
+    },
+    {
+        "content": "<p><code>FnPtrShim</code> should probably be like <code>ClosureOnceShim</code></p>",
+        "id": 190298863,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942574
+    },
+    {
+        "content": "<p>oh right we don't have proper untupling yet ughh</p>",
+        "id": 190298894,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942595
+    },
+    {
+        "content": "<p>the problem is the shim needs to be something like this:</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">fn</span> <span class=\"nf\">call_once</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">...</span><span class=\"n\">args</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"bp\">self</span><span class=\"p\">(...</span><span class=\"n\">args</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 190299037,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942657
+    },
+    {
+        "content": "<p>and we can do the first <code>...</code> but can't do the second one (it's triggered by <code>extern \"rust-call\"</code> and we haven't fixed that mess yet)</p>",
+        "id": 190299131,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942708
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span>[DEBUG rustc_codegen_ssa::mir::analyze] process_place: elem_ty=Self self.instance=Instance { def: VtableShim(DefId(2:2087 ~ core[9627]::ops[0]::function[0]::FnOnce[0]::call_once[0])), substs: [[closure@/home/david/.cargo/registry/src/github.com-1ecc6299db9ec823/backtrace-0.3.44/src/symbolize/libbacktrace.rs:464:22: 467:14 called:&amp;mut bool, cb:&amp;mut &amp;mut dyn for&lt;&#39;r&gt; rustc_std_workspace_core::ops::FnMut(&amp;&#39;r symbolize::Symbol)], (&amp;symbolize::Symbol,)] }\nerror: internal compiler error: src/librustc_codegen_llvm/context.rs:900: failed to get layout for `Self`: the type `Self` has an unknown layout\n\nthread &#39;rustc&#39; panicked at &#39;Box&lt;Any&gt;&#39;, src/librustc_errors/lib.rs:875:9\nstack backtrace:\n   0: backtrace::backtrace::libunwind::trace\n             at ./src/backtrace/libunwind.rs:86\n   1: backtrace::backtrace::trace_unsynchronized\n             at ./src/backtrace/mod.rs:66\n   2: std::sys_common::backtrace::_print_fmt\n             at src/libstd/sys_common/backtrace.rs:78\n   3: &lt;std::sys_common::backtrace::_print::DisplayBacktrace as core::fmt::Display&gt;::fmt\n             at src/libstd/sys_common/backtrace.rs:59\n   4: core::fmt::write\n             at src/libcore/fmt/mod.rs:1053\n   5: std::io::Write::write_fmt\n             at src/libstd/io/mod.rs:1428\n   6: std::sys_common::backtrace::_print\n             at src/libstd/sys_common/backtrace.rs:62\n   7: std::sys_common::backtrace::print\n             at src/libstd/sys_common/backtrace.rs:49\n   8: std::panicking::default_hook::{{closure}}\n             at src/libstd/panicking.rs:204\n   9: std::panicking::default_hook\n             at src/libstd/panicking.rs:224\n  10: &lt;alloc::boxed::Box&lt;F&gt; as core::ops::function::Fn&lt;A&gt;&gt;::call\n             at /home/david/projects/rust/rust0/src/liballoc/boxed.rs:1031\n  11: rustc_driver::report_ice\n             at src/librustc_driver/lib.rs:1183\n  12: std::panicking::rust_panic_with_hook\n             at src/libstd/panicking.rs:474\n  13: std::panicking::begin_panic\n             at /home/david/projects/rust/rust0/src/libstd/panicking.rs:397\n  14: rustc_errors::HandlerInner::bug\n             at src/librustc_errors/lib.rs:875\n  15: rustc_errors::Handler::bug\n             at src/librustc_errors/lib.rs:646\n  16: rustc::util::bug::opt_span_bug_fmt::{{closure}}\n             at src/librustc/util/bug.rs:36\n  17: rustc::ty::context::tls::with_opt::{{closure}}\n             at src/librustc/ty/context.rs:1829\n  18: rustc::ty::context::tls::with_context_opt\n             at src/librustc/ty/context.rs:1781\n  19: rustc::ty::context::tls::with_opt\n             at src/librustc/ty/context.rs:1829\n  20: rustc::util::bug::opt_span_bug_fmt\n             at src/librustc/util/bug.rs:32\n  21: rustc::util::bug::bug_fmt\n             at src/librustc/util/bug.rs:12\n  22: &lt;rustc_codegen_llvm::context::CodegenCx as rustc_target::abi::LayoutOf&gt;::spanned_layout_of::{{closure}}\n             at src/librustc_codegen_llvm/context.rs:900\n  23: core::result::Result&lt;T,E&gt;::unwrap_or_else\n             at /home/david/projects/rust/rust0/src/libcore/result.rs:851\n  24: &lt;rustc_codegen_llvm::context::CodegenCx as rustc_target::abi::LayoutOf&gt;::spanned_layout_of\n             at src/librustc_codegen_llvm/context.rs:896\n  25: rustc_codegen_ssa::mir::analyze::LocalAnalyzer&lt;Bx&gt;::process_place\n             at /home/david/projects/rust/rust0/src/librustc_codegen_ssa/mir/analyze.rs:129\n</pre></div>",
+        "id": 190299276,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942776
+    },
+    {
+        "content": "<p>Same thing, but vtables?</p>",
+        "id": 190299298,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942787
+    },
+    {
+        "content": "<p>is this with polymorphization on?</p>",
+        "id": 190299326,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942802
+    },
+    {
+        "content": "<p>It is</p>",
+        "id": 190299336,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942806
+    },
+    {
+        "content": "<p>I've not split off another directory yet.</p>",
+        "id": 190299350,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942813
+    },
+    {
+        "content": "<p>It does have the \"vtable workaround\" that I added.</p>",
+        "id": 190299367,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942823
+    },
+    {
+        "content": "<p>do that first before it drives you mad :P</p>",
+        "id": 190299378,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942829
+    },
+    {
+        "content": "<p>I can't at a glance figure out what's at fault here</p>",
+        "id": 190299417,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942846
+    },
+    {
+        "content": "<p>I suppose, but I'll need to solve these ICEs as soon as I rebase on top of the branch that does this w/out.</p>",
+        "id": 190299439,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942856
+    },
+    {
+        "content": "<p>I mean, we need to fix vtables anyway, I suppose?</p>",
+        "id": 190299484,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942879
+    },
+    {
+        "content": "<p>whatever their problem is</p>",
+        "id": 190299548,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942894
+    },
+    {
+        "content": "<p>getting another directory up-to-date, will be a moment</p>",
+        "id": 190299595,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583942918
+    },
+    {
+        "content": "<p>but also I need to leave, they're going to sanitize the office soon</p>",
+        "id": 190299680,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942971
+    },
+    {
+        "content": "<p>(I don't open Zulip on my phone because my battery dreads it but feel free to PM me on Discord)</p>",
+        "id": 190299725,
+        "sender_full_name": "eddyb",
+        "timestamp": 1583942994
+    },
+    {
+        "content": "<p>For those following along at home, <a href=\"https://github.com/rust-lang/rust/issues/69935\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/69935\">#69935</a></p>",
+        "id": 190322983,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1583955820
+    }
+]

@@ -1,0 +1,86 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> I did some more refactoring after we talked yesterday, and now I have something that I am pretty happy with. It might be even nicer if we had type information on actual memory accesses, but alas, this is good enough I think. The key idea was to accept that we have two different \"stack traversals\":</p>\n<ul>\n<li>One done on a deref (evaluating the <code>*</code> operator), typed, which checks whether the <code>Uniq</code> tag is present and whether things are sufficiently frozen. This does not change the stack, but if it finds a problem that means we got UB.</li>\n<li>And one on actual acesses, untyped (just knows whether this is read or write), which pops until it finds a matching item. This cannot check freezing, and when reading it will happily match a <code>Uniq</code> pointer with a <code>Shr</code> item because more reads are always okay. So this is more liberal than the deref check, but it <em>does</em> pop the stack until it finds something, invalidating pointers that may no longer be used. (We do <em>not</em> match <code>Uniq</code> ptrs with <code>Shr</code> items when writing, so that we can be sure after a write through a mutable reference that this is now again the exclusive ref to be used for this location.)</li>\n</ul>\n<p>This means we have three core per-location borrow operations: deref, access, create.<br>\nA reborrow is then <em>generally</em> described as doing all of those operations (deref original ptr, then access with it [write access if we are creating a mutable borrow], then create new borrow), <em>except</em> that if we create a raw borrow, we <a href=\"https://github.com/RalfJung/miri/blob/escape-to-raw/src/stacked_borrows.rs#L336-L355\" target=\"_blank\" title=\"https://github.com/RalfJung/miri/blob/escape-to-raw/src/stacked_borrows.rs#L336-L355\">might skip the last two steps</a>.</p>",
+        "id": 147361970,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1541757944
+    },
+    {
+        "content": "<p>I had to disable reborrowing in <code>UnsafeCell::get</code> because that one needs to immediately take a raw ptr, or else the deref done as part of the reborrow chokes: It sees a shared reference and expects it to be frozen.</p>",
+        "id": 147362075,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1541758075
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> nice! This is not, I suppose, specific to <code>UnsafeCell::get</code>, right? That is, this is basically one of those cases where the \"special semantics\" of <code>&amp;x as *const u32</code> is important?</p>",
+        "id": 147592396,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542117714
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> Yes, exactly.</p>",
+        "id": 147592498,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1542117822
+    },
+    {
+        "content": "<p>Also after talking with a friend in the bus yesterday, I was able to make the special exception for raw borrows slightly less special</p>",
+        "id": 147592549,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1542117844
+    },
+    {
+        "content": "<p>It is now a general \"redundant reborrow\" rule: For all reborrows, we check if they are redundant, and if they are we do not do them.</p>",
+        "id": 147592574,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1542117871
+    },
+    {
+        "content": "<p>A reborrow is redundant if the new reference is <em>already</em> dereferencable, and if moreover its item in the stack lives above the item of the old reference in the stack.</p>",
+        "id": 147592588,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1542117898
+    },
+    {
+        "content": "<p>Is there a case where this applies other than raw pointers? I guess <code>&amp;T</code></p>",
+        "id": 147593849,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542119006
+    },
+    {
+        "content": "<p>It certainly never applies for mutable references</p>",
+        "id": 147593991,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1542119103
+    },
+    {
+        "content": "<p>I am still pondering whether this changes behavior for <code>&amp;T</code> with <code>T</code> frozen</p>",
+        "id": 147594009,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1542119116
+    },
+    {
+        "content": "<p>the test suite did not see any change, that much I can say^^</p>",
+        "id": 147594020,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1542119125
+    },
+    {
+        "content": "<p>:)</p>",
+        "id": 147594221,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542119289
+    },
+    {
+        "content": "<p>No it does not change behavior. The redundancy case can only occur if the location is already frozen, in which case both a read access and pushing a new <code>Shr</code> onto the stack do nothing.</p>",
+        "id": 147600553,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1542124895
+    },
+    {
+        "content": "<p>The nice thing about this is that I can now assert that we will never push to a frozen stack, instead of having to handle that case. This will just not happen any more, it is caught by the redundancy check.</p>",
+        "id": 147600910,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1542125192
+    }
+]

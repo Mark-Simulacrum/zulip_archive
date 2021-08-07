@@ -1,0 +1,243 @@
+<html>
+<head><meta charset="utf-8"><title>too-lazy normalization · wg-traits · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/index.html">wg-traits</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html">too-lazy normalization</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="195875261"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195875261" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195875261">(Apr 30 2020 at 17:41)</a>:</h4>
+<p>So I'm debugging an overflow in the recursive solver while solving something in Diesel, and it works like this:<br>
+There are a lot of macro-generated types with impls of the form</p>
+<div class="codehilite"><pre><span></span><code><span class="w">                </span><span class="k">impl</span><span class="o">&lt;</span><span class="n">DB</span>: <span class="nc">Backend</span><span class="o">&gt;</span><span class="w"> </span><span class="n">QueryFragment</span><span class="o">&lt;</span><span class="n">DB</span><span class="o">&gt;</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Star1</span><span class="w"> </span><span class="k">where</span><span class="w"></span>
+<span class="w">                    </span><span class="o">&lt;</span><span class="n">Table1</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">QuerySource</span><span class="o">&gt;</span>::<span class="n">FromClause</span>: <span class="nc">QueryFragment</span><span class="o">&lt;</span><span class="n">DB</span><span class="o">&gt;</span><span class="w"></span>
+</code></pre></div>
+
+
+<p>, same for <code>Star2</code> and <code>Table2</code>, and so on. (actually they are all just called <code>star</code> and <code>table</code>, which was very confusing at first.)</p>
+<p>So to solve <code>Star1: QueryFragment</code>, we want to solve <code>&lt;Table1 as QuerySource&gt;::FromClause: QueryFragment</code>. This would be easy if we normalized the projection first, but instead we look for all impls for <code>QueryFragment</code> and try them all. Among them, we find the impl for <code>Star1</code>, but that gives a cycle of course. Then we find the impl for <code>Star2</code>, and continue with that, which means solving <code>&lt;Table2 as QuerySource&gt;::FromClause: QueryFragment</code>. So this isn't a real infinite loop, there just are enough of these impls that the recursion limit gets triggered.</p>
+<p>Now I think one problem is that we try to solve <code>&lt;Table1 as QuerySource&gt;::FromClause: QueryFragment</code> by enumerating all impls, even though the trait is non-enumerable. That's because we don't flounder if the self type is a projection, so I think we should. </p>
+<p>But that will just mean that we can't solve <code>Star1: QueryFragment</code>, even though it's true and would be easy to solve if we just normalized the projection first. So, should we somehow detect this situation and try normalizing first?</p>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span></p>
+
+
+
+<a name="195876967"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195876967" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195876967">(Apr 30 2020 at 17:54)</a>:</h4>
+<p>floundering on projections as self types would make the <code>Flatten: Iterator</code> impl not work anymore <span aria-label="sad" class="emoji emoji-2639" role="img" title="sad">:sad:</span></p>
+
+
+
+<a name="195877168"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877168" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877168">(Apr 30 2020 at 17:56)</a>:</h4>
+<p>Ok so I sort of tried to make a "minimal" program here</p>
+
+
+
+<a name="195877172"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877172" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877172">(Apr 30 2020 at 17:56)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>trait QueryFragment {}
+struct Frag {}
+impl QueryFragment for Frag {}
+struct Star1 {}
+trait QuerySource {
+    type FromClause;
+}
+struct Table1 {}
+impl QuerySource for Table1 {
+    type FromClause = Frag;
+}
+impl QueryFragment for Star1 where &lt;Table1 as QuerySource&gt;::FromClause: QueryFragment {}
+</code></pre></div>
+
+
+
+<a name="195877187"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877187" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877187">(Apr 30 2020 at 17:56)</a>:</h4>
+<p>Did I get everything right?</p>
+
+
+
+<a name="195877282"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877282" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877282">(Apr 30 2020 at 17:57)</a>:</h4>
+<p>I think so, yeah</p>
+
+
+
+<a name="195877335"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877335" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877335">(Apr 30 2020 at 17:57)</a>:</h4>
+<p>that doesn't crash of course, because it would need <code>Table2</code> .. <code>Table100</code></p>
+
+
+
+<a name="195877349"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877349" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877349">(Apr 30 2020 at 17:57)</a>:</h4>
+<p>right</p>
+
+
+
+<a name="195877388"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877388" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877388">(Apr 30 2020 at 17:57)</a>:</h4>
+<p>I'm just trying to wrap my head around the general structure</p>
+
+
+
+<a name="195877537"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877537" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877537">(Apr 30 2020 at 17:58)</a>:</h4>
+<p>I'm actually not sure whether the SLG solver deals better with this</p>
+
+
+
+<a name="195877559"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877559" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877559">(Apr 30 2020 at 17:58)</a>:</h4>
+<p>yeah, I don't think so</p>
+
+
+
+<a name="195877603"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195877603" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195877603">(Apr 30 2020 at 17:59)</a>:</h4>
+<p>I think the "cause" of this is that non-enumerable just leads to floundering</p>
+
+
+
+<a name="195878150"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195878150" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195878150">(Apr 30 2020 at 18:03)</a>:</h4>
+<p>Well, there's actually two separate problems here, I think</p>
+
+
+
+<a name="195878489"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195878489" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195878489">(Apr 30 2020 at 18:06)</a>:</h4>
+<p>mmm maybe</p>
+
+
+
+<a name="195878492"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195878492" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195878492">(Apr 30 2020 at 18:06)</a>:</h4>
+<p>let me think</p>
+
+
+
+<a name="195878657"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195878657" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195878657">(Apr 30 2020 at 18:07)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="129457">Florian Diebold</span> <a href="#narrow/stream/144729-wg-traits/topic/too-lazy.20normalization/near/195876967" title="#narrow/stream/144729-wg-traits/topic/too-lazy.20normalization/near/195876967">said</a>:</p>
+<blockquote>
+<p>floundering on projections as self types would make the <code>Flatten: Iterator</code> impl not work anymore <span aria-label="sad" class="emoji emoji-2639" role="img" title="sad">:sad:</span></p>
+</blockquote>
+<p>wait why</p>
+
+
+
+<a name="195880799"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195880799" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195880799">(Apr 30 2020 at 18:22)</a>:</h4>
+<p>because it uses assoc type bounds:</p>
+<div class="codehilite"><pre><span></span><code><span class="w">    </span><span class="n">I</span>: <span class="nb">Iterator</span><span class="o">&lt;</span><span class="n">Item</span>: <span class="nb">IntoIterator</span><span class="o">&lt;</span><span class="n">IntoIter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">U</span><span class="p">,</span><span class="w"> </span><span class="n">Item</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">U</span>::<span class="n">Item</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+</code></pre></div>
+
+
+<p>which desugar to <code>&lt;I as Iterator&gt;::Item: IntoIterator&lt;&gt;</code></p>
+
+
+
+<a name="195880921"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195880921" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195880921">(Apr 30 2020 at 18:23)</a>:</h4>
+<p>hmm</p>
+
+
+
+<a name="195881099"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195881099" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195881099">(Apr 30 2020 at 18:24)</a>:</h4>
+<p>for the recursive solver, it seems a somewhat plausible solution to normalize the projection first if we encounter such a goal. maybe there's a more elegant way though</p>
+
+
+
+<a name="195881179"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195881179" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195881179">(Apr 30 2020 at 18:25)</a>:</h4>
+<p>Yeah, I'm trying to think about how we would/should solve this with SLG</p>
+
+
+
+<a name="195882147"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195882147" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195882147">(Apr 30 2020 at 18:31)</a>:</h4>
+<p>I think <code>CouldMatch</code> should be smarter</p>
+
+
+
+<a name="195882232"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195882232" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195882232">(Apr 30 2020 at 18:32)</a>:</h4>
+<p>right now it only checks <code>Apply</code>/<code>Apply</code></p>
+
+
+
+<a name="195882304"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195882304" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195882304">(Apr 30 2020 at 18:32)</a>:</h4>
+<p><em>That's</em> where I would do any normalization (if any)</p>
+
+
+
+<a name="195882406"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195882406" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195882406">(Apr 30 2020 at 18:33)</a>:</h4>
+<p>But also when trying to solve <code>&lt;Table1 as QuerySource&gt;::FromClause: QueryFragment</code></p>
+
+
+
+<a name="195882554"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195882554" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195882554">(Apr 30 2020 at 18:34)</a>:</h4>
+<p>err</p>
+
+
+
+<a name="195882571"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195882571" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jack Huey <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195882571">(Apr 30 2020 at 18:34)</a>:</h4>
+<p>I don't know where I was going</p>
+
+
+
+<a name="195953991"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195953991" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195953991">(May 01 2020 at 11:57)</a>:</h4>
+<p>actually this reminds me of something <span class="user-mention" data-user-id="116009">@nikomatsakis</span> mentioned, which (I think) was desugaring projections in goals before the solver, so <code>Implemented(&lt;Foo as Bar&gt;::Type: Trait)</code> would actually become <code>Implemented(?0: Trait), AliasEq(&lt;Foo as Bar&gt;::Type = ?0)</code></p>
+
+
+
+<a name="195956595"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195956595" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Areredify <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195956595">(May 01 2020 at 12:36)</a>:</h4>
+<p>Yeah, that is what converting from semantic to syntactic equality is about</p>
+
+
+
+<a name="195956792"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195956792" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Areredify <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195956792">(May 01 2020 at 12:39)</a>:</h4>
+<p>I have a pending pr about it, but it fails in one test, I didn't get a chance to fix it yet</p>
+
+
+
+<a name="195956850"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/195956850" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Areredify <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#195956850">(May 01 2020 at 12:40)</a>:</h4>
+<p><a href="https://github.com/rust-lang/chalk/pull/401" title="https://github.com/rust-lang/chalk/pull/401">https://github.com/rust-lang/chalk/pull/401</a></p>
+
+
+
+<a name="196221697"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/196221697" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#196221697">(May 04 2020 at 18:35)</a>:</h4>
+<p>Indeed, I was going to say that avoiding this sort of problem was part of the motivation for the sem-to-syn-equality work</p>
+
+
+
+<a name="196221811"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/196221811" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#196221811">(May 04 2020 at 18:36)</a>:</h4>
+<p>I think it would likely "just fix" this problem? In particular, we would create an inference variable for the normalized form of the projection -- if we tried to solve before we've evaluated <code>ProjectionEq</code>, then we would flounder, but later we'll have enough type info to continue.</p>
+
+
+
+<a name="196222642"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/too-lazy%20normalization/near/196222642" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://rust-lang.github.io/zulip_archive/stream/144729-wg-traits/topic/too-lazy.20normalization.html#196222642">(May 04 2020 at 18:42)</a>:</h4>
+<p>yeah, I think it would</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

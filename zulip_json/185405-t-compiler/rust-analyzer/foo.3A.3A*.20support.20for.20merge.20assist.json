@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>Hi, first time posting here, please be gentle.</p>\n<p>I'm working on the <a href=\"https://github.com/rust-analyzer/rust-analyzer/issues/3728\" title=\"https://github.com/rust-analyzer/rust-analyzer/issues/3728\">https://github.com/rust-analyzer/rust-analyzer/issues/3728</a> issue and I've managed to gain some level of understanding of how things work on the side of RA (at the moment I also have a lot of trouble with comprehending rowan).</p>\n<p>Now, I've an idea for the fix of the above issue, but I'm not sure if the approach is correct, so I'd be grateful if somebody could verify it. I think that the problem is that in the <code>split_prefix</code> function the <code>UseTreeList</code> instance doesn't have the STAR in its syntax. I suppose it might be related to <a href=\"https://github.com/rust-analyzer/rust-analyzer/blob/master/crates/ra_parser/src/grammar/items/use_item.rs#L22\" title=\"https://github.com/rust-analyzer/rust-analyzer/blob/master/crates/ra_parser/src/grammar/items/use_item.rs#L22\">https://github.com/rust-analyzer/rust-analyzer/blob/master/crates/ra_parser/src/grammar/items/use_item.rs#L22</a></p>\n<blockquote>\n<p>This does not handle cases such as <code>use some::path::*</code></p>\n</blockquote>\n<p>A quick way to resolve the problem is as <span class=\"user-mention\" data-user-id=\"133169\">@matklad</span>  suggested on GH to simply translate <code>use foo::bar::*</code> to <code>use foo::bar::{*}</code>, so my idea here is to update the <code>split_prefix</code> function to take <code>last_child_or_token</code> of a given <code>UseTree.syntax()</code> and if the found <code>NodeOrToken</code> is of <code>STAR</code> kind I'd put the syntax into a string format, replace <code>*</code> with <code>{*}</code> and make an AST object -- a bit similarly to what <code>make.rs::use_tree</code> does.</p>\n<p>I'm not sure if it's a correct approach e.g. maybe there is a simpler way to replace <code>*</code> with <code>{*}</code>? I'd be grateful if somebody could give me a push here to proper direction as I'm still very new to this codebase.</p>",
+        "id": 192008397,
+        "sender_full_name": "Piotr Szpetkowski",
+        "timestamp": 1585311185
+    },
+    {
+        "content": "<p>I don't think there's a need to change <code>split_prefix</code> function's signature. For <code>use foo::bar::*</code> case, the prefix argument would be <code>foo::bar</code>, and that should be enough to figure out that the desired result is <code>use foo::bar::{*}</code></p>",
+        "id": 192010303,
+        "sender_full_name": "matklad",
+        "timestamp": 1585312584
+    },
+    {
+        "content": "<p>Specifically, I think <code>None =&gt; return self.clone()</code> branch should be change to look if there's <code>self.has_star()</code></p>",
+        "id": 192010382,
+        "sender_full_name": "matklad",
+        "timestamp": 1585312663
+    },
+    {
+        "content": "<p>As far as I can tell, right now there isn't a scenario where <code>split_path_prefix</code> would return <code>None</code>, so imo it's not possible to reach the <code>None =&gt; return self.clone()</code> branch. Also the prefix is actually result of <code>common_prefix</code> call (in case of the merge_imports assist), so for <code>use foo::bar::*</code>, prefix passed to <code>split_prefix</code> is not necessarily <code>foo::bar</code>.</p>\n<p>For example for a simple case of merging <code>use std::foo::*</code> and <code>use std::bar</code> it goes like this. Here's the prefix:</p>\n<div class=\"codehilite\"><pre><span></span>PATH@[5; 8)\n  PATH_SEGMENT@[5; 8)\n    NAME_REF@[5; 8)\n      IDENT@[5; 8) &quot;std&quot;\n</pre></div>\n\n\n<p>And here is the <code>suffix</code> that will be returned by <code>split_path_prefix</code> (for the <code>std::foo::*</code> tree):</p>\n<div class=\"codehilite\"><pre><span></span>PATH@[0; 4)\n  PATH_SEGMENT@[0; 4)\n    NAME_REF@[0; 4)\n      IDENT@[0; 4) &quot;foo&quot;\n</pre></div>",
+        "id": 192013900,
+        "sender_full_name": "Piotr Szpetkowski",
+        "timestamp": 1585314660
+    },
+    {
+        "content": "<p>It returs <code>None</code> in this case: <code>let parent = prefix.parent_path()?;</code></p>",
+        "id": 192015055,
+        "sender_full_name": "matklad",
+        "timestamp": 1585315156
+    },
+    {
+        "content": "<p>The <code>?</code></p>",
+        "id": 192015060,
+        "sender_full_name": "matklad",
+        "timestamp": 1585315158
+    },
+    {
+        "content": "<p>Ohh, sorry, missed the <code>?</code> symbol while skimming through the code.</p>\n<p>However in the above case of merging <code>use std::foo::*</code> and <code>use std::bar</code> the <code>parent</code> will have a value (at least that's what debugger has told me):</p>\n<div class=\"codehilite\"><pre><span></span>PATH@[5; 14)\n  PATH@[5; 8)\n    PATH_SEGMENT@[5; 8)\n      NAME_REF@[5; 8)\n        IDENT@[5; 8) &quot;std&quot;\n  COLONCOLON@[8; 10) &quot;::&quot;\n  PATH_SEGMENT@[10; 14)\n    NAME_REF@[10; 14)\n      IDENT@[10; 14) &quot;foo&quot;\n</pre></div>",
+        "id": 192016083,
+        "sender_full_name": "Piotr Szpetkowski",
+        "timestamp": 1585315623
+    },
+    {
+        "content": "<p>Yep, that I think is a slightly different case from when the prefix is equal to the whole path. </p>\n<p>I think for this case the fix should be applied around here:</p>\n<div class=\"codehilite\"><pre><span></span>let use_tree = make::use_tree(suffix.clone(), self.use_tree_list(), self.alias());\n</pre></div>\n\n\n<p>Here, we also need to preserve <code>self.has_star()</code> (which probably involves adding a boolean parameter to <code>make::use_tree</code>)</p>",
+        "id": 192016637,
+        "sender_full_name": "matklad",
+        "timestamp": 1585315861
+    },
+    {
+        "content": "<p>I see, makes sense. One last question for now -  The way <code>UseTree.has_star</code> function works is that it simply fetches <code>children</code> of the given <code>UseTree</code> node and then searches for a <code>T![*]</code>? So if I'd have following tree:</p>\n<div class=\"codehilite\"><pre><span></span>USE_TREE@[5; 17)\n  PATH@[5; 14)\n    PATH@[5; 8)\n      PATH_SEGMENT@[5; 8)\n        NAME_REF@[5; 8)\n          IDENT@[5; 8) &quot;std&quot;\n    COLONCOLON@[8; 10) &quot;::&quot;\n    PATH_SEGMENT@[10; 14)\n      NAME_REF@[10; 14)\n        IDENT@[10; 14) &quot;cell&quot;\n  COLONCOLON@[14; 16) &quot;::&quot;\n  STAR@[16; 17) &quot;*&quot;\n</pre></div>\n\n\n<p>it'd only search the set of direct descendants of the <code>USE_TREE@[5; 17)</code>? ( which here would be<code>PATH@[5; 14)</code>,  <code>COLONCOLON@[14; 16) \"::\"</code>, <code>STAR@[16; 17) \"*\"</code>)</p>",
+        "id": 192017880,
+        "sender_full_name": "Piotr Szpetkowski",
+        "timestamp": 1585316433
+    },
+    {
+        "content": "<p>Indeed, it will look only among direct children (and there can be at most one star among direct children)</p>",
+        "id": 192018148,
+        "sender_full_name": "matklad",
+        "timestamp": 1585316561
+    },
+    {
+        "content": "<p>Great, I finally understand something :D Thanks,  I have everything I need for now, I might get back with more questions later on, but I'll do my best to solve what I can on my own.</p>",
+        "id": 192018407,
+        "sender_full_name": "Piotr Szpetkowski",
+        "timestamp": 1585316650
+    },
+    {
+        "content": "<p><span aria-label=\"thumbs up\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"thumbs up\">:thumbs_up:</span> </p>\n<p>The workflow I'd recommend is </p>\n<ul>\n<li>writing a tests in the assist</li>\n<li>using <strong>Rust Analyzer: Run</strong> action to execute the test repatedly</li>\n<li>priting the trees to stderr with either <code>\"{}\"</code> or <code>\"{:#?}\"</code></li>\n</ul>",
+        "id": 192018716,
+        "sender_full_name": "matklad",
+        "timestamp": 1585316776
+    },
+    {
+        "content": "<p>Well, that's basically what I do, I also use the <code>vscode-lldb</code> to trace the code flow as I'm learning what goes where, but so far I haven't found a way to get a format repr of a tree during debug session. Maybe it's just not possible atm.</p>",
+        "id": 192019290,
+        "sender_full_name": "Piotr Szpetkowski",
+        "timestamp": 1585317047
+    }
+]

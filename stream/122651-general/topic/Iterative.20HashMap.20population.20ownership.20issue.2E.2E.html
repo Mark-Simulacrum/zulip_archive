@@ -1,0 +1,93 @@
+<html>
+<head><meta charset="utf-8"><title>Iterative HashMap population ownership issue.. · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Iterative.20HashMap.20population.20ownership.20issue.2E.2E.html">Iterative HashMap population ownership issue..</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="211475869"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Iterative%20HashMap%20population%20ownership%20issue../near/211475869" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pm5k <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Iterative.20HashMap.20population.20ownership.20issue.2E.2E.html#211475869">(Sep 28 2020 at 10:40)</a>:</h4>
+<p>Hello! I have a small issue I can't quite figure out.. I am trying to make a hash map based on Serde return values from a JSON file, like so:</p>
+<div class="codehilite"><pre><span></span><code>// &amp;Value is a serve_json Value type
+
+pub fn (extracted_events: &amp;Value) {
+  let mut results: HashMap&lt;&amp;String, Vec&lt;&amp;serde_json::Value&gt;&gt; = HashMap::new();
+  for event in extracted_events.as_array().unwrap() {
+        let uid = event[&quot;_source&quot;][&quot;UID&quot;].to_string();
+        results.entry(&amp;uid).or_insert_with(Vec::new).push(event);
+  }
+}
+</code></pre></div>
+
+
+<p>Basically, iterate over the array of events from an ElasticSearch index, record the UID for each ES document as a String, then pass it to the "entry" method of "results" and if it does not exist, insert a new empty array in as a result, else just push the current event into the existing key's vector/array. However I am getting this error:</p>
+<div class="codehilite"><pre><span></span><code>   |
+52 |         results.entry(&amp;uid).or_insert_with(Vec::new).push(event);
+   |         -------       ^^^^^^^^ borrowed value does not live long enough
+   |         |
+   |         borrow later used here
+53 |     }
+   |     - `uid` dropped here while still borrowed
+</code></pre></div>
+
+
+<p>I don't get it.. I understood that to make this work, I HAVE to borrow from the event's value ("UID") in order to then be able to use it later. If I remove the ampersand, the compiler suggests putting it back, saying I should be borrowing. But then clearly the value of &amp;uid does not live long enough. What am I doing wrong here?</p>
+
+
+
+<a name="211479871"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Iterative%20HashMap%20population%20ownership%20issue../near/211479871" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Iterative.20HashMap.20population.20ownership.20issue.2E.2E.html#211479871">(Sep 28 2020 at 11:32)</a>:</h4>
+<div class="codehilite" data-code-language="Diff"><pre><span></span><code><span class="gd">-  let mut results: HashMap&lt;&amp;String, Vec&lt;&amp;serde_json::Value&gt;&gt; = HashMap::new();</span>
+<span class="gi">+  let mut results: HashMap&lt;String, Vec&lt;&amp;serde_json::Value&gt;&gt; = HashMap::new();</span>
+// ...
+<span class="gd">-       results.entry(&amp;uid).or_insert_with(Vec::new).push(event);</span>
+<span class="gi">+       results.entry(uid).or_insert_with(Vec::new).push(event);</span>
+</code></pre></div>
+
+
+
+<a name="211479922"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Iterative%20HashMap%20population%20ownership%20issue../near/211479922" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Iterative.20HashMap.20population.20ownership.20issue.2E.2E.html#211479922">(Sep 28 2020 at 11:32)</a>:</h4>
+<p>The problem is that <code>to_string()</code>  creates a new <code>String</code> but the <code>HashMap</code> signature states it needs a reference to a <code>String</code>. But the new owned String instance returned by <code>to_string</code> lives not long enough as it is dropped at the end of the for loop iteration.</p>
+
+
+
+<a name="211480267"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Iterative%20HashMap%20population%20ownership%20issue../near/211480267" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Iterative.20HashMap.20population.20ownership.20issue.2E.2E.html#211480267">(Sep 28 2020 at 11:36)</a>:</h4>
+<p>Basically the <code>uid</code> you are using is local to each iteration of the loop and is then disposed of as the next iteration happens. Thus, any borrow / reference to it dangles as soon as we leave one iteration of the loop. And yet you were using a <code>HashMap</code> whose keys were made of such borrows, and trying to use that <code>HashMap</code> with thus a dangling  key during the second iteration of the loop, which would have violated memory safety, hence the compilation error.<br>
+The solution is then easy: instead of letting the <code>String</code> be disposed of at the end of the loop, while keeping a thus dangling reference as the key of the <code>HashMap</code>,  simply use that very <code>String</code> directly as the key of said <code>HashMap</code>, which thus holds it alive while the map itself is, avoiding any issues.<br>
+FWIW, <code>String</code> itself is already a "pointer type" (it's very similar to <code>Box&lt;str&gt;</code>, except for its <em>capacity</em> to keep growing), so there is no need to add that <code>&amp;</code> indirection <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="211480779"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Iterative%20HashMap%20population%20ownership%20issue../near/211480779" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Iterative.20HashMap.20population.20ownership.20issue.2E.2E.html#211480779">(Sep 28 2020 at 11:42)</a>:</h4>
+<p>Wups Daniel was faster <span aria-label="big smile" class="emoji emoji-1f604" role="img" title="big smile">:big_smile:</span></p>
+<p>Anyway I can recommend you to "normally" either use <code>&amp;str</code> or <code>String</code>.</p>
+<p>So either use what Daniel provided or use <code>as_str()</code> instead of <code>to_string()</code> (BUT that will return None if the json value is not a string while <code>to_string()</code> will display format whatever kind of value it is which won't fail but might not be what you want).</p>
+
+
+
+<a name="211481007"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Iterative%20HashMap%20population%20ownership%20issue../near/211481007" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pm5k <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Iterative.20HashMap.20population.20ownership.20issue.2E.2E.html#211481007">(Sep 28 2020 at 11:44)</a>:</h4>
+<p><span class="user-mention" data-user-id="209646">@Philipp Korber</span> and <span class="user-mention" data-user-id="232018">@Daniel Henry-Mantilla</span>  - thank you both! This works fine and I actually now understand why, thanks to both of you. I also found that thanks to how serde_json handles values, I need to convert "uid" by doing:</p>
+<div class="codehilite"><pre><span></span><code>event[&quot;_source&quot;][&quot;uid&quot;].as_str().unwrap()
+</code></pre></div>
+
+
+<p>else it appears as - "\"item1\"" inside the resulting hash map. And then pass that into entry as <code>uid.to_string()</code>!  (What a headache..)</p>
+
+
+
+<a name="211481793"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Iterative%20HashMap%20population%20ownership%20issue../near/211481793" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://rust-lang.github.io/zulip_archive/stream/122651-general/topic/Iterative.20HashMap.20population.20ownership.20issue.2E.2E.html#211481793">(Sep 28 2020 at 11:53)</a>:</h4>
+<p><code>to_string()</code> is provided by the standard library through the <code>ToString</code> trait automatically for any type implementing <code>Display</code>. <code>ToString</code> is in the prelude so you can always use that method without import. And <code>Value</code> "displays" as well-formed JSON.</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

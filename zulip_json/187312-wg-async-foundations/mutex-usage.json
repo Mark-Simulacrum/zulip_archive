@@ -1,0 +1,122 @@
+[
+    {
+        "content": "<p>Hi all, wanted to check in on the futures mutex and its usage after a discussion we had on Fuchsia. Is the futures mutex intended to support holding the guard across await points? If not, is its purpose solely to unblock the executor in high-contention use-cases? As such, is the futures mutex solely a matter of performance tradeoffs compared to the sync mutex? (Hearsay has it that the sync mutex performs better in many cases)</p>",
+        "id": 219155960,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1607386037
+    },
+    {
+        "content": "<p>Yeah, I think you nailed it. Basically, high contention or needing to hold it across await points. The regular mutex will be always faster. I think we go over this in the tokio guide too.</p>",
+        "id": 219501631,
+        "sender_full_name": "Lucio Franco",
+        "timestamp": 1607619516
+    },
+    {
+        "content": "<p>Yep, the goal of the futures mutex is to be able to hold it across await points. Holding a normal mutex across await points will lead to deadlocks.</p>",
+        "id": 219508454,
+        "sender_full_name": "Taylor Cramer",
+        "timestamp": 1607622522
+    },
+    {
+        "content": "<p>Ok, cool. We should document that, an I'm happy to contribute.</p>",
+        "id": 219538694,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1607636990
+    },
+    {
+        "content": "<p>I do have a follow-up question, because there was some disagreement on \"good practices\" during the discussion. Basically, one argument was that async mutex should NOT be used for holding across await points (but only for high-contention cases). One reason for this is that the guard can be dropped implicitly by dropping/cancelling the future that holds it, which can lead to logically inconsistent state.</p>",
+        "id": 219539004,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1607637154
+    },
+    {
+        "content": "<p>The sync mutex has a concept of poisoning which protects against \"interruptions in the critical section\", if you will.</p>",
+        "id": 219539059,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1607637193
+    },
+    {
+        "content": "<p>To be clear, I'm talking not so much about the language semantics, which are clear, but about failure modes that can be really nasty to predict/detect/debug.</p>",
+        "id": 219539243,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1607637319
+    },
+    {
+        "content": "<p>The way I see the solution space:</p>\n<ol>\n<li>Preserve the same API. Communicate that dropping futures is \"dangerous\".</li>\n<li>Preserve the same API. Communicate to users that ALL async functions can be terminated at await points, as such they need to make sure that every combination of partial execution of a future results in an acceptable end state.</li>\n<li>Preserve the same API. Discourage holding the guard across await points entirely. Optionally add APIs or must_not_await lints to make it harder to hold it by accident. <em>If</em> they do so anyway, they are \"on their own\", essentially leaving them with the same problem space of (1) and (2).</li>\n<li>Provide an alternative API which supports poisoning in async mutices, e.g.<code>async fn with&lt;O&gt;(&amp;self, FnOnce(&amp;mut Self::T) -&gt; Future&lt;Output=O&gt;) -&gt; O</code>. As a result <code>lock()</code> will need to return a <code>Result&lt;Guard, PoisonError&gt;</code> similar to the sync mutex, which is a breaking change.</li>\n</ol>",
+        "id": 219541178,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1607638252
+    },
+    {
+        "content": "<p>My commentary:</p>\n<ol>\n<li>Caller responsibility. Makes it easier to implement async code correctly. We get weakest-link issue, where if ONE user drops futures carelessly, it can cause non-local problems. Essentially, nullify the \"just drop a future to cancel it\" mantra.</li>\n<li>Implementor responsibility. Makes it harder to implement async code correctly, you have to reason about early termination at all times.</li>\n</ol>\n<p>(Note that 1 and 2 applies to all async Rust code, and probably needs an answer anyway)</p>\n<ol start=\"3\">\n<li>Limits the usefulness of async mutices, but also reduces the amount of unexpected behavior.</li>\n<li>Explicit failure mode, which makes mutex more tedious to use, but can catch failures that are otherwise cannot be detected. Breaking change, not great...</li>\n</ol>",
+        "id": 219541928,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1607638647
+    },
+    {
+        "content": "<p>Wow yeah that is a very interesting point I've not thought about....Ill have to think on what is right here. I would argue that canceling the future is a user thing and therefore its a logical bug but FOR sure something to document. The lint should help here. I think this is just something we need to call out rather than fix the api to make this impossible to happen.</p>",
+        "id": 219542342,
+        "sender_full_name": "Lucio Franco",
+        "timestamp": 1607638855
+    },
+    {
+        "content": "<p>Yes, probably the (1) and (2) choices needs to be answered for async Rust in general, independent of mutices.</p>\n<p>I've heard the mantra \"just drop a future if you're no longer interested in it\". To me, this directly implies (2), that implementors need to <em>think</em> of async functions as \"can be terminated at _any_ await-point\". My take is that this makes async code very different from sync code, and introduces a huge mental overhead and is likely to be overlooked as a result. I may overestimate the impact of this though..</p>",
+        "id": 219543013,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1607639269
+    },
+    {
+        "content": "<p>A non-mutex example of a function that can cause a \"logically inconsistent\" state:</p>\n<div class=\"codehilite\"><pre><span></span><code>async fn foo(&amp;mut self) {\n  self.bar = X;\n  do_something_async().await; // can terminate here\n  self.baz = Y;\n}\n</code></pre></div>",
+        "id": 219543308,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1607639421
+    },
+    {
+        "content": "<p>another suggestion that came up was a non-async <code>with</code> method on the mutex, i.e., at a glance you can tell that the whole critical section will execute</p>",
+        "id": 219559224,
+        "sender_full_name": "tmandry",
+        "timestamp": 1607653682
+    },
+    {
+        "content": "<p>I'm not sure how useful that would be, though.</p>",
+        "id": 219559304,
+        "sender_full_name": "tmandry",
+        "timestamp": 1607653762
+    },
+    {
+        "content": "<p>I don't think \"Drop to cancel\" is likely to change. That's a part of the core futures contract. Personally haven't seen it cause problems yet, though I can see how the expectations around sync mutexes in particular can incorrectly carry over in a way that could lead to bugs.</p>",
+        "id": 219559536,
+        "sender_full_name": "tmandry",
+        "timestamp": 1607654006
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116883\">tmandry</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/mutex-usage/near/219559536\">said</a>:</p>\n<blockquote>\n<p>I don't think \"Drop to cancel\" is likely to change. That's a part of the core futures contract. Personally haven't seen it cause problems yet, though I can see how the expectations around sync mutexes in particular can incorrectly carry over in a way that could lead to bugs.</p>\n</blockquote>\n<p>I still would like to be able to opt-out of it, since I think it's surprising to users. I don't think anyone from the now 2 digit Rust users in my org is aware about this besides me. And I've seen issues with it - even made them myself :)</p>",
+        "id": 219653933,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1607716527
+    },
+    {
+        "content": "<p>I had the proposal for it showcased at <a href=\"#narrow/stream/187312-wg-async-foundations/topic/run.20to.20completion.20async.20fn\">https://rust-lang.zulipchat.com/#narrow/stream/187312-wg-async-foundations/topic/run.20to.20completion.20async.20fn</a></p>\n<p>and actually wanted to get back to it soonish, but had to work on some higher priority things in between</p>",
+        "id": 219654167,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1607716628
+    },
+    {
+        "content": "<p>See also <a href=\"https://github.com/rust-lang/rust/pull/79434\">https://github.com/rust-lang/rust/pull/79434</a>, which I guess is relevant?</p>",
+        "id": 219657142,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1607718143
+    },
+    {
+        "content": "<p>and here's how tokio documents the differences: <a href=\"https://docs.rs/tokio/0.3.5/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use\">https://docs.rs/tokio/0.3.5/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use</a></p>",
+        "id": 219657184,
+        "sender_full_name": "Dirkjan Ochtman",
+        "timestamp": 1607718174
+    },
+    {
+        "content": "<p>I've run into cases unrelated to mutexes or critical sections where this behavior of futures would have led to data loss if not caught. For instance, an <code>or</code> of two futures where one is buffering/parsing data from a socket or similar. If the other future becomes ready, the data read gets lost.</p>",
+        "id": 219839178,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1607951805
+    }
+]

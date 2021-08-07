@@ -1,0 +1,347 @@
+<html>
+<head><meta charset="utf-8"><title>Miri failure in Rust core library · miri · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/index.html">miri</a></h2>
+<h3>Topic: <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html">Miri failure in Rust core library</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://rust-lang.github.io/zulip_archive/style.css" rel="stylesheet"></head>
+
+<a name="240176413"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240176413" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240176413">(May 25 2021 at 12:02)</a>:</h4>
+<p>Hi everyone. I ran into an interesting Miri failure which I'm trying to understand better. I've narrowed it down to the following code snippet:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[cfg(test)]</span><span class="w"></span>
+<span class="k">mod</span> <span class="nn">tests</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="cp">#[test]</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">fail_miri</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">struct</span> <span class="nc">Test</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">inner</span>: <span class="p">[</span><span class="kt">usize</span><span class="p">;</span><span class="w"> </span><span class="mi">64</span><span class="p">],</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">impl</span><span class="w"> </span><span class="n">Test</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">fn</span> <span class="nf">trigger</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">inner</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">                </span><span class="bp">self</span><span class="p">.</span><span class="n">inner</span><span class="p">.</span><span class="n">copy_within</span><span class="p">(</span><span class="mi">0</span><span class="o">..</span><span class="n">end</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Test</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">inner</span>: <span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="mi">64</span><span class="p">]</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">        </span><span class="n">test</span><span class="p">.</span><span class="n">trigger</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>this fails Miri (run as <code>MIRIFLAGS="-Zmiri-track-raw-pointers" cargo miri test</code>) with the message:</p>
+<div class="codehilite"><pre><span></span><code>~/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3099:13
+     |
+3099 |             ptr::copy(self.as_ptr().add(src_start), self.as_mut_ptr().add(dest), count);
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item granting read access to tag &lt;173608&gt; at alloc68745 found in borrow stack.
+     |
+     = help: this indicates a potential bug in the program: it performed an invalid operation, but the rules it violated are still experimental
+     = help: see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md for further information
+
+
+     = note: inside `core::slice::&lt;impl [usize]&gt;::copy_within::&lt;std::ops::Range&lt;usize&gt;&gt;` at ~/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3099:13
+note: inside `tests::fail_miri::Test::trigger` at src/lib.rs:11:17
+    --&gt; src/lib.rs:11:17
+     |
+11   |                 self.inner.copy_within(0..end, 1);
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `tests::fail_miri` at src/lib.rs:15:9
+    --&gt; src/lib.rs:15:9
+     |
+15   |         test.trigger();
+     |         ^^^^^^^^^^^^^^
+</code></pre></div>
+<p>This error is interesting for two reasons: 1) this code does not use any unsafe code and 2) the error comes from the Rust core library. The rustdocs for <a href="https://doc.rust-lang.org/std/primitive.slice.html#method.copy_within"><code>[T]::copy_within</code></a> don't state any unsafe ways to call this method (it is a safe method) and in the test the call does not trigger a panic from this function. The ranges are allowed to overlap, which they do.</p>
+<p>The error message does state that the Miri rules are still experimental. I've only been able to reproduce this on my machine so far (I'm using nightly Rust). This Miri error does not show on the Rust Playground. Maybe the Playground does not use the <code>-Zmiri-track-raw-pointers</code> flag when running it using Tools &gt; Miri? I've updated Rust and Miri to the latest version and see the error there, too.</p>
+<p>The code for <code>copy_within</code> in the Rust core library  is:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">copy_within</span><span class="o">&lt;</span><span class="n">R</span>: <span class="nc">RangeBounds</span><span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">src</span>: <span class="nc">R</span><span class="p">,</span><span class="w"> </span><span class="n">dest</span>: <span class="kt">usize</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">where</span><span class="w"></span>
+<span class="w">        </span><span class="n">T</span>: <span class="nb">Copy</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">Range</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">start</span>: <span class="nc">src_start</span><span class="p">,</span><span class="w"> </span><span class="n">end</span>: <span class="nc">src_end</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">slice</span>::<span class="n">range</span><span class="p">(</span><span class="n">src</span><span class="p">,</span><span class="w"> </span><span class="o">..</span><span class="bp">self</span><span class="p">.</span><span class="n">len</span><span class="p">());</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">src_end</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">src_start</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="fm">assert!</span><span class="p">(</span><span class="n">dest</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">count</span><span class="p">,</span><span class="w"> </span><span class="s">"dest is out of bounds"</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// SAFETY: the conditions for `ptr::copy` have all been checked above,</span>
+<span class="w">        </span><span class="c1">// as have those for `ptr::add`.</span>
+<span class="w">        </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">ptr</span>::<span class="n">copy</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">as_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">src_start</span><span class="p">),</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">as_mut_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">dest</span><span class="p">),</span><span class="w"> </span><span class="n">count</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>I don't see anything out of the ordinary here. I imagine that pointer provenance for the arguments to <code>ptr::copy</code> is preserved okay, since the <code>self.as_ptr()</code> and <code>self.as_mut_ptr()</code> methods are both marked as <code>#[inline]</code>. However the error message seems to suggest that pointer provenance might be lost somehow. By that I mean that it looks like that <code>self.as_ptr().add(src_start)</code> might be the culprit somehow, in that it ends up with a pointer to a single byte, which goes beyond "one past the end" of that byte when adding <code>src_start + count</code> to it. I'm having trouble pin-pointing it exactly, though. Maybe it's because of the <code>#[inline]</code> on <code>as_ptr[_mut]()</code>, which maybe should be an <code>#[inline(always)]</code> to avoid this kind of error message by Miri? But even then <code>#[inline(always)]</code> doesn't 100% guarantee that it is inlined. It could also be something else entirely. Might anyone know what could be going on here? <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>  Thanks!</p>
+
+
+
+<a name="240179754"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240179754" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240179754">(May 25 2021 at 12:36)</a>:</h4>
+<p>I can confirm that the Miri error only shows when using the <code>-Zmiri-track-raw-pointers</code> flag (both in binary crates and library crates).</p>
+
+
+
+<a name="240182644"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240182644" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240182644">(May 25 2021 at 12:57)</a>:</h4>
+<p>This seems to have the same desired result, satisfies Miri and removes the error. This seems to suggest there might be a bug in the <code>&lt;[T]&gt;::copy_within</code> method, hmmm.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[cfg(test)]</span><span class="w"></span>
+<span class="k">mod</span> <span class="nn">tests</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="cp">#[test]</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">pass_miri</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">struct</span> <span class="nc">Test</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">inner</span>: <span class="p">[</span><span class="kt">usize</span><span class="p">;</span><span class="w"> </span><span class="mi">64</span><span class="p">],</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">impl</span><span class="w"> </span><span class="n">Test</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">fn</span> <span class="nf">trigger</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">inner</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">ptr</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">inner</span><span class="p">;</span><span class="w"></span>
+<span class="w">                </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">core</span>::<span class="n">ptr</span>::<span class="n">copy</span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">usize</span><span class="p">).</span><span class="n">add</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="n">end</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Test</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">inner</span>: <span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="mi">64</span><span class="p">]</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">        </span><span class="n">test</span><span class="p">.</span><span class="n">trigger</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="240183413"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240183413" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240183413">(May 25 2021 at 13:02)</a>:</h4>
+<p>I think I see it now, it is in this line inside <code>copy_within()</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">        </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">ptr</span>::<span class="n">copy</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">as_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">src_start</span><span class="p">),</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">as_mut_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">dest</span><span class="p">),</span><span class="w"> </span><span class="n">count</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>The arguments to <code>ptr::copy</code> are evaluated from left to right. <code>self.as_ptr()</code> creates an immutable reference (SharedReadOnly) to the array and derives a valid <code>*const</code> pointer from it. When jumping to the next argument, <code>self.as_mut_ptr()</code> creates a mutable reference (Unique) to the array, which invalidates the existing SharedReadOnly reference and any pointers derived from it. So I guess Miri is right about the error "no item granting read access to tag &lt;173608&gt; at alloc68745 found in borrow stack" in that this does violate the Stacked Borrows model. I guess I should file an issue somewhere. That will be my first time <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span> Going to read up real quick on how to do that.</p>
+
+
+
+<a name="240183643"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240183643" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240183643">(May 25 2021 at 13:04)</a>:</h4>
+<p>Great analysis! I think it would be fine to open a fix pr without an issue</p>
+
+
+
+<a name="240183693"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240183693" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240183693">(May 25 2021 at 13:04)</a>:</h4>
+<p>Seems easy enough to fix I guess?</p>
+
+
+
+<a name="240185039"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240185039" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240185039">(May 25 2021 at 13:14)</a>:</h4>
+<p>Yep! Thanks for the tip, in that case I'll jump straight to reading up how to create a fix PR <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="240198437"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240198437" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240198437">(May 25 2021 at 14:45)</a>:</h4>
+<p>That was fun <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span> The pull request is up in case anyone wants to follow along! <a href="https://github.com/rust-lang/rust/pull/85675">https://github.com/rust-lang/rust/pull/85675</a></p>
+
+
+
+<a name="240203852"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240203852" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240203852">(May 25 2021 at 15:20)</a>:</h4>
+<p>Nice! Thanks for doing that</p>
+
+
+
+<a name="240203943"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240203943" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240203943">(May 25 2021 at 15:21)</a>:</h4>
+<p>Oh heh, seems this was already known from the PR comments</p>
+
+
+
+<a name="240206325"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240206325" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240206325">(May 25 2021 at 15:36)</a>:</h4>
+<p>Whoops,  I did check the open issues first, but didn't stop to think  to check the open PRs as well. Hazards of opening a first PR I guess <span aria-label="joy" class="emoji emoji-1f602" role="img" title="joy">:joy:</span></p>
+
+
+
+<a name="240306466"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240306466" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240306466">(May 26 2021 at 10:56)</a>:</h4>
+<blockquote>
+<p>Maybe the Playground does not use the -Zmiri-track-raw-pointers flag when running it using Tools &gt; Miri?</p>
+</blockquote>
+<p>Indeed this is accurate.</p>
+
+
+
+<a name="240306644"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240306644" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240306644">(May 26 2021 at 10:58)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="400735">Pointerbender</span> <a href="#narrow/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library/near/240206325">said</a>:</p>
+<blockquote>
+<p>Whoops,  I did check the open issues first, but didn't stop to think  to check the open PRs as well. Hazards of opening a first PR I guess <span aria-label="joy" class="emoji emoji-1f602" role="img" title="joy">:joy:</span></p>
+</blockquote>
+<p>ah, sorry it didn't work out. once the fix lands in rustc, a PR to Miri adding this as a testcase (ideally in some existing run-pass file, maybe <code>slices.rs</code>) would be very welcome :)</p>
+
+
+
+<a name="240336247"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240336247" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240336247">(May 26 2021 at 14:48)</a>:</h4>
+<p>That's a nice idea <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>  I'll give that a try! That would be in this file, right? <a href="https://github.com/rust-lang/miri/blob/master/tests/run-pass/slices.rs">https://github.com/rust-lang/miri/blob/master/tests/run-pass/slices.rs</a></p>
+
+
+
+<a name="240380971"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240380971" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240380971">(May 26 2021 at 19:50)</a>:</h4>
+<p>Here is the PR <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>  <a href="https://github.com/rust-lang/miri/pull/1816">https://github.com/rust-lang/miri/pull/1816</a> Hope this one goes better <span aria-label="joy" class="emoji emoji-1f602" role="img" title="joy">:joy:</span>  There are some test cases failing from before the changes as well (when using <code>-Zmiri-track-raw-pointers</code>), this is mentioned in the PR.</p>
+
+
+
+<a name="240381619"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240381619" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240381619">(May 26 2021 at 19:54)</a>:</h4>
+<p>The one in <code>run-pass/align.rs</code> is interesting. Miri doesn't track pointers when going through an <code>usize</code> it seems (or I might be missing a secondary flag that I should be setting in addition to <code>-Zmiri-track-raw-pointers</code>):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="sd">/// This manually makes sure that we have a pointer with the proper alignment.</span>
+<span class="k">fn</span> <span class="nf">manual_alignment</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="k">u8</span><span class="p">;</span><span class="w"> </span><span class="mi">3</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">base_addr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">base_addr_aligned</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">base_addr</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">base_addr</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">base_addr</span><span class="o">+</span><span class="mi">1</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">u16_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">base_addr_aligned</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u16</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="n">u16_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<div class="codehilite"><pre><span></span><code>error: Undefined Behavior: no item granting write access to tag &lt;untagged&gt; at alloc1364+0x1 found in borrow stack.
+  --&gt; tests/run-pass/align.rs:7:14
+   |
+7  |     unsafe { *u16_ptr = 2; }
+   |              ^^^^^^^^^^^^ no item granting write access to tag &lt;untagged&gt; at alloc1364+0x1 found in borrow stack.
+</code></pre></div>
+
+
+
+<a name="240429916"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/240429916" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#240429916">(May 27 2021 at 07:38)</a>:</h4>
+<p><code>-Zmiri-track-raw-pointers</code> is incompatible with casting usize back to a ptr, yeah (and this is documented in the miri README)</p>
+
+
+
+<a name="241152518"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241152518" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241152518">(Jun 02 2021 at 13:58)</a>:</h4>
+<p>I've updated the PR, auditing the other failures with the <code>-Zmiri-track-raw-pointers</code> flag is next on my list!</p>
+
+
+
+<a name="241154973"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241154973" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241154973">(Jun 02 2021 at 14:17)</a>:</h4>
+<p>Looks like 5 of the failures were indeed because of pointer-to-integer casts, and the other one was because of a missing <code>-Zmiri-disable-isolation</code> flag. So all is clear <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="241302000"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241302000" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241302000">(Jun 02 2021 at 18:43)</a>:</h4>
+<p>I was looking a bit further through the Rust source code to see if there were any other bugs similar to <a href="https://github.com/rust-lang/rust/pull/85610">#85610</a>. I noticed an interesting corner case at <code>library/alloc/src/string.rs</code>:</p>
+<div class="codehilite"><pre><span></span><code>pub struct String {
+    vec: Vec&lt;u8&gt;,
+}
+
+pub fn remove:
+  1258          unsafe {
+  1259:             ptr::copy(self.vec.as_ptr().add(next), self.vec.as_mut_ptr().add(idx), len - next);
+  1260              self.vec.set_len(len - (next - idx));
+
+fn insert_bytes:
+  1435          unsafe {
+  1436:             ptr::copy(self.vec.as_ptr().add(idx), self.vec.as_mut_ptr().add(idx + amt), len - idx);
+  1437:             ptr::copy(bytes.as_ptr(), self.vec.as_mut_ptr().add(idx), amt);
+  1438              self.vec.set_len(len + amt);
+</code></pre></div>
+<p>These instances seem similar, because in both cases it calls <code>self.vec.as_ptr()</code> and <code>self.vec.as_mut_ptr()</code> while passing the derived pointers to <code>ptr::copy</code>. In this case, my understanding is that this is allowed and not UB, because inside the the inners of <code>Vec&lt;T&gt;</code> it holds a <code>Unique&lt;T&gt;</code> which is a pointer to the heap. The semantics of <code>Unique&lt;T&gt;</code> is that it "owns" the <code>T</code> and I recall reading a prior discussion about whether Miri should flag these or not. I can't find it now, but if I remember correctly, the outcome of the discussion was that this would make Miri too strict if this became UB and that it is currently allowed. Would it be worthwhile to add an extra regression test case for the above <code>ptr::copy</code> calls, to make sure that Miri keeps allowing this in the future?</p>
+
+
+
+<a name="241308619"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241308619" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241308619">(Jun 02 2021 at 19:35)</a>:</h4>
+<p>I think it may have been related to these two discussions:</p>
+<ul>
+<li><a href="https://github.com/rust-lang/unsafe-code-guidelines/issues/258">https://github.com/rust-lang/unsafe-code-guidelines/issues/258</a></li>
+<li><a href="https://github.com/rust-lang/unsafe-code-guidelines/issues/262">https://github.com/rust-lang/unsafe-code-guidelines/issues/262</a><br>
+Both are still open issues  atm, so maybe it's not a done deal just yet <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></li>
+</ul>
+
+
+
+<a name="241362190"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241362190" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241362190">(Jun 03 2021 at 08:37)</a>:</h4>
+<p><code>Unique</code> is still open, yeah -- but currently Miri entirely ignores it, i.e., treats it like a raw ptr</p>
+
+
+
+<a name="241362274"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241362274" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241362274">(Jun 03 2021 at 08:38)</a>:</h4>
+<p>Adding more tests always sounds like a good idea though. :) Which tests did you have in mind?</p>
+
+
+
+<a name="241363470"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241363470" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241363470">(Jun 03 2021 at 08:51)</a>:</h4>
+<p>Maybe something like this in <code>tests/run-pass/strings.rs</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="c1">// compile-flags: -Zmiri-track-raw-pointers</span>
+<span class="k">fn</span> <span class="nf">unique_aliasing</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">String</span>::<span class="n">from</span><span class="p">(</span><span class="s">"Hello"</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="fm">assert_eq!</span><span class="p">(</span><span class="n">x</span><span class="p">.</span><span class="n">remove</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="sc">'H'</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">x</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="sc">'H'</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="fm">assert_eq!</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="s">"Hello"</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">x</span><span class="p">.</span><span class="n">insert_str</span><span class="p">(</span><span class="n">x</span><span class="p">.</span><span class="n">len</span><span class="p">(),</span><span class="w"> </span><span class="s">", world!"</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="fm">assert_eq!</span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="s">"Hello, world!"</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>This hits both code paths mentioned above, where it calls <code>self.vec.as_ptr()</code> and <code>self.vec.as_mut_ptr()</code> before passing the derived pointers to <code>ptr::copy</code>. The idea is that this test case would fail if at some point the aliasing rules would be extended to also cover semantic ownership through <code>Unique&lt;T&gt;</code>.</p>
+
+
+
+<a name="241366512"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241366512" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241366512">(Jun 03 2021 at 09:25)</a>:</h4>
+<p>Sounds good. :) Please add a comment in the test explaining its motivation.</p>
+
+
+
+<a name="241366835"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241366835" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241366835">(Jun 03 2021 at 09:28)</a>:</h4>
+<p>Will do, thanks!</p>
+
+
+
+<a name="241408107"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241408107" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241408107">(Jun 03 2021 at 15:32)</a>:</h4>
+<p>New PR is opened <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>  <a href="https://github.com/rust-lang/miri/pull/1824">https://github.com/rust-lang/miri/pull/1824</a></p>
+
+
+
+<a name="241864300"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241864300" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thom Chiovoloni <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241864300">(Jun 08 2021 at 02:27)</a>:</h4>
+<p>would there a difference between a version of <code>Unique</code> that asserts unique ownership, and something like <code>ManuallyDrop&lt;Box&lt;MaybeUninit&lt;T&gt;&gt;&gt;</code>?</p>
+<p>i guess the 2nd requires the pointer be valid, and maybe somehow <code>Unique</code> wouldn't (it seems strange that it could assert ownership over the pointee when its pointer may be dangling though, so this seems a little incoherent, but maybe I'm not thinking of it correctly)</p>
+
+
+
+<a name="241882193"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241882193" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241882193">(Jun 08 2021 at 07:53)</a>:</h4>
+<p>Heh <a href="https://docs.rs/crate/stackbox/0.1.2/source/src/ptr.rs">https://docs.rs/crate/stackbox/0.1.2/source/src/ptr.rs</a></p>
+
+
+
+<a name="241882514"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241882514" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241882514">(Jun 08 2021 at 07:56)</a>:</h4>
+<p>Note that the outer <code>MD</code> removes the <code>dereferenceable</code> attribute on it; but I guess <code>Unique</code> can't be <code>dereferenceable</code> either if it is allowed to dangle? Regarding "ownership", there is the obvious covariance part, and then the <code>dropck</code> one (which only matters for those using <code>unsafe impl&lt;#[may_dangle] …&gt; Drop</code>), and in that regard <code>Box</code> does signify ownership to dropck. Did you mean something else by ownership?</p>
+
+
+
+<a name="241937207"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/269128-miri/topic/Miri%20failure%20in%20Rust%20core%20library/near/241937207" class="zl"><img src="https://rust-lang.github.io/zulip_archive/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://rust-lang.github.io/zulip_archive/stream/269128-miri/topic/Miri.20failure.20in.20Rust.20core.20library.html#241937207">(Jun 08 2021 at 15:23)</a>:</h4>
+<blockquote>
+<p>would there a difference between a version of Unique that asserts unique ownership, and something like ManuallyDrop&lt;Box&lt;MaybeUninit&lt;T&gt;&gt;&gt;?</p>
+</blockquote>
+<p>Yes.</p>
+<blockquote>
+<p>i guess the 2nd requires the pointer be valid, and maybe somehow Unique wouldn't</p>
+</blockquote>
+<p>Exactly.</p>
+<blockquote>
+<p>it seems strange that it could assert ownership over the pointee when its pointer may be dangling though</p>
+</blockquote>
+<p>Indeed, that's why Stacked Borrows doesn't do this yet. ;) But essentially, the plan I have is to assert ownership on access only. Doing that in more places would also help with some of the other issues Stacked Borrows has.</p>
+
+
+
+<hr><p>Last updated: Aug 07 2021 at 22:04 UTC</p>
+</html>

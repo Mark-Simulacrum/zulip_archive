@@ -1,0 +1,92 @@
+[
+    {
+        "content": "<p>Is it legal to convert <code>&amp;Atomic$Int</code> to an appropriately sized <code>&amp;[AtomicU8; N]</code> and do operations on it while other threads continue to work on the full-sized object? Or more broadly, can I do this sort of \"manually tearing\" of atomic operations?</p>\n<p>Specifically, I have an <code>AtomicU32</code>, and I would like to do a CAS on (only) the least significant byte while other threads will be reading and/or writing the whole <code>AtomicU32</code>.</p>\n<p>I would have assumed this is fine, and it's very hard for me to imagine it not working in practice (hardware certainly allows it... as if that matters), but someone planted some doubt in my mind that perhaps this is actually UB.</p>\n<p>I don't <em>think</em> this is a kind of data race (the accesses <em>are</em> synchronized), but on the other hand, I know certain data race detectors like loom (and relacy) would complain about this, but I believe that's limitations of their impl rather than something fundamental (for example: AtomicU8 isn't just 1 byte in either loom or relacy I believe — although I think it is for CDSChecker).</p>\n<p>Note: I also know that in C++ this is totally unsupported because strict aliasing applies to <code>atomic&lt;uint8_t&gt;</code> (and probably <code>_Atomic uint8_t</code> for C), so I worry that the existing C++ memory model work wouldn't be much help here...</p>",
+        "id": 224880394,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612277197
+    },
+    {
+        "content": "<p>I don't know that doing that is defined behavior of atomics. If it works on all current hardware, we could perhaps define it as such.</p>",
+        "id": 224903730,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1612286109
+    },
+    {
+        "content": "<p>What if you use different orderings on different parts of the full atomic? What would the ordering be relative to the full atomic?</p>",
+        "id": 224904969,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1612286549
+    },
+    {
+        "content": "<p>Given the fact we cannot rely on C++ to say whether or not this is allowed, due to strict aliasing, I assume the question would become, does llvm allow this? If llvm does not, that would probably answer the question for rust, at least for the llvm backend of rustc.</p>",
+        "id": 224907078,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1612287361
+    },
+    {
+        "content": "<p>From a theoretical POV I don't see any reason to disallow this. If you use different orderings on non-overlapping parts of an atomic, it's just as if you had multiple atomics; for overlapping atomic operations they would be ordered the same as if they were on one atomic, at least wrt reads of the overlap. If you read an atomic using multiple atomic operations of the subparts then of course that's not atomic. Is there an edge case I'm forgetting?</p>",
+        "id": 224917822,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1612291828
+    },
+    {
+        "content": "<p>Does C++ let you do <code>atomic&lt;atomic&lt;uint8_t&gt;[8]&gt;</code>?</p>",
+        "id": 224918241,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1612291987
+    },
+    {
+        "content": "<p>That doesn't have arbitrary overlapping but it does have nested atomic operations</p>",
+        "id": 224918427,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1612292052
+    },
+    {
+        "content": "<p>No, because atomic&lt;T&gt; mandates T be <em>trivially copyable</em> and it's not copyable at all (copy and move constructors and assignments are deleted, for the same reason it's not Copy or Clone in rust)</p>",
+        "id": 224918436,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1612292054
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"257758\">Connor Horman</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Converting.20.60.26AtomicFoo.60.20to.20.60.26.5BAtomicU8.3B.20N.5D.60.20and.20using.20it/near/224907078\">said</a>:</p>\n<blockquote>\n<p>Given the fact we cannot rely on C++ to say whether or not this is allowed, due to strict aliasing, I assume the question would become, does llvm allow this? If llvm does not, that would probably answer the question for rust, at least for the llvm backend of rustc.</p>\n</blockquote>\n<p>In practice LLVM has some stuff like <code>memcpy.element.unordered.atomic</code> intrinsics (<a href=\"https://llvm.org/docs/LangRef.html#llvm-memcpy-element-unordered-atomic-intrinsic\">https://llvm.org/docs/LangRef.html#llvm-memcpy-element-unordered-atomic-intrinsic</a>) which notes that:</p>\n<blockquote>\n<p>the copy between buffers uses a sequence of unordered atomic load/store operations that are a positive integer multiple of the element_size in size.</p>\n</blockquote>\n<p>Given that it's a multiple of the element size (e.g. <em>not</em> identical to the element size), this <em>seems</em> to imply to me that this is fine for LLVM, at least for unordered.</p>\n<p>(That said, the orderings I care about are relaxed/acquire/release and not unordered, so that doesn't answer anything conclusively)</p>",
+        "id": 224953068,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612308995
+    },
+    {
+        "content": "<p>That said, it does note about the unordered memcpy ops that:</p>\n<blockquote>\n<p>It is well defined to have concurrent reads and writes to both source and destination provided those reads and writes are unordered atomic when specified.</p>\n</blockquote>\n<p>Which is surprising. My perhaps-overly-optimistic hunch is that this is just because it was all that was needed for e.g. Java, and they didn't want to specify more than was needed.</p>\n<blockquote>\n<p>Given the fact we cannot rely on C++ to say whether or not this is allowed, due to strict aliasing</p>\n</blockquote>\n<p>While looking into this I found this <a href=\"http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p1478r6.html\">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p1478r6.html</a>, which seems to be progressing pretty well and has a lot of interesting/related discussion.</p>\n<hr>\n<p>Note: For clarity, the use case I'm interested in (that I made the thread for) is not atomic memcpy, it's in implementing a waiter set for a mutex+condvar. I'm mostly mentioning them since ISTM like if atomic memcpy is well defined here, then what I'm asking would also be well defined.</p>",
+        "id": 224956107,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612310964
+    },
+    {
+        "content": "<p>Actually, now that I think about it,  C++20 has <code>std::atomic_ref</code> (and it's actually mentioned in that paper), so you could do this, by taking an atomic_ref to a <code>std::byte</code> (which is exempted from strict aliasing). I'd be interested in knowing whether this currently does valid things (devles right into <a href=\"https://eel.is/c++draft\">https://eel.is/c++draft</a>).</p>",
+        "id": 224957218,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1612311692
+    },
+    {
+        "content": "<p>this is called \"mixed-size accesses\" in the academic literature, and is notoriously difficult to specify precisely (like, even harder than \"normal\" weak-memory concurrency^^). but other than that I don't think there's any reason it should be disallowed.</p>",
+        "id": 225415875,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612623907
+    },
+    {
+        "content": "<p>also see <a href=\"https://www.cl.cam.ac.uk/~pes20/popl17/mixed-size.pdf\">https://www.cl.cam.ac.uk/~pes20/popl17/mixed-size.pdf</a></p>",
+        "id": 225415892,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612623939
+    },
+    {
+        "content": "<blockquote>\n<p>is notoriously difficult to specify precisely</p>\n</blockquote>\n<p>Ah, that explains why it seemed like everything that touches on it is (such as the C++) deliberately going out of its way to avoid talking about the case I'm interested in</p>\n<blockquote>\n<p>also see <a href=\"https://www.cl.cam.ac.uk/~pes20/popl17/mixed-size.pdf\">https://www.cl.cam.ac.uk/~pes20/popl17/mixed-size.pdf</a></p>\n</blockquote>\n<p>That's a very good and interesting paper, thanks. There are some limitations around SeqCst that they discuss, but personally that doesn't sound too unreasonable for me.</p>\n<p>These sorts of accesses are very rare, and are likely to be only used by code that's actively tuning the algorithm, which means it's unlikely to want to be using SeqCst in the first place. (but this may be my personal bias, as IMO algorithms that require SeqCst are too hard to reason about — better to use things that can be expressed with acquire release semantics than to worry about interleavings)</p>\n<p>Also, it indicated that this issue already exists for PPC regardless of mixed access, apparently.</p>",
+        "id": 225421212,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1612631829
+    },
+    {
+        "content": "<blockquote>\n<p>Also, it indicated that this issue already exists for PPC regardless of mixed access, apparently.</p>\n</blockquote>\n<p>Yeah, turns out specifying SeqCst is really hard when you start mixing SeqCst and other accesses on the same location. C++11 had a bug there; C++2x will fix that. see <a href=\"https://plv.mpi-sws.org/scfix/\">https://plv.mpi-sws.org/scfix/</a> .<br>\nThis problem is AFAIK not closely related to mixed-size accesses though (but I am out of the loop on the details here).</p>",
+        "id": 225459133,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1612696850
+    }
+]

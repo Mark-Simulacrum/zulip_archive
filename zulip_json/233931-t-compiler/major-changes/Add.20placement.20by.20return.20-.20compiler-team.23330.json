@@ -1,0 +1,344 @@
+[
+    {
+        "content": "<p>Regarding the proposal being in the wrong repo, I followed the process outlined in the MCP document, which was explicitly advertised as the new entry point of the RFC \"pipeline\":</p>\n<blockquote>\n<p>If you would like to make a major change to the compiler, the process is as follows:</p>\n<ul>\n<li>Open a tracking issue on the rust-lang/compiler-team repo using the major change template.</li>\n</ul>\n</blockquote>\n<p>If this process isn't meant to be use of language change proposal, that needs to be explicitly documented in the MCP process document. (and communicated internally, because as it is a lang team member explicitly directed me towards the MCP process)</p>",
+        "id": 202960582,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1594021076
+    },
+    {
+        "content": "<p>the lang team has its own MCP process <a href=\"https://github.com/rust-lang/rfcs/pull/2936\">https://github.com/rust-lang/rfcs/pull/2936</a></p>",
+        "id": 202960829,
+        "sender_full_name": "kennytm",
+        "timestamp": 1594021281
+    },
+    {
+        "content": "<p>so we are possibly a victim of <a href=\"https://github.com/rust-lang/rfcs/pull/2936#issuecomment-636440748\">https://github.com/rust-lang/rfcs/pull/2936#issuecomment-636440748</a> <span aria-label=\"upside down\" class=\"emoji emoji-1f643\" role=\"img\" title=\"upside down\">:upside_down:</span></p>",
+        "id": 202960946,
+        "sender_full_name": "kennytm",
+        "timestamp": 1594021371
+    },
+    {
+        "content": "<p>Right. I'm realizing now I was looking at merged RFCs, whereas the lang-team MCP process is still in a PR RFC. My bad.</p>\n<p>(though the compiler-team MCP should probably include a \"by the way, the lang-team MCP is over there, this is different\" disclaimer)</p>",
+        "id": 202960980,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1594021414
+    },
+    {
+        "content": "<p>Ugh. I guess the simplest solution would be to close this issue, at least temporarily, and open another issue in the lang-team repo. Like people said, there's stuff in here that can be done purely implementation-side, but it's probably better to hash it out on the lang side first.</p>",
+        "id": 202961268,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1594021600
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124289\">Hanna Kruppe</span> <a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20.28GCE.2C.20unsized.20retu.20compiler-team.23330/near/202935340\">said</a>:</p>\n<blockquote>\n<p>placement of sized types is claimed to be one of the consequences, but I don't see anything addressing the core implementation issue of how we can \"guarantee\" to avoid large temporaries in MIR/LLVM IR/machine code.</p>\n</blockquote>\n<p>Understood. Full disclosure: I'm completely unaware of these issues. Where do you suggest I start to familiarize myself with them? Is there a body of documentation, or a place in the code that's particularly relevant?</p>",
+        "id": 202961486,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1594021783
+    },
+    {
+        "content": "<p>I don't have a good reference, these things are unfortunately spread over many discussions in many different places. Briefly, off the top of my head: right now, the language semantics of Rust and the way those semantics are represented in MIR (and beyond) evaluate essentially all expressions into a temporary first, before moving the result into the eventual destination. The naive way to get placement without temporaries would be to change that and say something like: every expression evaluation targets a particular destination place, and we set up and maintain those destinations such that <code>x = ...;</code> or <code>return ...</code> never need a temporary. But that doesn't work in general, because the expression evaluation can require reading the same place that ought to be the destination (e.g., consider <code>pair = (pair.1, pair.0);</code>). These situations are particularly tricky to identify when pointers are involved (e.g. consider <code>pair = (p.1, p.0);</code> -- same problem as in the previous example iff <code>p</code> points to <code>pair</code>). This suggests the most practical way to eliminate temporaries is an optimization pass on MIR, where the prerequisite analyses are much more tractable than at the source level. But such an optimization will still need to ensure the destination place is not read during the RHS evaluation, which requires powerful alias analysis and, in particular, a settled aliasing semantics for unsafe code and raw pointers (like Stacked Borrows). But once we have that, it's still an open question how reliable and efficient such an optimization can be made, and whether it will correspond to any sensible source-level rules that we could tell users to follow if they want \"guaranteed\" move elision.</p>",
+        "id": 202971867,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594030048
+    },
+    {
+        "content": "<p>Note: I used assignments to local variables as examples for simplicity, but essentially the same problems apply to evaluating expressions into a function's return place (which is essentially a local, even if <code>return ...</code> looks different at the source level) and to evaluating into a place given by a pointer (which is what's needed for <code>Box</code>/<code>Vec</code>/etc. placement). For example, consider <code>x = foo(&amp;x as *const _)</code> where <code>foo</code> reads from its pointer argument while constructing the return value, or likewise <code>*ptr = foo(ptr);</code>.</p>",
+        "id": 202972303,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594030359
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124289\">Hanna Kruppe</span> [said](<a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20(GCE.2C.20unsized.20retu.20compiler-team.23330/near/202971867)\">https://rust-lang.zulipchat.com/#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20(GCE.2C.20unsized.20retu.20compiler-team.23330/near/202971867)</a>:</p>\n<blockquote>\n<p>But that doesn't work in general, because the expression evaluation can require reading the same place that ought to be the destination (e.g., consider <code>pair = (pair.1, pair.0);</code>).</p>\n</blockquote>\n<p>I actually thought about this <a href=\"#narrow/stream/131828-t-compiler/topic/Placement.20new.20and.20heap.20allocation.20of.20large.20struct/near/199545799\">before</a>. We don't need to worry about this if the destination place is uninitialised, which is true for <code>let x = ...</code> or <code>return ...</code>, so the overall idea will work.</p>",
+        "id": 203011554,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594053070
+    },
+    {
+        "content": "<p>Probably relevant that C++'s guaranteed copy/move elision does not handle those cases either. What it does handle is a) returning a prvalue and b) initializing an object from a prvalue (excluding \"potentially overlapping subobjects\"). This excludes <code>x = &lt;anything that might read from x&gt;</code> for being an assignment, not an initialization.</p>",
+        "id": 203011581,
+        "sender_full_name": "rpjohnst",
+        "timestamp": 1594053086
+    },
+    {
+        "content": "<p>And notably, even if you have <code>SomeLargeType foo(...)</code> which properly does <code>return some_rvalue</code>, you can still get copies/moves if the call site for <code>foo</code> doesn't <em>also</em> follow the rules to enable the elision. So <code>auto x = foo(...)</code> will construct <code>SomeLargeType</code> directly into <code>x</code>, but <code>existing_var = foo(...)</code> will not, regardless of whether <code>foo</code> might read from <code>existing_var</code>.</p>",
+        "id": 203011759,
+        "sender_full_name": "rpjohnst",
+        "timestamp": 1594053190
+    },
+    {
+        "content": "<p>One caveat might be if a variable can be ininitialised or not depending on control path though. E.g.</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"k\">if</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"nb\">drop</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">large</span><span class=\"w\"> </span><span class=\"k\">struct</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// Do we need to do analysis so we know x is uninitialised now, or we just say this isn&#39;t guaranteed?</span>\n</code></pre></div>",
+        "id": 203012577,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594053678
+    },
+    {
+        "content": "<p>IMO we probably only need to guarantee about variables that are never initialised, so we don't guarantee the elision in that case</p>",
+        "id": 203012621,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594053713
+    },
+    {
+        "content": "<p>Just to make sure: You're aware of the current work regarding NRVO and destination propagation, right?</p>",
+        "id": 203012806,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1594053806
+    },
+    {
+        "content": "<p>I am aware of those optimisations but haven't go through PRs in great detail. I might need to take a deeper look. Will destination propagation be \"always on\" even in debug builds though?</p>",
+        "id": 203013448,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594054133
+    },
+    {
+        "content": "<p>Depends on whether people manage to optimize it further once it lands. In the current state it won't run at all unless you specifically request it with <code>-Zmir-opt-level=2</code>.</p>",
+        "id": 203013638,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1594054255
+    },
+    {
+        "content": "<p>Constructing directly into place would require none of the optimisations to be turned on for debug builds, so it still might be something to consider</p>",
+        "id": 203013683,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594054293
+    },
+    {
+        "content": "<p>Destination propagation covers more than the guaranteed elision mentioned in this RFC, so it might not be ideal to force it to be turned on in opt-level=0</p>",
+        "id": 203013848,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594054390
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"303710\">Gary Guo</span> [said](<a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20(GCE.2C.20unsized.20retu.20compiler-team.23330/near/203011554)\">https://rust-lang.zulipchat.com/#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20(GCE.2C.20unsized.20retu.20compiler-team.23330/near/203011554)</a>:</p>\n<blockquote>\n<p>I actually thought about this <a href=\"#narrow/stream/131828-t-compiler/topic/Placement.20new.20and.20heap.20allocation.20of.20large.20struct/near/199545799\">before</a>. We don't need to worry about this if the destination place is uninitialised, which is true for <code>let x = ...</code> or <code>return ...</code>, so the overall idea will work.</p>\n</blockquote>\n<p>Yes to <code>let x = ...;</code> (trivially). For returns, it's more subtle, because there's <em>two</em> places where temporaries might pop up: in the evaluation of the <code>...</code> within the function, and in the evaluation of the function call in the caller. Both are equally problematic, and if we want to elide all the temporaries for something like<code>mut_var = foo(...);</code> in <em>any</em> circumstances, then \"the destination place is uninitialize\" isn't true in general. (But otherwise, we can leave the responsibility of ensuring it doesn't alias anything the function might read to the caller.)</p>",
+        "id": 203018784,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594057095
+    },
+    {
+        "content": "<p>However, even with <code>let x = ...;</code> there is a wrinkle for which we need tricky Unsafe-Code-Guidelines questions to be settled first: if you have something like <code>loop { let mut x = foo(); escape(&amp;raw mut x); }</code>, is it really true that the storage space of <code>x</code> can't be accessed by <code>foo()</code>? For example, <code>escape()</code> might store the pointer somewhere and <code>foo()</code> retrieves that pointer to use <code>x</code> as scratch space. Intuitively it seems like we ought to rule this out, but what should the precise rules be to make such programs UB?</p>",
+        "id": 203019548,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594057517
+    },
+    {
+        "content": "<p>(See <a href=\"https://github.com/rust-lang/rust/issues/42371\">https://github.com/rust-lang/rust/issues/42371</a>)</p>",
+        "id": 203019894,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594057685
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@Hanna Kruppe</span> If <code>foo</code> is accessing a pointer to an object that's no longer live and past its lifetime (as it would have to for one iteration of that loop to alias another), that's UB by definition, right?</p>",
+        "id": 203021792,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1594058694
+    },
+    {
+        "content": "<p>We don't really have a precise definition one way or another of what those terms mean, so I can't agree it's UB \"by definition\" :) In particular, the Alive/LLVM semantics described in <a href=\"https://github.com/rust-lang/rust/issues/42371#issuecomment-647103740\">https://github.com/rust-lang/rust/issues/42371#issuecomment-647103740</a> would make it potentially well-defined, depending on the precise placement of the StorageLive MIR statement relative to the call to foo(). While the currently implemented semantics in miri are stricter and (AFAICT) rule out the cross-iteration reuse, it makes some other optimizations (hoisting address calculations out of the loop body) illegal, so it's not completely obvious which variant we should ultimately adopt.</p>",
+        "id": 203022974,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594059365
+    },
+    {
+        "content": "<p>Without considering optimisations, just from reading the program semantically, it ought to be a UB because the x in the next iteration is not the same x. Some optimisations might make it well defined when lowering to LLVM but it shouldn't be relied on and certainly should be a UB, regardless we exploit it or not.</p>",
+        "id": 203025815,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594060963
+    },
+    {
+        "content": "<p>I'm not saying \"it's UB but some optimization might remove the UB down the line\". My point is that we do not even have an agreed upon definition of some relevant aspects of Rust semantics, and there are plausible definitions that might make it well-defined. Specifically, it matters whether each iteration creates a new allocation or whether the same allocation is repeatedly de-initialized and re-initialized, and if it's the latter, it matters <em>when</em> the reinitialization happens within the loop body. There are several plausible answers and Rust has not yet committed to any one of them.</p>",
+        "id": 203026843,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594061523
+    },
+    {
+        "content": "<blockquote>\n<p>it makes some other optimizations (hoisting address calculations out of the loop body) illegal</p>\n</blockquote>\n<p>Not necessarily.  The spec can say \"each iteration is a new allocation\" while the implementation refines it to \"the iterations use the same allocation but accessing it while de-initialized is UB\".  I think the latter is effectively the semantics you get if you use llvm.lifetime.start/end.</p>",
+        "id": 203030262,
+        "sender_full_name": "comex",
+        "timestamp": 1594063506
+    },
+    {
+        "content": "<p>(Or the spec can say the latter, but both choices allow placement by return.)</p>",
+        "id": 203030957,
+        "sender_full_name": "comex",
+        "timestamp": 1594063916
+    },
+    {
+        "content": "<p>Yes, after going to the more permissive semantics you can do the optimization that isn't compatible with the stricter semantics, as is often the case. But you can't do it before (including manually in surface Rust). Does that matter, and if so, does it matter more than making the whole placement affair simpler? I don't know, it's not obvious to me one way or another.</p>",
+        "id": 203035102,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594066287
+    },
+    {
+        "content": "<p>Well, are there any reasons to go beyond \"the iterations use the same allocation but accessing it while de-initialized is UB\" to actually allowing it to be accessed?</p>",
+        "id": 203036515,
+        "sender_full_name": "comex",
+        "timestamp": 1594067071
+    },
+    {
+        "content": "<p>It's not just a question of placement; it also affects stack coloring (allowing different variables with disjoint lifetimes to reuse the same stack space) as well as non-guaranteed copy optimizations.</p>",
+        "id": 203036644,
+        "sender_full_name": "comex",
+        "timestamp": 1594067161
+    },
+    {
+        "content": "<p>\"the iterations use the same allocation but accessing it while de-initialized is UB\" is the <em>most permissive</em> option of the two that were brought up here, unless I complete misunderstand what \"accessing it while de-initialized\" is supposed to mean (I believe it's the Alive2 semantics). While \"each iteration gets a separate allocation\" rules out <em>any</em> use of a pointer obtained in a past iteration, the more permissive semantics allows such accesses if they happen after the current iteration made that allocation live again. And if we want <code>let x = ...;</code> to evaluate the RHS directly into <code>x</code>, then <code>x</code> needs to be made live <em>before</em> (at least if <code>StorageLive(x)</code> makes <code>x</code> uninit, which I believe is the current consensus).</p>",
+        "id": 203037561,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594067711
+    },
+    {
+        "content": "<p>More precisely in terms of MIR: <code>let mut p = &amp;raw mut &lt;something&gt;; loop { let mut x = ptr::replace(p, 1); p = &amp;raw mut x; }</code> would have something like this in the loop body:</p>\n<div class=\"codehilite\"><pre><span></span><code>StorageLive(x)\n_1 = call ptr::replace(_2, const 1)\n_2 = &amp;raw mut _1;\nStorageDead(x)\n</code></pre></div>\n\n\n<p>Note how the access to <code>*p</code> is contained in the StorageLive-StorageDead pair, so you can't say it's UB on those grounds, you need to involve pointer provenance. Or perhaps stacked borrows suffices? I suppose the write to <code>x</code> would remove the permission for the previously created raw pointer to access the place. Hmmm.</p>",
+        "id": 203038239,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594068057
+    },
+    {
+        "content": "<p>Just a note, \"the iterations use the same allocation but accessing it while de-initialized is UB\" would restrict optimisations that can be done after loop unrolling.</p>",
+        "id": 203038246,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594068061
+    },
+    {
+        "content": "<p>How so?</p>",
+        "id": 203038304,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594068091
+    },
+    {
+        "content": "<p>Unrolled loops need to re-use the same allocation for x basically, which would limit some parallelization opportunities if we can do separate allocations</p>",
+        "id": 203038493,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594068209
+    },
+    {
+        "content": "<p>Also, this code is disallowed by borrow checker, so it would be confusing it the semantic is allowed via raw pointer:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">f</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"mi\">1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">loop</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">println</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"s\">&quot;{}&quot;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">y</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 203039087,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594068571
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"303710\">Gary Guo</span> [said](<a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20(GCE.2C.20unsized.20retu.20compiler-team.23330/near/203038493)\">https://rust-lang.zulipchat.com/#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20(GCE.2C.20unsized.20retu.20compiler-team.23330/near/203038493)</a>:</p>\n<blockquote>\n<p>Unrolled loops need to re-use the same allocation for x basically, which would limit some parallelization opportunities if we can do separate allocations</p>\n</blockquote>\n<p>I don't really follow. Or rather, I don't see how this is a limit you'll ever run into in practice. If you understand the accesses to the storage well enough to justify doing multiple in parallel or interleaved, then you should have enough knowledge to justify introducing (temporary) new storage where needed.</p>",
+        "id": 203039245,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594068676
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"303710\">Gary Guo</span> [said](<a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20(GCE.2C.20unsized.20retu.20compiler-team.23330/near/203039087)\">https://rust-lang.zulipchat.com/#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20(GCE.2C.20unsized.20retu.20compiler-team.23330/near/203039087)</a>:</p>\n<blockquote>\n<p>Also, this code is disallowed by borrow checker, so it would be confusing it the semantic is allowed via raw pointer:</p>\n</blockquote>\n<p>But raw pointers <em>do</em> allow much more than the borrow checker allows, in myriad different ways. That's the entire point of unsafe code!</p>",
+        "id": 203039368,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594068735
+    },
+    {
+        "content": "<p>Whether raw pointers are used shouldn't affect the lifetime of a value though! Whether another value happens to be allocated at the exact same location shouldn't matter. Imagine that we have an allocator that always reuse the last freed allocation if sizes are equal, it still does not justify use-after-free.</p>",
+        "id": 203039721,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594068975
+    },
+    {
+        "content": "<p>The crux of the matter is whether this situation qualifies as \"use after free\", or rather, whether it ought to be UB (because the Rust project has not yet decided this and will have to make a decision). More precisely, if we want it to be UB, we will need a precise formal rule that explains why those offending programs -- and all others \"like it\" -- are UB. This rule set should also have other desirable traits (doesn't rule out things we'd like to allow, isn't an undue burden for programmers to adhere to, is efficiently checkable in miri, etc.), and there are myriad trade-offs involved. You can't just claim \"this is like use after free, hence bad, hence we must make it UB somehow\". For example, it is quite useful to be able to write to elements of a vector past the capacity, so we don't try to make that UB, even though it's very much like a \"use after free\" if you use the Vec as a kind of object pool. In the same vein, but far less clear-cut, there are some advantages to the \"same allocation, just repeatedly overwritten with <code>uninit</code>\" perspective on Storage{Live,Dead} in loops. We should weigh those advantages against the advantages of other choices for semantics.</p>",
+        "id": 203040997,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594069780
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@Hanna Kruppe</span> Oh, I thought you were proposing that the allocation be able to be used throughout the entire function.  I think I understand the issue now.</p>",
+        "id": 203044582,
+        "sender_full_name": "comex",
+        "timestamp": 1594071995
+    },
+    {
+        "content": "<p>My mistake.</p>",
+        "id": 203044594,
+        "sender_full_name": "comex",
+        "timestamp": 1594072004
+    },
+    {
+        "content": "<p>This is a weird situation.  I wish we could do return value optimization for reassigning an existing variable, but we can't in general because <code>x = foo(&amp;mut x);</code> is allowed.</p>",
+        "id": 203045069,
+        "sender_full_name": "comex",
+        "timestamp": 1594072307
+    },
+    {
+        "content": "<p>So we can't have a general rule that <code>foo = expr</code> borrows <code>foo</code> throughout the entire statement.  I was going to say, the question is whether <code>let foo = expr</code> borrows <code>foo</code> throughout the entire statement, from a Stacked Borrows perspective… but even that is weaker than ideal.</p>",
+        "id": 203045454,
+        "sender_full_name": "comex",
+        "timestamp": 1594072579
+    },
+    {
+        "content": "<p>Actually, no, that's strong enough, as long as it's borrowed starting at the point that it's StorageLive.  And accessing it before then is UB.</p>",
+        "id": 203045501,
+        "sender_full_name": "comex",
+        "timestamp": 1594072620
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> any advice?</p>",
+        "id": 203046156,
+        "sender_full_name": "comex",
+        "timestamp": 1594073037
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@Hanna Kruppe</span> Something I really don't understand about the discussion, why would variables declared within a loop be treated differently? How about</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">loop</span><span class=\"w\"> </span><span class=\"p\">{{</span><span class=\"w\"> </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">raw</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"p\">}}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>We've introduced a new scope, does your argument still apply?</p>",
+        "id": 203058349,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594083946
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124289\">Hanna Kruppe</span></p>\n<blockquote>\n<p>But that doesn't work in general, because the expression evaluation can require reading the same place that ought to be the destination (e.g., consider <code>pair = (pair.1, pair.0);</code>). These situations are particularly tricky to identify when pointers are involved (e.g. consider <code>pair = (p.1, p.0);</code> -- same problem as in the previous example iff <code>p</code> points to <code>pair</code>).</p>\n</blockquote>\n<p>This is only tangentially relevant to the broader GCE/NRVO discussion, but I'll note that the \"minimum GCE\" described in the RFC doesn't need to handle that case; since it only requires GCE to apply for return chains, with unsafe code at the end of the chain (eg the implementation of <code>Box::new_with</code>) that has to respect invariants about scratch space not aliasing with args. Technically the proposal doesn't even require GCE to elide the final copy in the <code>x = ...</code> case; in that case the return chain could be collapsed to a single emplacement into a temporary, followed by a move, with no risk of aliasing.</p>",
+        "id": 203080131,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1594112078
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124289\">Hanna Kruppe</span> <a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20.28GCE.2C.20unsized.20retu.20compiler-team.23330/near/203038239\">said</a>:</p>\n<blockquote>\n<p><code>let mut p = &amp;raw mut &lt;something&gt;; loop { let mut x = ptr::replace(p, 1); p = &amp;raw mut x; }</code> </p>\n</blockquote>\n<p>Leaving scopes aside from a second, that seems like a clear stacked borrows violation to me. If we imagine a similar example where we hoist x out of the loop and use a different function, the violation becomes clear:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">raw</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"n\">something</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">loop</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">mutate_first_arg</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">raw</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>In the more general case, as long as emplacement is interpreted as taking a mut/unique reference to its destination, I don't see how a well-formed program could alias that reference with input refs, unsafe code or not.</p>\n<p>Bad unsafe code could alias emplacement memory with input memory if it wrongly assumes that any undefined memory is automatically valid for emplacement, but that's a documentation problem, not a soundness problem.</p>",
+        "id": 203081844,
+        "sender_full_name": "Olivier FAURE",
+        "timestamp": 1594113396
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"303710\">Gary Guo</span> <a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20-.20compiler-team.23330/near/203058349\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"124289\">Hanna Kruppe</span> Something I really don't understand about the discussion, why would variables declared within a loop be treated differently? How about</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">loop</span><span class=\"w\"> </span><span class=\"p\">{{</span><span class=\"w\"> </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">raw</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"p\">}}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>We've introduced a new scope, does your argument still apply?</p>\n</blockquote>\n<p>My arguments would apply unaltered, because they revolve around \"what do multiple StorageLive/StorageDead pairs on the same local do?\". It's just that loops are the main (only?) way that you can get into that situation using surface Rust (as opposed to writing MIR by hand).</p>",
+        "id": 203096059,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594125387
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"263609\">Olivier FAURE</span> <a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20-.20compiler-team.23330/near/203080131\">said</a>:</p>\n<blockquote>\n<p>Technically the proposal doesn't even require GCE to elide the final copy in the <code>x = ...</code> case; in that case the return chain could be collapsed to a single emplacement into a temporary, followed by a move, with no risk of aliasing.</p>\n</blockquote>\n<p>Frankly, if we can't get rid of <em>all</em> the temporaries reliably, then that's not worth much: we already get down to one temporary in many cases, and it's still a problem in practice. Likewise, if you can't handle re-assignments or have other arbitrary limitations that natural code hits often, then the value for users is rather limited.</p>",
+        "id": 203096474,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594125623
+    },
+    {
+        "content": "<p>And yes, stacked borrows might rule out my earlier example for other reasons, as already noted earlier. But I'm not sure this addresses all problems of this sort, and in any case (again) limiting yourself <em>only</em> to initialization is not enough.</p>",
+        "id": 203096799,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1594125841
+    },
+    {
+        "content": "<p>I think we should not think about MIR when we discuss if something's UB or not. In surface Rust a value should not be accessed when it leaves scope and that's should be an enough argument to make these code UB.</p>",
+        "id": 203123174,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594138057
+    },
+    {
+        "content": "<p>The plan is to define Rust's semantics in terms of MIR, and define a lowering from surface Rust to MIR, so MIR is very relevant as it will define the entire operational semantics of Rust.</p>",
+        "id": 203124133,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1594138356
+    },
+    {
+        "content": "<p>Okay, I see the point now. Thanks for the clarification.</p>",
+        "id": 203126853,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1594139542
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"198590\">comex</span> <a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Add.20placement.20by.20return.20-.20compiler-team.23330/near/203045069\">said</a>:</p>\n<blockquote>\n<p>This is a weird situation.  I wish we could do return value optimization for reassigning an existing variable, but we can't in general because <code>x = foo(&amp;mut x);</code> is allowed.</p>\n</blockquote>\n<p>I think we can (and do) have that rule on the MIR level though. Also see:</p>\n<ul>\n<li><a href=\"https://github.com/rust-lang/rust/issues/68364\">https://github.com/rust-lang/rust/issues/68364</a> (in particular <a href=\"https://github.com/rust-lang/rust/issues/68364#issuecomment-614862820\">this proposal</a>)</li>\n<li><a href=\"https://github.com/rust-lang/rust/issues/71117\">https://github.com/rust-lang/rust/issues/71117</a></li>\n</ul>",
+        "id": 203637740,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1594549738
+    },
+    {
+        "content": "<p>Beyond that I am not sure what your question is, do you have a concrete example?</p>",
+        "id": 203637749,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1594549782
+    }
+]
