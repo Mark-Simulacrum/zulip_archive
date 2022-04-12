@@ -1,0 +1,56 @@
+[
+    {
+        "content": "<p>Hello, my friend and i talked about a very specific use case. I'm not sure yet whether async programming is the best solution here:  He is writing a game program, and </p>\n<ol>\n<li>plans to run the main window loop on main thread </li>\n<li>want to spawn small tasks like updating data structure values in other threads, some of the inputs of these tasks are short-term borrows, so he has to use some scoped thread API like <code>rayon::Scoped</code>. </li>\n<li>want to be notified about the result of the task in the main thread, when it's done, end the borrow and the scoped thread, and use the previously borrowed data for follow-up work.</li>\n</ol>",
+        "id": 229181820,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1615118100
+    },
+    {
+        "content": "<p>Currently <code>winit</code>'s event loop api is <a href=\"https://docs.rs/winit/0.24.0/winit/event_loop/struct.EventLoop.html#method.run\">this</a>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">run</span><span class=\"o\">&lt;</span><span class=\"n\">F</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">event_handler</span>: <span class=\"nc\">F</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"o\">!</span><span class=\"w\"></span>\n<span class=\"k\">where</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">F</span>: <span class=\"o\">'</span><span class=\"nb\">static</span> <span class=\"o\">+</span><span class=\"w\"> </span><span class=\"nb\">FnMut</span><span class=\"p\">(</span><span class=\"n\">Event</span><span class=\"o\">&lt;'</span><span class=\"nb\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">EventLoopWindowTarget</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">ControlFlow</span><span class=\"p\">),</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 229181918,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1615118198
+    },
+    {
+        "content": "<p>When event_handler is a normal closure, it's quite hard to express the \"scoped thread\" scope using safe rust, because it's actually discontinous from a control flow perspective.</p>",
+        "id": 229181998,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1615118292
+    },
+    {
+        "content": "<p>I feel async programming and the interior generator might help with this use case here. I'm a little unsure about the details.</p>",
+        "id": 229182146,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1615118422
+    },
+    {
+        "content": "<p>There're also some previous discussions at <a href=\"https://github.com/rust-windowing/winit/issues/1199\">github</a></p>",
+        "id": 229182352,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1615118628
+    },
+    {
+        "content": "<p>It's not possible to do scoped tasks - i.e. the equivalent of scoped threads - in safe async Rust. Scoped threads use a scope (hence the name) to ensure destruction of the handle (or panic - if it comes to that). I wrote a <a href=\"https://internals.rust-lang.org/t/pre-rfc-leave-auto-trait-for-reliable-destruction/13825\">pre-RFC</a> for this (although I was not the first - there's a lot of history) since this is a super legit and likely common use-case.</p>",
+        "id": 229253338,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1615184545
+    },
+    {
+        "content": "<p>How small is this \"small task\"? Can this task be made synchronous or does it need to suspend?</p>\n<p>In async Rust, there are combinators (the join and select macros) that are low overhead and allow static borrowing. However, they multiplex work within the same task. Joining is technically done on two <em>futures</em>, but logically speaking these can as well be considered <em>tasks</em>. It's preferable to spawning a \"Real Task\", typically.</p>\n<p>If <em>different</em> tasks need to cooperate, you typically use a shared <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> or a message passing channel between the different tasks.</p>",
+        "id": 229254324,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1615185442
+    },
+    {
+        "content": "<p>Thanks for the explanation! It seems i need to think more about this and maybe i'll need to implement the needed synchroization manually.</p>",
+        "id": 229350300,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1615228400
+    },
+    {
+        "content": "<p>Sure! The current async ecosystem is tailored for servers - so most work has gone into optimizing for the <em>multithreaded, work-stealing</em> type of executors/runtimes, where the workload is assumed to be uniform in terms of scheduling requirements. Most do <em>not</em> offer thread affinity, task priorities, deadlines which you might want if you're writing games, device drivers etc - e.g. workloads where you have a latency-sensitive UI thread/task loop.</p>\n<p>There is nothing prevent async Rust focusing on that - in fact, the <a href=\"https://github.com/bastion-rs/bastion\">Bastion</a> runtime has been innovating in this space, but still with focus on servers. I suspect that if you want most bang-for-the-buck building a game <em>today</em>, your best bet is a good thread pool library and synchronous concurrent data structures (e.g. <a href=\"https://github.com/crossbeam-rs/crossbeam\">crossbeam</a> and/or <a href=\"https://github.com/Amanieu/parking_lot\">parking_lot</a>).</p>\n<p>That said, if you are ok with digging deeper, you might consider:</p>\n<ul>\n<li>Run a hybrid system I/O workloads run on some threads. Challenges would be finding interoperable concurrent data structures and debugging/profiling might be more difficult.</li>\n<li>Write or extend an async Runtime to support deadlines/priorities/&lt;other custom behavior&gt; and use async throughout. This is inherently complex and might require rewriting code for async (both your own code and crates you're currently using)</li>\n</ul>",
+        "id": 229374400,
+        "sender_full_name": "Didrik Nordstrom",
+        "timestamp": 1615237887
+    }
+]

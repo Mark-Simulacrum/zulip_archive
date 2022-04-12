@@ -1,0 +1,105 @@
+<html>
+<head><meta charset="utf-8"><title>Mandatory async drop · wg-async · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/index.html">wg-async</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Mandatory.20async.20drop.html">Mandatory async drop</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="246390311"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Mandatory%20async%20drop/near/246390311" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Kestrer <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Mandatory.20async.20drop.html#246390311">(Jul 18 2021 at 17:52)</a>:</h4>
+<p>I have been thinking about how to support the "mandatory async drop" design as proposed by <span class="user-mention" data-user-id="348152">@Dario Nieuwenhuis</span>. Here is what I have thought about so far:</p>
+<h2>Drop and destroy</h2>
+<p>The word "drop" is far too overloaded; it can refer to both "running custom code during a value's destruction" (e.g. <code>Drop</code> trait) and "destroying a value, of which the first step is to run <code>Drop</code>" (e.g. <code>ptr::drop_in_place</code>). To reduce confusion I suggest using the word "drop" to mean the former, and use the word "destroy" to mean the latter.</p>
+<p>The reason this is important is because of this type:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">Wrapper</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="p">(</span><span class="n">T</span><span class="p">);</span><span class="w"></span>
+<span class="k">impl</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="w"> </span><span class="nb">Drop</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Wrapper</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">drop</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">"Hi!"</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>We want to support this type being both synchronously and asynchronously destroyed (with the same message being printed in both ways), yet it only implements <code>Drop</code>. So if we overload <code>Drop</code> to also mean "can be synchronously destroyed", this code makes no sense. Instead, it should just mean "any synchronous code that is run during destruction", and the rest of destruction may still be asynchronous (e.g. with <code>Wrapper&lt;TlsStream&gt;</code>).</p>
+<h2><code>ManuallyDrop</code> as an escape hatch</h2>
+<p><code>ManuallyDrop&lt;T&gt;</code> is the escape hatch necessary to convert a type that can only be asynchronously dropped into a type that can be synchronously dropped. This would be useful when for example implementing a <code>BlockOnAsyncDestruction&lt;T&gt;</code> wrapper.</p>
+<h2>Async destruction being mandatory is good</h2>
+<p>Requiring async destruction not only allows for a safe <code>poll</code> function, but it also avoids a big footgun. Having types which can be destroyed in one of two ways is a really bad idea, because it's never really obvious which way it is going to be destroyed, especially since destruction is implicit. Imagine a bug where a TLS stream was being closed uncleanly, _but only in some scenarios_ - that would be extremely difficult to track down.</p>
+<h2>Poll-based async drop is not possible</h2>
+<p>Why not? Because of <code>Vec</code>. <code>Vec</code>'s current drop code calls <code>ptr::drop_in_place</code> on the inner slice. A poll-based async drop design would mandate one of two things:</p>
+<ol>
+<li><code>Vec</code> is four <code>usize</code>s large, so it can keep track of how many of its items have been destroyed already during drop.</li>
+<li><code>Vec</code> destroys the items concurrently, <code>join_all</code>-style (resulting in quadratic complexity and unreliable drop order).</li>
+</ol>
+<p>I would consider both to be non-options, so we <em>have</em> to go for a non-poll-based async drop design.</p>
+<p>I think it is acceptable to use compiler magic to enforce that drop futures have the same <code>Send</code>ness and <code>Sync</code>ness as the type. To support trait objects, their vtables will internally contain a function that returns a fat pointer to the async drop future. For boxed trait objects, this will be a new heap allocation (though implicit heap allocation is not too good), for static or stack trait objects the space for the destructor future can be stored alongside the type.</p>
+<h2><code>Vec::push</code></h2>
+<p>And now we encounter the nemesis of this proposal. This seemingly innocuous function has completely stumped me. The problem is that <code>Vec::push</code> <a href="https://doc.rust-lang.org/stable/std/vec/struct.Vec.html#panics-7">can panic</a> - and when it panics, it panics _before_ the owned <code>T</code> is added onto the vector, meaning that we have to somehow drop the value! Here are a few options I have considered:</p>
+<ul>
+<li>Add <code>Vec::push_async</code>. This is really not ideal, it has more API surface and is a slippery slope to almost doubling the number of functions in the standard library.</li>
+<li>Forbid <code>T</code>s that aren't synchronously destroyable in <code>Vec</code>. This would be annoying, given that <code>Vec</code> is such a fundamental type and types like <code>Vec&lt;TlsStream&gt;</code> would be useful.</li>
+<li>Have some kind of <code>EmergencyDrop</code> trait which async destroyable types (like <code>TlsStream</code>) can implement, so they can be synchronously dropped in an emergency (like a panic in <code>Vec::push</code>). In <code>TlsStream</code>'s case this would just close the underlying <code>TcpStream</code>'s file descriptor without the proper TLS connection closing. But this is inconsistent as panics in async would behave differently to panics in sync, and it would be hard to tell which one would be used at a certain point.</li>
+<li>Make <code>Vec::push</code> somehow generic over async-ness (we can even have implicit <code>.await</code> here because async destruction cannot be cancelled). This is the most promising option, but comes with its own challenges, like recursion and<code>Send</code> and <code>Sync</code>ness. Also it shouldn't be that synchronous code has to think about the asynchronous just to make a general API.</li>
+</ul>
+<p>There is also the challenge of how the compiler can detect <code>Vec::push</code>-like methods (synchronous methods that accept types which aren't synchronously destroyable and can panic) and generate an error. You see, the function itself doesn't contain any places that explicitly look like panics - the panic is hidden behind a call to <code>reserve</code>.</p>
+
+
+
+<a name="246403377"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Mandatory%20async%20drop/near/246403377" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Gus Wynn <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Mandatory.20async.20drop.html#246403377">(Jul 18 2021 at 22:56)</a>:</h4>
+<p>I'm confused: how is the panic inside <code>Vec::push</code> special? Isn't it the same as if I did this:</p>
+<div class="codehilite"><pre><span></span><code>async fn do_stuff() {
+     let s = TlsStream::new().await; // TlsStream is mandatory async drop as you said
+     s.read_some_stuff().await;
+     validate_something()  // &lt;- lets say a panic happens here, rustc is going to need to figure out how to `AsyncDrop` `s` as we exit this stack frame
+     s.read_some_more_stuff().await;
+}
+</code></pre></div>
+
+
+
+<a name="246417146"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Mandatory%20async%20drop/near/246417146" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Kestrer <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Mandatory.20async.20drop.html#246417146">(Jul 19 2021 at 05:17)</a>:</h4>
+<p>In that case, I was expecting rustc to catch the panic, store the payload and run the async destructor of <code>s</code> - which it can do, because <code>do_stuff</code> is already in an asynchronous context. The trouble with <code>Vec::push</code> is that there's no asynchronous context for it to use to drop the <code>T</code>.</p>
+
+
+
+<a name="246468969"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Mandatory%20async%20drop/near/246468969" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Gus Wynn <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Mandatory.20async.20drop.html#246468969">(Jul 19 2021 at 15:19)</a>:</h4>
+<p>This seems like a general problem still, not specific to Vec::push, like doing anything with an AsyncDrop type in a sync function called from an async function (which I think is very common). I suppose it could be banned and special cased for things like push, but that seems severely limiting and surprisingly. I suppose I don't know enough about how rust is going drive the AsyncDrop::drop futures in the presence of a panic, but my thinking was that even if we aren't in an async function, we are still in a async stack so we are in an asynchronous context</p>
+
+
+
+<a name="246470728"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Mandatory%20async%20drop/near/246470728" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Kestrer <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Mandatory.20async.20drop.html#246470728">(Jul 19 2021 at 15:31)</a>:</h4>
+<p>Yes, this is definitely not specific to <code>Vec::push</code>, it applies to many many functions. I just thought <code>Vec::push</code> was the best example.</p>
+<blockquote>
+<p>my thinking was that even if we aren't in an async function, we are still in a async stack so we are in an asynchronous context</p>
+</blockquote>
+<p>That's essentially the fourth bullet point. To elaborate more on the recursion problem and the send problem, consider these two cases:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">recursion_problem</span><span class="o">&lt;</span><span class="n">T</span>: <span class="nb">Default</span><span class="o">&gt;</span><span class="p">(</span><span class="n">n</span>: <span class="kt">usize</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Vec</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Vec</span>::<span class="n">new</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">T</span>::<span class="n">default</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">v</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">recursion_problem</span><span class="p">(</span><span class="n">n</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">v</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">t</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">v</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>If <code>Vec::push</code> would panic higher up in the call stack while calling this function, we would have an arbitrary number of <code>T</code>s to asynchronously destroy. But we can't move them into the surrounding future to do this, because futures must have a fixed size.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">send_problem</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="p">(</span><span class="n">val</span>: <span class="nc">T</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">T</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Rc</span>::<span class="n">new</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">val</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">val</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="fm">panic!</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>To preserve drop order, <code>rc</code> must be destroyed _after_ <code>val</code>. Therefore, both <code>rc</code> and <code>val</code> must be moved into the containing future to asynchronously destroy <code>val</code> and then synchronously destroy <code>rc</code> - but that would make the containing future <code>!Send</code>!.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

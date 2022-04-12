@@ -1,0 +1,112 @@
+<html>
+<head><meta charset="utf-8"><title>Basic Blocks · t-compiler/wg-polonius · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/index.html">t-compiler/wg-polonius</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html">Basic Blocks</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="221365403"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221365403" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221365403">(Jan 01 2021 at 19:37)</a>:</h4>
+<p>One of the reasons polonius is slower than <code>rustc</code> is that it operates on a CFG where every node has exactly one (technically half of one) statement. This is hardly groundbreaking, but we could speed things up by operating on the CFG as it is stored in <code>rustc</code>.  To get more familiar with the language, I tried to express the way the in-tree dataflow solver operates as a set of datalog rules:</p>
+<div class="codehilite" data-code-language="Prolog"><pre><span></span><code><span class="o">//</span> <span class="nv">Block</span> <span class="s s-Atom">transfer</span> <span class="s s-Atom">functions</span>
+
+<span class="nf">trans_gen</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">)</span> <span class="p">:-</span>
+    <span class="nf">gen</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="s s-Atom">i</span><span class="p">]),</span>
+    <span class="p">!</span><span class="nf">kill</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="s s-Atom">j</span><span class="p">]),</span>
+    <span class="s s-Atom">j</span> <span class="o">&gt;</span> <span class="s s-Atom">i</span><span class="p">.</span>
+
+<span class="nf">trans_kill</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">)</span> <span class="p">:-</span>
+    <span class="nf">kill</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="s s-Atom">i</span><span class="p">]),</span>
+    <span class="p">!</span><span class="nf">gen</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="s s-Atom">j</span><span class="p">]),</span>
+    <span class="s s-Atom">j</span> <span class="o">&gt;</span> <span class="s s-Atom">i</span><span class="p">.</span>
+
+
+<span class="o">//</span> <span class="nv">Interblock</span> <span class="p">(</span><span class="s s-Atom">global</span><span class="p">)</span>
+
+<span class="nf">set_at_block_exit</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">)</span> <span class="p">:-</span>
+    <span class="nf">set_at_block_entry</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">),</span>
+    <span class="p">!</span><span class="nf">trans_kill</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">).</span>
+
+<span class="nf">set_at_block_exit</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">)</span> <span class="p">:-</span>
+    <span class="nf">trans_gen</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">).</span>
+
+<span class="nf">set_at_block_entry</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">)</span> <span class="p">:-</span>
+    <span class="nf">set_at_block_exit</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">pred</span><span class="p">),</span>
+    <span class="nf">block_edge</span><span class="p">(</span><span class="s s-Atom">pred</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">).</span>
+
+<span class="o">//</span> <span class="nv">Intrablock</span> <span class="p">(</span><span class="s s-Atom">local</span><span class="p">)</span>
+
+<span class="nf">set_at</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="s s-Atom">i</span><span class="p">])</span> <span class="p">:-</span>
+    <span class="nf">gen</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="s s-Atom">i</span><span class="o">-</span><span class="mi">1</span><span class="p">]).</span>
+
+<span class="nf">set_at</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="mi">0</span><span class="p">])</span> <span class="p">:-</span>
+    <span class="nf">set_at_block_entry</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="s s-Atom">bb</span><span class="p">).</span>
+
+<span class="nf">set_at</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="s s-Atom">i</span><span class="p">])</span> <span class="p">:-</span>
+    <span class="nf">set_at</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="s s-Atom">i</span><span class="o">-</span><span class="mi">1</span><span class="p">]),</span>
+    <span class="p">!</span><span class="nf">kill</span><span class="p">(</span><span class="s s-Atom">var</span><span class="p">,</span> <span class="p">[</span><span class="s s-Atom">bb</span><span class="p">,</span> <span class="s s-Atom">i</span><span class="o">-</span><span class="mi">1</span><span class="p">]).</span>
+</code></pre></div>
+<p>If you replace "gen" with "becomes_init", "kill" with "becomes_unint", and "set" with "is_init", you have the start of an initialization analysis (ignoring move paths and maybe with some off-by-one errors).</p>
+
+
+
+<a name="221365524"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221365524" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221365524">(Jan 01 2021 at 19:40)</a>:</h4>
+<p>I'm pretty sure this is legal datalog, although it includes arithmetic statements and record types, which are supported in Souffle but not in datafrog (although I suppose you could emulate them with relations).</p>
+
+
+
+<a name="221365614"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221365614" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221365614">(Jan 01 2021 at 19:43)</a>:</h4>
+<p>Anyways, this is one way to do "CFG compression" as discussed in <a href="https://github.com/rust-lang/polonius/issues/20">rust-lang/polonius#20</a>. I think it's different than the approach that <span class="user-mention silent" data-user-id="116113">lqd</span> took in their experiment.</p>
+
+
+
+<a name="221365676"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221365676" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221365676">(Jan 01 2021 at 19:44)</a>:</h4>
+<p>While it's more invasive, it also maps nicely to the internal structure used by <code>rustc</code></p>
+
+
+
+<a name="221366237"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221366237" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221366237">(Jan 01 2021 at 19:58)</a>:</h4>
+<p>What would be really cool is to generate rules for the basic block CFG from the ones for the single-node CFG. I'm not sure if there's a way to do this in general, however.</p>
+
+
+
+<a name="221372931"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221372931" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221372931">(Jan 01 2021 at 22:48)</a>:</h4>
+<p>(we've indeed talked about doing the analyses on basic blocks before)</p>
+
+
+
+<a name="221373407"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221373407" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221373407">(Jan 01 2021 at 23:02)</a>:</h4>
+<p>very interesting in any case</p>
+
+
+
+<a name="221373427"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221373427" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221373427">(Jan 01 2021 at 23:02)</a>:</h4>
+<p>my own thoughts were: it'll likely require to clone the dataflow state between blocks, even when we don't need it for DAGs -- but I'm not a dataflow nor datalog expert</p>
+
+
+
+<a name="221373813"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221373813" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221373813">(Jan 01 2021 at 23:13)</a>:</h4>
+<p>(and even if that's somewhat off-topic for this thread, the way I did CFG compression was indeed different: I did not really try changing the rules, only removed points, and the other facts associated, if there were no meaningful contributions to the loan or subset propagations, which is similar in spirit to some of the <code>DatafrogOpt</code> variant rules; especially with an eye towards computing errors rather than the loan contents of each origin at each point)</p>
+
+
+
+<a name="221375850"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/186049-t-compiler/wg-polonius/topic/Basic%20Blocks/near/221375850" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://zulip-archive.rust-lang.org/stream/186049-t-compiler/wg-polonius/topic/Basic.20Blocks.html#221375850">(Jan 02 2021 at 00:10)</a>:</h4>
+<p>but also I suspect we could do some of the computation on SCCs -- probably for the subset graph here rather than the CFG's :) since location-insensitivity is about reachability -- and the iterated dominance frontier for propagating loans</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

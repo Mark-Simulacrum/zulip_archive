@@ -1,0 +1,83 @@
+<html>
+<head><meta charset="utf-8"><title>cargo-as-library-package · t-cargo · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/index.html">t-cargo</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html">cargo-as-library-package</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="260209169"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/cargo-as-library-package/near/260209169" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jon Gjengset <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html#260209169">(Nov 03 2021 at 23:00)</a>:</h4>
+<p>I'm building a Cargo subcommand that uses Cargo as a library and invokes <code>cargo::ops::package_one</code>, and am finding the compression of the tarball to be _extremely_ slow compared to <code>cargo package</code>. And yes, I'm passing <code>--release</code>. I'm _guessing_ this has to do with how Cargo is built for release, but can't quite figure out what the magical combination of flags needed are?</p>
+<p>Digging through the Rust boostrap tooling, I discovered <code>LIBZ_SYS_STATIC</code> and <code>LZMA_API_STATIC</code>, but setting those did not make a meaningful difference. I was wondering if maybe Cargo is built with LTO for release, and that that might account for the performance difference, but when I try to set <code>-Clto</code> I get compilation failures due to <code>embed-bitcode</code></p>
+<div class="codehilite"><pre><span></span><code>error: options `-C embed-bitcode=no` and `-C lto` are incompatible
+
+error: could not compile `cfg-if` due to previous error
+</code></pre></div>
+<p>If I set <code>-Cembed-bitcode=y</code>, compilation fails again with</p>
+<div class="codehilite"><pre><span></span><code>error: cannot prefer dynamic linking when performing LTO
+
+note: only &#39;staticlib&#39;, &#39;bin&#39;, and &#39;cdylib&#39; outputs are supported with LTO
+
+error: could not compile `proc-macro-hack` due to previous error
+</code></pre></div>
+<p>I also tried setting <code>-Clinker-plugin-lto</code>, but it appears my linker is too old for that:</p>
+<div class="codehilite"><pre><span></span><code>....rcgu.o: file not recognized: File format not recognized
+</code></pre></div>
+<p>And so I'm here, hat in hand, asking if any of you know the magic that makes <code>cargo package</code> so fast?</p>
+
+
+
+<a name="260210196"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/cargo-as-library-package/near/260210196" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html#260210196">(Nov 03 2021 at 23:11)</a>:</h4>
+<p><span class="user-mention" data-user-id="120054">@Jon Gjengset</span> Have you tried building it with <code>flate2</code> with the <code>rust_backend</code> feature enabled?</p>
+
+
+
+<a name="260210338"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/cargo-as-library-package/near/260210338" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jon Gjengset <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html#260210338">(Nov 03 2021 at 23:13)</a>:</h4>
+<p>I don't _think_ that'll work since Cargo explicitly enables the <code>zlib</code> features, which takes priority (at least that's my read of &lt;<a href="https://github.com/rust-lang/flate2-rs#backends">https://github.com/rust-lang/flate2-rs#backends</a>&gt;)</p>
+
+
+
+<a name="260210855"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/cargo-as-library-package/near/260210855" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jon Gjengset <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html#260210855">(Nov 03 2021 at 23:19)</a>:</h4>
+<p>Wow, I think this _might_ just me being stupid and doing weird stuff so that <code>target</code> effectively _also_ ended up getting picked up by <code>cargo package</code>. Sorry for the noise if so (will report back).</p>
+
+
+
+<a name="260211051"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/cargo-as-library-package/near/260211051" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jon Gjengset <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html#260211051">(Nov 03 2021 at 23:21)</a>:</h4>
+<p>Hmm, very suspicious. So, I have a _symlink_ in my project directory called <code>build</code>. <code>.gitignore</code> has <code>/build</code>, and <code>git ls-files</code> does not list anything that's under <code>build/</code>. _But_ <code>cargo package -l</code> still includes everything under <code>build/</code> <span aria-label="thinking" class="emoji emoji-1f914" role="img" title="thinking">:thinking:</span>  I thought <code>cargo package</code> respected <code>.gitignore</code> (there's no <code>include</code> or <code>exclude</code>)?</p>
+
+
+
+<a name="260211366"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/cargo-as-library-package/near/260211366" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jon Gjengset <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html#260211366">(Nov 03 2021 at 23:25)</a>:</h4>
+<p>Ah, I bet what's going on is that <code>cargo package</code> doesn't skip a symlink to a directory if specified in <code>.gitignore</code> as <code>/dir</code>, even though Git does.</p>
+
+
+
+<a name="260212295"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/cargo-as-library-package/near/260212295" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jon Gjengset <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html#260212295">(Nov 03 2021 at 23:38)</a>:</h4>
+<p>Yep, that's it — issue + PR incoming</p>
+
+
+
+<a name="260214375"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/cargo-as-library-package/near/260214375" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jon Gjengset <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html#260214375">(Nov 04 2021 at 00:07)</a>:</h4>
+<p><a href="https://github.com/rust-lang/cargo/issues/10032">https://github.com/rust-lang/cargo/issues/10032</a></p>
+
+
+
+<a name="260214434"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/cargo-as-library-package/near/260214434" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jon Gjengset <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/cargo-as-library-package.html#260214434">(Nov 04 2021 at 00:08)</a>:</h4>
+<p>A PR fixing it I think will be trickier, as it requires some surgery to the walking logic, and may also require changes to the <code>ignore</code> library to pass along information about whether something is a symlink.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

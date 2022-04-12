@@ -1,0 +1,317 @@
+<html>
+<head><meta charset="utf-8"><title>Adding to ALLOCATOR_METHODS · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html">Adding to ALLOCATOR_METHODS</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="265633973"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265633973" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265633973">(Dec 21 2021 at 00:42)</a>:</h4>
+<p>I'm trying to add a new allocator method, as part of an experiment. I currently have this, which triggers a link error:</p>
+<div class="codehilite"><pre><span></span><code>diff --git a/compiler/rustc_ast/src/expand/allocator.rs b/compiler/rustc_ast/src/expand/allocator.rsindex 1976e4ad3c9..d862d44f428 100644
+--- a/compiler/rustc_ast/src/expand/allocator.rs
++++ b/compiler/rustc_ast/src/expand/allocator.rs
+@@ -35,6 +35,11 @@ pub struct AllocatorMethod {
+         inputs: &amp;[AllocatorTy::Layout],
+         output: AllocatorTy::ResultPtr,
+     },
++    AllocatorMethod {
++        name: sym::alloc2,
++        inputs: &amp;[AllocatorTy::Layout],
++        output: AllocatorTy::ResultPtr,
++    },
+     AllocatorMethod {
+         name: sym::dealloc,
+         inputs: &amp;[AllocatorTy::Ptr, AllocatorTy::Layout],
+diff --git a/compiler/rustc_span/src/symbol.rs b/compiler/rustc_span/src/symbol.rs
+index 51a7a2644f6..4828ee13b2c 100644
+--- a/compiler/rustc_span/src/symbol.rs
++++ b/compiler/rustc_span/src/symbol.rs
+@@ -304,6 +304,7 @@
+         alignstack,
+         all,
+         alloc,
++        alloc2,
+         alloc_error_handler,
+         alloc_layout,
+         alloc_zeroed,
+diff --git a/library/alloc/src/alloc.rs b/library/alloc/src/alloc.rs
+index 66ef92558d8..885f6507ec8 100644
+--- a/library/alloc/src/alloc.rs
++++ b/library/alloc/src/alloc.rs
+@@ -28,6 +28,9 @@
+     #[rustc_allocator]
+     #[rustc_allocator_nounwind]
+     fn __rust_alloc(size: usize, align: usize) -&gt; *mut u8;
++    #[rustc_allocator]
++    #[rustc_allocator_nounwind]
++    fn __rust_alloc2(size: usize, align: usize) -&gt; *mut u8;
+     #[rustc_allocator_nounwind]
+     fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize);
+     #[rustc_allocator_nounwind]
+@@ -87,6 +90,14 @@ pub unsafe fn alloc(layout: Layout) -&gt; *mut u8 {
+     unsafe { __rust_alloc(layout.size(), layout.align()) }
+ }
+
++/// njn: todo
++#[stable(feature = &quot;global_alloc&quot;, since = &quot;1.28.0&quot;)]
++#[must_use = &quot;losing the pointer will leak memory&quot;]
++#[inline]
++pub unsafe fn alloc2(layout: Layout) -&gt; *mut u8 {
++    unsafe { __rust_alloc2(layout.size(), layout.align()) }
++}
++
+ /// Deallocate memory with the global allocator.
+ ///
+ /// This function forwards calls to the [`GlobalAlloc::dealloc`] method
+@@ -166,7 +177,8 @@ fn alloc_impl(&amp;self, layout: Layout, zeroed: bool) -&gt; Result&lt;NonNull&lt;[u8]&gt;, Allo             0 =&gt; Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0)),
+             // SAFETY: `layout` is non-zero in size,
+             size =&gt; unsafe {
+-                let raw_ptr = if zeroed { alloc_zeroed(layout) } else { alloc(layout) };
++                // njn: this triggers the link error
++                let raw_ptr = if zeroed { alloc_zeroed(layout) } else { alloc2(layout) };
+                 let ptr = NonNull::new(raw_ptr).ok_or(AllocError)?;
+                 Ok(NonNull::slice_from_raw_parts(ptr, size))
+             },
+diff --git a/library/std/src/alloc.rs b/library/std/src/alloc.rs
+index 8ee55234cea..c5bdfaddee3 100644
+--- a/library/std/src/alloc.rs
++++ b/library/std/src/alloc.rs
+@@ -356,6 +356,17 @@ pub mod __default_lib_allocator {
+         }
+     }
+
++    #[rustc_std_internal_symbol]
++    pub unsafe extern &quot;C&quot; fn __rdl_alloc2(size: usize, align: usize) -&gt; *mut u8 {
++        // SAFETY: see the guarantees expected by `Layout::from_size_align` and
++        // `GlobalAlloc::alloc`.
++        unsafe {
++            let layout = Layout::from_size_align_unchecked(size, align);
++            // njn: todo
++            System.alloc(layout)
++        }
++    }
++
+     #[rustc_std_internal_symbol]
+     pub unsafe extern &quot;C&quot; fn __rdl_dealloc(ptr: *mut u8, size: usize, align: usize) {
+         // SAFETY: see the guarantees expected by `Layout::from_size_align` and
+</code></pre></div>
+
+
+
+<a name="265634007"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265634007" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265634007">(Dec 21 2021 at 00:42)</a>:</h4>
+<p>The link errors:</p>
+<div class="codehilite"><pre><span></span><code>ld.lld: error: /home/njn/dev/rust1/build/x86_64-unknown-linux-gnu/stage0-rustc/x86_64-unknown-linux-gnu/release/deps/librustc_driver-e375244a403fe1f2.so: undefined reference to __rust_alloc2 [--no-allow-shlib-undefined]
+ld.lld: error: /home/njn/dev/rust1/build/x86_64-unknown-linux-gnu/stage0-sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd-fba87e034eaaa705.so: undefined reference to __rust_alloc2 [--no-allow-shlib-undefined]
+</code></pre></div>
+
+
+
+<a name="265634036"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265634036" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265634036">(Dec 21 2021 at 00:43)</a>:</h4>
+<p>I must be missing a spot, but after a lot of grepping I still can't find it</p>
+
+
+
+<a name="265634213"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265634213" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265634213">(Dec 21 2021 at 00:45)</a>:</h4>
+<p>It seems like <a href="https://github.com/rust-lang/rust/blob/5ab0f37087b61b2ea51f364498cddc20ecff74fa/compiler/rustc_codegen_llvm/src/allocator.rs#L29-L90">this code</a> should be generating the <code>__rust_alloc2</code> function</p>
+
+
+
+<a name="265634667"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265634667" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265634667">(Dec 21 2021 at 00:51)</a>:</h4>
+<p>/me wonders if there's some bootstrapping complication here</p>
+
+
+
+<a name="265634780"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265634780" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265634780">(Dec 21 2021 at 00:52)</a>:</h4>
+<p>there's nothing defining __rust_alloc2 in stage0, right?</p>
+
+
+
+<a name="265634797"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265634797" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265634797">(Dec 21 2021 at 00:52)</a>:</h4>
+<p>so yeah, you probably need to cfg(not(bootstrap)) all reference to it in std</p>
+
+
+
+<a name="265635050"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265635050" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265635050">(Dec 21 2021 at 00:56)</a>:</h4>
+<p>Thanks, I'll try that</p>
+
+
+
+<a name="265636257"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265636257" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265636257">(Dec 21 2021 at 01:13)</a>:</h4>
+<p>It works! thanks for the tip</p>
+
+
+
+<a name="265645766"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265645766" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265645766">(Dec 21 2021 at 04:18)</a>:</h4>
+<p>Hmm, now I want <code>cfg(not(bootstrap))</code> when building the stage 1 compiler, but then I'd like the opposite when building the stage 2 compiler. Is that possible?</p>
+
+
+
+<a name="265645768"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265645768" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265645768">(Dec 21 2021 at 04:18)</a>:</h4>
+<p>Because I want __rust_alloc2 to be used when building the stage 2 compiler</p>
+
+
+
+<a name="265648141"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265648141" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265648141">(Dec 21 2021 at 05:11)</a>:</h4>
+<p>Maybe I can use <code>--keep-stage</code> somehow</p>
+
+
+
+<a name="265650383"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265650383" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265650383">(Dec 21 2021 at 05:57)</a>:</h4>
+<p>Hmm, I had hoped that <code>./x.py build --stage 2 library/test</code>, followed by removing the <code>not(bootstrap)</code> bits, and then doing <code>./x.py build --stage 2 library/test --keep-stage-std=0 --keep-stage=0</code> might give me a stage 2 compiler that uses <code>__rust_alloc2</code>, but seemingly not</p>
+
+
+
+<a name="265651737"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265651737" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265651737">(Dec 21 2021 at 06:24)</a>:</h4>
+<p>I think this text from the guide is relevant:</p>
+<blockquote>
+<p>Note that there are two std libraries in play here:</p>
+<ul>
+<li>The library linked to stageN/rustc, which was built by stage N-1 (stage N-1 std)</li>
+<li>The library used to compile programs with stageN/rustc, which was built by stage N (stage N std).</li>
+</ul>
+<p>Stage N std is pretty much necessary for any useful work with the stage N compiler. Without it, you can only compile programs with #![no_core] -- not terribly useful!</p>
+</blockquote>
+
+
+
+<a name="265651741"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265651741" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265651741">(Dec 21 2021 at 06:25)</a>:</h4>
+<p>But at 5pm I'm having trouble wrapping my head around it</p>
+
+
+
+<a name="265652838"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265652838" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265652838">(Dec 21 2021 at 06:47)</a>:</h4>
+<blockquote>
+<p>Hmm, now I want <code>cfg(not(bootstrap))</code> when building the stage 1 compiler, but then I'd like the opposite when building the stage 2 compiler. Is that possible?</p>
+</blockquote>
+<p>This is <code>cfg(bootstrap)</code>, right?</p>
+
+
+
+<a name="265691366"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265691366" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cuviper <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265691366">(Dec 21 2021 at 14:35)</a>:</h4>
+<p><code>cfg(bootstrap)</code> is first for stage 0 building stage 1, then <code>not</code> for later when you expect your change is fully in place</p>
+
+
+
+<a name="265697146"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265697146" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265697146">(Dec 21 2021 at 15:24)</a>:</h4>
+<p>That's what <span class="user-mention" data-user-id="120989">@nnethercote</span> said, I think</p>
+
+
+
+<a name="265758327"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265758327" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265758327">(Dec 22 2021 at 02:09)</a>:</h4>
+<p>Got it, thanks</p>
+
+
+
+<a name="265758412"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265758412" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265758412">(Dec 22 2021 at 02:10)</a>:</h4>
+<p>Somehow calls to <code>std::alloc::alloc</code> are ending up in the <code>System</code> allocator in my tikv_jemallocator-enabled stage 2 compiler. I can't work out why. When I build a simple test binary that is also tikv_jemallocator-enabled with the stage 1 compiler things work properly.</p>
+
+
+
+<a name="265758511"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265758511" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265758511">(Dec 22 2021 at 02:12)</a>:</h4>
+<p>And yet calling tikv_jemalloc_sys::malloc_usable_size on an allocation coming from <code>System</code> works. So I'm totally confused</p>
+
+
+
+<a name="265768481"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265768481" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265768481">(Dec 22 2021 at 05:41)</a>:</h4>
+<p>A possible reason: <a href="https://github.com/rust-lang/rust/blob/master/compiler/rustc/src/main.rs#L7-L9">this</a> appears to do nothing. I can remove it without any noticeable effect in a <code>jemalloc=true</code> build.</p>
+
+
+
+<a name="265768557"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265768557" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265768557">(Dec 22 2021 at 05:43)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/blob/master/compiler/rustc/src/main.rs#L17-L54">This</a> is what's doing the work. It causes jemalloc to be used, but as the <code>System</code> allocator!  <code>tikv_jemallocator::Jemalloc</code> (which impls <code>GlobalAlloc</code>) doesn't get called.</p>
+
+
+
+<a name="265769524"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265769524" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265769524">(Dec 22 2021 at 06:04)</a>:</h4>
+<p>No wonder I was confused, the mechanism for jemalloc being used was not the obvious one (<code>global_allocator</code>). I wonder if this is intentional/expected...</p>
+
+
+
+<a name="265769613"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265769613" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265769613">(Dec 22 2021 at 06:06)</a>:</h4>
+<p>All this is true on my Linux box, at least</p>
+
+
+
+<a name="265769961"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265769961" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265769961">(Dec 22 2021 at 06:15)</a>:</h4>
+<p><span class="user-mention" data-user-id="120989">@nnethercote</span> <a href="https://github.com/rust-lang/rust/pull/81782#issuecomment-784438001">https://github.com/rust-lang/rust/pull/81782#issuecomment-784438001</a> might give you some insight on why it works the way it does.</p>
+
+
+
+<a name="265779102"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265779102" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265779102">(Dec 22 2021 at 08:47)</a>:</h4>
+<p>Thanks for the pointer, that's interesting. I see that <a href="https://github.com/rust-lang/rust/pull/83152">https://github.com/rust-lang/rust/pull/83152</a> added the <code>#[global_allocator]</code>. There are comments in that PR suggesting that the <code>#[global_allocator]</code> was necessary for sized deallocations to occur, but that doesn't match my findings today that the <code>#[global_allocator]</code> has no effect in practice. I'm also astonished at the giant improvements in memory usage that happened when switching from <code>jemallocator</code> to <code>tikv-jemallocator</code>... AFAIK there differences between the two are very small. Overall I'm wondering if that PR worked the way everyone thought it did...</p>
+
+
+
+<a name="265789648"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265789648" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265789648">(Dec 22 2021 at 10:41)</a>:</h4>
+<p>tikv-jemallocator uses a newer jemalloc version I believe.</p>
+
+
+
+<a name="265879620"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265879620" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265879620">(Dec 23 2021 at 03:22)</a>:</h4>
+<p>So, my hopes to use malloc_usable_size within rustc are currently are stymied, because:</p>
+
+
+
+<a name="265879657"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265879657" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265879657">(Dec 23 2021 at 03:23)</a>:</h4>
+<ul>
+<li>The <code>Allocator</code>/<code>GlobalAlloc</code> trait split doesn't currently allow actual sizes to be returned accurately. It would require new or changed methods in the <code>GlobalAlloc</code> trait.</li>
+</ul>
+
+
+
+<a name="265879739"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265879739" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265879739">(Dec 23 2021 at 03:25)</a>:</h4>
+<ul>
+<li>Even if that was supported, rustc is unlike other Rust programs, and cannot use <code>global_allocator</code> meaningfully. Instead, when it uses jemalloc it does it in a way that replaces libc malloc. Which means we're just calling <code>malloc</code>, <code>free</code>, etc. via <code>System</code> and there's again no way to get usable size information through.</li>
+</ul>
+
+
+
+<a name="265883413"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265883413" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265883413">(Dec 23 2021 at 04:51)</a>:</h4>
+<p>I did some local perf runs and confirmed that tikv-jemallocator is much faster and less uses memory with rustc than jemallocator. Confirmation that it does come down to the newer jemalloc version in tikv-jemallocator being better.</p>
+
+
+
+<a name="265887954"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Adding%20to%20ALLOCATOR_METHODS/near/265887954" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Adding.20to.20ALLOCATOR_METHODS.html#265887954">(Dec 23 2021 at 06:33)</a>:</h4>
+<p>I filed <a href="https://github.com/rust-lang/rust/pull/92222">https://github.com/rust-lang/rust/pull/92222</a> to remove the useless <code>#[global_allocator]</code> and improve the comments explaining what's going on.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

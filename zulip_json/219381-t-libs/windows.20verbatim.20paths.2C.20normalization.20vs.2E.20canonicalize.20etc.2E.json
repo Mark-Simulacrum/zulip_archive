@@ -1,0 +1,296 @@
+[
+    {
+        "content": "<p>PR <a href=\"https://github.com/rust-lang/rust/issues/89270\">#89270</a> by  would add magic behavior to path.push (and join) that would normalize <code>.</code> and <code>..</code> but only for verbatim paths in windows because there the kernel intentionally doesn't perform normalization.<br>\n<span class=\"user-mention\" data-user-id=\"260325\">@Chris Denton</span> suggested</p>\n<blockquote>\n<p>I think it would be great to have something that addresses this but there I there should perhaps be a holistic look at Windows path handling in Rust before adding adhoc methods as there are currently numerous open issues with paths.</p>\n</blockquote>",
+        "id": 255075819,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632759310
+    },
+    {
+        "content": "<p>The PR in particular appears wrong to me for two reasons a) it tries to add \"do what I mean\" behavior to fairly low-level operations (pushing/joining) b) it does so <em>only</em> for verbatim paths which are more a \"do as I say\" and not a \"do what I mean\" thing.</p>\n<p>Dealing with verbatim paths is annoying of course. But I think it would be better to improve things so that their use can be avoided most of the time. E.g.</p>\n<ul>\n<li>add a <code>normalize</code> function so that <code>canonicalize</code> can be avoided</li>\n<li>teach cargo to add manifests which opt into long path aware behavior by default when building executables</li>\n<li><a href=\"https://github.com/rust-lang/rust/issues/89174\">#89174</a></li>\n</ul>",
+        "id": 255077122,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632759860
+    },
+    {
+        "content": "<p>For background, I'll try to provide a short(ish) summary.</p>\n<p>Traditional \"Windows\" paths are like <code>C:\\Windows\\notepad.exe</code>. These paths support <code>.</code> and <code>..</code> lexically; that is they resolve them based only on parsing the path string and not by asking the filesystem to resolve them.</p>\n<p>However, these Win32 paths are also a lie. Modern Windows is built on the NT kernel with the Win32 API as a subsystem on top. So the Win32 subsystem changes Win32 paths to NT paths. NT paths look like <code>\\Device\\HarddiskVolume1\\Windows\\notepad.exe</code>. They do not have any special support for <code>.</code> or <code>..</code> as these are just ordinary file names. And the kernel is \"lazy\". It will only resolve as much of the path as it has to, the rest it passes to whatever device will handle it. E.g. in <code>\\Device\\NamedPipe\\name</code> the <code>name</code> part can include any nonsense like <code>\\\\\\</code> and it's up to the <code>NamedPipe</code> device how it handles that.</p>\n<p>This detour into NT paths should just be an implementation detail. Except it's not. To avoid some of the limitations of the old Win32 paths (which are kept for backwards compatibility), there is a way to pass a path (almost) directly to and from the kernel through the Win32 APIs. This is done using the <code>\\\\?\\</code> prefix. The Win32 compatibility layer will turn <code>\\\\?\\</code> into <code>\\??\\</code> but otherwise leaves the path alone. This works because the NT <code>??</code> directory contains symlinks like <code>C:</code> which redirects to the right NT path.</p>\n<p>This is great because it can be used to avoid the old <code>MAX_PATH</code> limit. But it's also bad because it skips all the other parsing and magic handling of <code>.</code> and <code>..</code> components, which NT may treat as normal file names.</p>",
+        "id": 255078306,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632760287
+    },
+    {
+        "content": "<p>Also from that PR</p>\n<blockquote>\n<p>So these NT paths are essentially impossible to handle sensibly with Rust's Path/PathBuf without special knowledge of the device being used. Maybe the device uses $ as the path separator? In that case push is already broken. Maybe . is a filename? In that case components is broken. Etc, etc.</p>\n</blockquote>\n<p>I think <code>Components</code> already does the right thing. It special-cases verbatim paths and doesn't treat <code>/</code> as separator in them, only <code>\\</code>. And it doesn't skip over <code>..</code> or <code>.</code>.</p>",
+        "id": 255079991,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632760927
+    },
+    {
+        "content": "<blockquote>\n<p>And it doesn't skip over <code>..</code> or <code>.</code>.</p>\n</blockquote>\n<p>Huh, you're right. I was relying on the docs for <code>.</code> behaviour, although to be technically correct it should probably return <code>Normal(\".\")</code> instead of <code>CurDir</code>. But still, my wider point was that once a component is a device sub-path it can't know anything about how that path will then be parsed. Say there's a device called <code>Foo</code> that interprets <code>$</code> as a path separator. Then it would have paths like  <code>\\Device\\Foo\\This$is$a$path</code>. Or maybe the device doesn't have path separators at all. It's just a single namespace. It's all outside of Rust's knowledge.</p>",
+        "id": 255081664,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632761615
+    },
+    {
+        "content": "<p>Sure, from the rust perspective <code>This$is$a$path</code> is one component. But it round-trips without mangling, that's important.</p>",
+        "id": 255082192,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632761817
+    },
+    {
+        "content": "<p>What if <code>\\</code> isn't a separator for that sub-path? Operations like <code>push</code> and <code>components</code> are inherently claiming to know how to handle a path. With raw NT paths, all bets are off.</p>",
+        "id": 255082624,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632761971
+    },
+    {
+        "content": "<p>Doesn't that contradict your first section? <a href=\"https://gist.github.com/ChrisDenton/f432ca0003cf25520b448972e11f9097#nt-kernel-paths\">https://gist.github.com/ChrisDenton/f432ca0003cf25520b448972e11f9097#nt-kernel-paths</a></p>",
+        "id": 255082865,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632762037
+    },
+    {
+        "content": "<p>Yeah, I glossed over this a bit because I wrote that to explain Win32 paths. The NT object manager will treat paths that way. But I clarified in the PR:</p>\n<blockquote>\n<p>What I didn't mention there is that the NT kernel does only the minimum to resolve the relevant device, the rest of the path it simply passes to that device to resolve. The device can do anything with that sub-path.</p>\n</blockquote>",
+        "id": 255083195,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632762151
+    },
+    {
+        "content": "<p>For example, I can create a named pipe called <code>\\\\?\\pipe\\test\\\\\\name</code> and it would be distinct from <code>\\\\?\\pipe\\test\\name</code>.</p>",
+        "id": 255083636,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632762303
+    },
+    {
+        "content": "<p>Ok, so <code>\\\\\\\\</code> might be a problem if that doesn't round-trip through <code>Components</code>. But I think that's a bug that should be fixed (for verbatim paths).</p>",
+        "id": 255083705,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632762337
+    },
+    {
+        "content": "<p>Rust's segmentation into components might be silly and meaningless for particular devices, but as long as it's not lossy that just makes the API unergonomic but not wrong.</p>",
+        "id": 255083863,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632762406
+    },
+    {
+        "content": "<p>So what do I do if I want to use \"normal\" <code>push</code> and <code>components</code> semantics on the path?</p>",
+        "id": 255084271,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632762584
+    },
+    {
+        "content": "<p>can you give an example? there are too many constellations.</p>",
+        "id": 255084691,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632762750
+    },
+    {
+        "content": "<p>I mean being able to use <code>\\\\?\\C:\\Windows</code> as if it's <code>C:\\Windows</code>. So pushing <code>/System32</code> works. Or using <code>.</code> or <code>..</code>. Do I have to wrap every operation like <code>normalize(path.push(subpath))</code>?</p>",
+        "id": 255085017,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632762887
+    },
+    {
+        "content": "<p>Yes. But I think you shouldn't be in a position where you're starting with <code>\\\\?\\C:\\</code> and then doing path manipulation on top of that in the first place. Ideally they should only be used in situations where you're dealing with exotic files or other edge-cases where you wouldn't do relative lookups on top of them.</p>",
+        "id": 255085435,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632763053
+    },
+    {
+        "content": "<p>So you're saying that <code>canonicalize</code>  should turn the OS provided path into its <code>C:\\</code> (etc) equivalent if possible?</p>",
+        "id": 255085688,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632763152
+    },
+    {
+        "content": "<p>I'm not sure. Either that or we should have a <code>normalize</code> in addition to <code>canonicalize</code>. But that could cause problems on linux.</p>",
+        "id": 255086024,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632763298
+    },
+    {
+        "content": "<p>But canonicalize is needed for when you really do want to resolve any symlinks (or reparse points) in the path.</p>",
+        "id": 255086143,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632763341
+    },
+    {
+        "content": "<p>Well, there's the <a href=\"https://docs.rs/dunce/1.0.2/dunce/\">dunce</a> crate that does pretty much that.</p>",
+        "id": 255086559,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632763519
+    },
+    {
+        "content": "<p>Yeah, it essentially wraps <code>fs::canonicalize</code> and converts the returned path. Which is what I think you're suggesting the std should do? But I'm uncertain if the standard library can prevent all leaking of such paths. especially if they come from the environment or third party crates.</p>",
+        "id": 255087419,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632763866
+    },
+    {
+        "content": "<blockquote>\n<p>Which is what I think you're suggesting the std should do? </p>\n</blockquote>\n<p>Not strongly. It could be part of a \"good enough\" solution perhaps.</p>",
+        "id": 255088001,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632764081
+    },
+    {
+        "content": "<p>My reasoning is that verbatim paths are too low-level access and there's no singular \"do the right thing\" for them. So instead of trying to make them ergonomic we should just fix all the reasons why someone might use them for normal stuff when they shouldn't be needed. The path length limit is one cause. Canonicalize another.</p>",
+        "id": 255088459,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632764276
+    },
+    {
+        "content": "<p>If you got <code>\\\\?\\pipe\\test\\\\\\name</code> then sure, keep using them. But in that situation trying to join <code>..</code> would be plain wrong.</p>",
+        "id": 255088750,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632764391
+    },
+    {
+        "content": "<p>One possibility would be for us to add a new component type in paths, <code>VerbatimComponent</code>, that allows you to add unparsed arbitrary strings. That would allow for the <code>test\\\\\\name</code> case and similar. Then, verbatim paths that we construct to avoid name length limitations could be treated as normal paths, while verbatim paths obtained from other places could be treated as unparsed.</p>",
+        "id": 255090799,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1632765195
+    },
+    {
+        "content": "<p>We could also have a method for \"parse verbatim assuming it's a normal path\", and let people use that if they want to switch modes.</p>",
+        "id": 255090927,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1632765247
+    },
+    {
+        "content": "<p>The enum is exhaustive, we can't add new variants. And its values are only constructed on the fly, the underlying path is stored as a bytes/wtf8</p>",
+        "id": 255092695,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632765790
+    },
+    {
+        "content": "<p>My current thinking (but I'm not set on this and obviously others disagree) is that paths, by default, should be treated similar to Win32 paths because that's what's expected and wanted most of the time. And it makes it easier for non-Windows programmers to write cross-platform code without having to learn about any of this.</p>\n<p>Treating paths as actually verbatim is the special case. Some people may want to do special stuff with <code>\\\\\\</code> or whatever. They should be assumed to know what they're doing and Rust can help them do that. But I'm not sure it should be the default way of interacting with the path APIs even if a verbatim path is provided. There should be other functions for doing other kinds of operations.</p>\n<p>This is possible because the <code>Path</code> type itself is just a container that passes on its contents. It doesn't do anything to the path unless the user explicitly invokes an operation. And those operations are both documented and intended to be cross-platform so that (for example) Mac programmers don't need to learn about Windows paths before compiling for Windows. And ideally they shouldn't have to learn to use <code>normalize</code> before calling a <code>fs</code> function just \"because Windows\".</p>",
+        "id": 255097042,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632767367
+    },
+    {
+        "content": "<p>What happens if the user provides a NT path as e.g. the CLI argument?</p>",
+        "id": 255099135,
+        "sender_full_name": "nagisa",
+        "timestamp": 1632768199
+    },
+    {
+        "content": "<blockquote>\n<p>My current thinking (but I'm not set on this and obviously others disagree) is that paths, by default, should be treated similar to Win32 paths because that's what's expected and wanted most of the time. </p>\n</blockquote>\n<p>I can't name a specific case, but it seems like repeating the same mistake that developers before us have made. Legacy paths had weird edge-cases so they add a new, no-magic, processed-exactly-as-passed thing... and then we add \"the user probably meant X, let's discard some parts and not pass them through\" mangling on top. And then we need another layer of \"no, I really meant that\".</p>",
+        "id": 255099939,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632768499
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"330154\">The 8472</span> <a href=\"#narrow/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E/near/255092695\">said</a>:</p>\n<blockquote>\n<p>The enum is exhaustive, we can't add new variants.</p>\n</blockquote>\n<p>Oh, right; forgot that it was public. :(</p>",
+        "id": 255100160,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1632768596
+    },
+    {
+        "content": "<blockquote>\n<p>I can't name a specific case, but it seems like repeating the same mistake that developers before us have made. Legacy paths had weird edge-cases so they add a new, no-magic, processed-exactly-as-passed thing... and then we add \"the user probably meant X, let's discard some parts and not pass them through\" mangling on top. And then we need another layer of \"no, I really meant that\".</p>\n</blockquote>\n<p>But <code>push</code> already makes some assumptions. It will completely discard the path if an absolute path is given. E.g. pushing <code>C:</code> to a verbatim path results in <code>C:</code>. And <code>\\</code> at the start of a path being pushed has special behaviour too.</p>\n<p>IMHO, this is not about guessing what the user meant. This is about asking the user to be explicitly about what they mean. If they mean it to be treated as a \"filesystem-like\" path then use <code>push</code>. If they want to it to be an \"anything goes\" path then use <code>push_verbatim</code>. So the operations on the path define the kind of path. There isn't enough information in the <code>\\\\?\\</code> alone for Rust to guess intent so it shouldn't even try.</p>",
+        "id": 255102957,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632769616
+    },
+    {
+        "content": "<p>Presumably <code>push_verbatim</code> will only exist on Windows?</p>",
+        "id": 255103243,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1632769742
+    },
+    {
+        "content": "<p>Good point. If push already is lossy then it might be ok.</p>",
+        "id": 255103250,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632769745
+    },
+    {
+        "content": "<blockquote>\n<p>Presumably <code>push_verbatim</code> will only exist on Windows?</p>\n</blockquote>\n<p>Yeah. Or at least I can't think of a reason to have it on other platforms.</p>",
+        "id": 255103485,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632769834
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"260325\">Chris Denton</span> <a href=\"#narrow/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E/near/255102957\">said</a>:</p>\n<blockquote>\n<p>IMHO, this is not about guessing what the user meant. This is about asking the user to be explicitly about what they mean. If they mean it to be treated as a \"filesystem-like\" path then use <code>push</code>. If they want to it to be an \"anything goes\" path then use <code>push_verbatim</code>. So the operations on the path define the kind of path. There isn't enough information in the <code>\\\\?\\</code> alone for Rust to guess intent so it shouldn't even try.</p>\n</blockquote>\n<p>So if I understand you correctly, you are proposing:</p>\n<ul>\n<li>Keep <code>push</code> as-is</li>\n<li>Introduce new function <code>push_verbatim</code> which does special handling (i.e. remove <code>..</code> and <code>.</code>)</li>\n</ul>\n<p>This makes sense except for one the use of the word \"verbatim\". When handling verbatim paths:</p>\n<ul>\n<li><code>push</code> adds paths mostly verbatim, i.e. verbatim as in dictionary definition, word-for-word/literally</li>\n<li><code>push_verbatim</code> adds to verbatim paths, as in windows concept of verbatim paths, not verbatim as word-for-word/literally</li>\n</ul>\n<p>Also what does <code>push_verbatim</code> do on non-verbatim paths?</p>\n<p>This sounds confusing.</p>",
+        "id": 255122027,
+        "sender_full_name": "Sean Young",
+        "timestamp": 1632777550
+    },
+    {
+        "content": "<p>I would assume from the name that <code>push_verbatim</code> does the literal/word-for-word addition and push attempts to handle pushing . or .. on a verbatim path \"magically\"</p>",
+        "id": 255123765,
+        "sender_full_name": "Nick12",
+        "timestamp": 1632778344
+    },
+    {
+        "content": "<p>If I understand correctly, Chris' description is that, which is the opposite of what Sean Young mentiond</p>\n<blockquote>\n<p>\"filesystem-like\" path then use push. If they want to it to be an \"anything goes\" path then use push_verbatim</p>\n</blockquote>",
+        "id": 255123845,
+        "sender_full_name": "Nick12",
+        "timestamp": 1632778390
+    },
+    {
+        "content": "<blockquote>\n<p>Also what does push_verbatim do on non-verbatim paths?</p>\n</blockquote>\n<p>This is an interesting question. I don't think you can add a file/folder with NUL / . / .. on a regular win32 path. Could it return an error? Or just add it \"verbatim\" to the path string and assume the user knows what they're doing. The other option is converting the path to a \\\\??\\ path I guess</p>",
+        "id": 255124098,
+        "sender_full_name": "Nick12",
+        "timestamp": 1632778513
+    },
+    {
+        "content": "<p>I think if it's an \"anything goes\" windows-only method meant for people who \"know what they're doing\", just adding it byte-by-byte (Meaning if used on a regular path, it will have the regular behaviour for .. ) is probably the best idea</p>",
+        "id": 255124505,
+        "sender_full_name": "Nick12",
+        "timestamp": 1632778688
+    },
+    {
+        "content": "<p>Hm, thinking about it this function may not even be needed as using <code>OsString::push</code> basically has the same effect. The only reasons would be convenience and for documentation. If it is added then I agree, the name could use some work as it could be confusing.</p>",
+        "id": 255124787,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632778816
+    },
+    {
+        "content": "<p>If you want to work with paths in a literal fashion, i.e. paths that contain weird things like \"\\\\?\\C:\\foo\\..\" then I'm not sure you should be using <code>Path</code>. Just use <code>OsString</code> which does support push. </p>\n<p>As for <code>fn push()</code>, I think what we're discussing is exactly what my PR <a href=\"https://github.com/rust-lang/rust/pull/89270\">https://github.com/rust-lang/rust/pull/89270</a> implements, or did I miss something again?</p>",
+        "id": 255349586,
+        "sender_full_name": "Sean Young",
+        "timestamp": 1632897586
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"445327\">@Sean Young</span>  Yes, I think your PR covers what's been discussed. Though you might want to update the title and description of your PR to better reflect its current state?</p>",
+        "id": 255393252,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632920104
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"260325\">Chris Denton</span> <a href=\"#narrow/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E/near/255393252\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"445327\">Sean Young</span>  Yes, I think your PR covers what's been discussed. Though you might want to update the title and description of your PR to better reflect its current state?</p>\n</blockquote>\n<p>I've updated the PR and I've added some tests as well.</p>",
+        "id": 255430106,
+        "sender_full_name": "Sean Young",
+        "timestamp": 1632933155
+    },
+    {
+        "content": "<p>Hm <span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span> there doesn't seem to be anyone actually assigned to <a href=\"https://github.com/rust-lang/rust/issues/89270\">#89270</a>?</p>",
+        "id": 255430872,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632933428
+    },
+    {
+        "content": "<p>fixed</p>",
+        "id": 255434274,
+        "sender_full_name": "The 8472",
+        "timestamp": 1632934614
+    },
+    {
+        "content": "<p>Great!</p>",
+        "id": 255434330,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1632934639
+    },
+    {
+        "content": "<p>Thank you everyone for a good discussion. It looks like the PR is merged. I'll test it some more once it hits nightly.</p>\n<p>I've been trying to think of any other pieces we need for verbatim paths. I can't think of anything.</p>\n<p>PS I think rust <code>std::path::Path</code> is powerful enough to handle VMS paths: <a href=\"https://wiki.vmssoftware.com/Directory\">https://wiki.vmssoftware.com/Directory</a></p>",
+        "id": 256202957,
+        "sender_full_name": "Sean Young",
+        "timestamp": 1633425981
+    },
+    {
+        "content": "<p>I am aware of these issues but not knowledgeable. Thank you for the good discussion! I think I am convinced that this is a positive change.</p>\n<p>But, I am <em>very surprised</em> about the process here! Given this is a subtle change to windows behavior I would have expected knowledgeable parties to be cc'ed, like <span class=\"user-mention\" data-user-id=\"120518\">@Eric Huss</span> or @retep998 maybe @kennykerr or @rylev.</p>\n<p>Given that this is a (invisible to crater) breaking change to a stable API I would expect some team to need to do a FCP. And for there to be a discussion of how we are going to let people know about the breaking change.</p>",
+        "id": 257568468,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1634230615
+    }
+]

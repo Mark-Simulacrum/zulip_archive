@@ -1,0 +1,104 @@
+[
+    {
+        "content": "<p>I'm trying to debug why <a href=\"https://godbolt.org/z/vM9zf5\">https://godbolt.org/z/vM9zf5</a> does not const propegate <code>_2[_3]</code>to <code>12_i32</code>.<br>\nUsing -Zdump-mir on an example, reveals that only after <code>SimplifyCfg-after-remove-noop-landing-pads</code> does the <code>_2[_4]</code> get merged into bb0. My hypothesis was that the copy propegator only worked within a basic block. I therefore added a const prop pass right after this pass. That newly added pass however does nothing. Looking at the trace with <code>RUSTC_LOG=rustc_mir::transform::const_prop</code>reveals this </p>\n<div class=\"codehilite\"><pre><span></span><code>rustc_mir::transform::const_prop: visit_statement: _0 = _2[_4]\n2020-08-19T19:46:27.419184Z TRACE rustc_mir::transform::const_prop: InterpCx operation failed: InterpErrorInfo { kind: tried to access an uninitialized local, backtrace: None }\n2020-08-19T19:46:27.419187Z TRACE rustc_mir::transform::const_prop: propagation into _0 failed.\n                        Nuking the entire site from orbit, it&#39;s the only way to be sure\n</code></pre></div>\n\n\n<p>For reference the bb looks like this:</p>\n<div class=\"codehilite\"><pre><span></span><code>    bb0: {\n        StorageLive(_2);                 // scope 0 at src/test/mir-opt/const_array_index.rs:6:9: 6:12\n        _2 = [const 12_i32, move _1];    // scope 0 at src/test/mir-opt/const_array_index.rs:6:15: 6:25\n        _4 = const 0_usize;              // scope 1 at src/test/mir-opt/const_array_index.rs:7:9: 7:10\n        _5 = const 2_usize;              // scope 1 at src/test/mir-opt/const_array_index.rs:7:5: 7:11\n        _6 = const true;                 // scope 1 at src/test/mir-opt/const_array_index.rs:7:5: 7:11\n        _0 = _2[_4];                     // scope 1 at src/test/mir-opt/const_array_index.rs:7:5: 7:11\n        StorageDead(_2);                 // scope 0 at src/test/mir-opt/const_array_index.rs:8:1: 8:2\n        return;                          // scope 0 at src/test/mir-opt/const_array_index.rs:8:2: 8:2\n    }\n</code></pre></div>\n\n\n<p>I don't understand which uninitialized locals are being accessed. To me, both _2 and _4 are initialised.</p>",
+        "id": 207455252,
+        "sender_full_name": "Simon Vandel Sillesen",
+        "timestamp": 1597867419
+    },
+    {
+        "content": "<p>there may be more information earlier in the log. We do an initial analysis that figures out what locals to even propagate (if not they stay uninitialized). Can you check if there's more info about <code>_4</code> there?</p>",
+        "id": 207493400,
+        "sender_full_name": "oli",
+        "timestamp": 1597905959
+    },
+    {
+        "content": "<p>I'm guessing the mir at the const_prop stage still has a terminator between the assignment to _4 and the assignment to _0</p>",
+        "id": 207493465,
+        "sender_full_name": "oli",
+        "timestamp": 1597906013
+    },
+    {
+        "content": "<blockquote>\n<p>My hypothesis was that the copy propegator only worked within a basic block.</p>\n</blockquote>\n<p>Yes, there are some cases where we only do propagation for values within the basic block they are assigned to. See <a href=\"https://github.com/rust-lang/rust/blob/1a22a0ff93d63f738151f096434e732466b4a42e/src/librustc_mir/transform/const_prop.rs#L977\">https://github.com/rust-lang/rust/blob/1a22a0ff93d63f738151f096434e732466b4a42e/src/librustc_mir/transform/const_prop.rs#L977</a></p>",
+        "id": 207517232,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1597927257
+    },
+    {
+        "content": "<p>This is the full trace as well as the MIR const-prop is running on: <a href=\"https://gist.github.com/simonvandel/845ea852ac59ce0d6eed6db1d379eef5\">https://gist.github.com/simonvandel/845ea852ac59ce0d6eed6db1d379eef5</a></p>\n<p><a href=\"https://gist.github.com/simonvandel/845ea852ac59ce0d6eed6db1d379eef5#file-const_prop-trace-L11-L12\">https://gist.github.com/simonvandel/845ea852ac59ce0d6eed6db1d379eef5#file-const_prop-trace-L11-L12</a> seems a bit weird to me. Why would const 12 be uninitialized?</p>",
+        "id": 207735154,
+        "sender_full_name": "Simon Vandel Sillesen",
+        "timestamp": 1598119258
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>local _1 can&#39;t be const propagated because it&#39;s a function argument\nvisit_statement: _2 = [const 12_i32, move _1]\n</code></pre></div>\n\n\n<p>Evaluation of <code>_2</code> depends on <code>_1</code>, which is an function argument.</p>",
+        "id": 207735640,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1598119958
+    },
+    {
+        "content": "<p>Alright that does make sense</p>",
+        "id": 207735805,
+        "sender_full_name": "Simon Vandel Sillesen",
+        "timestamp": 1598120203
+    },
+    {
+        "content": "<p>So if I instead look at <a href=\"https://godbolt.org/z/c8o1rK\">https://godbolt.org/z/c8o1rK</a><br>\nLocally I get can get the array access const-propped if i add another run of the pass after <code>&amp;simplify::SimplifyCfg::new(\"after-remove-noop-landing-pads\"),</code>. The question is if that is a good idea. The idea is that SimplifyCfg could potentially have merged bbs which enables const-prop to do more again</p>",
+        "id": 207736162,
+        "sender_full_name": "Simon Vandel Sillesen",
+        "timestamp": 1598120718
+    },
+    {
+        "content": "<p>yes, we are thinking about creating a meta-pass that runs several passes in a loop until a fixed point is reached</p>",
+        "id": 207740843,
+        "sender_full_name": "oli",
+        "timestamp": 1598128003
+    },
+    {
+        "content": "<p>Cool. Would that be a good candidate for a mir-opt issue on the issue tracker? I’m guessing with an overall design/mentoring it could be doable as a starter</p>",
+        "id": 207741037,
+        "sender_full_name": "Simon Vandel Sillesen",
+        "timestamp": 1598128377
+    },
+    {
+        "content": "<p>I read a paper about a dataflow framework that merges multiple of these optimization passes into one. It supposedly even allowed some optimizations that running the individual optimization passes after each other in fix point couldn't perform if I remember correctly.</p>",
+        "id": 207741298,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1598128909
+    },
+    {
+        "content": "<p><a href=\"https://scholar.google.com/scholar?hl=nl&amp;as_sdt=0%2C5&amp;q=dataflow+optimization&amp;btnG=#d=gs_qabs&amp;u=%23p%3DTN6oEBjNKC8J\">https://scholar.google.com/scholar?hl=nl&amp;as_sdt=0%2C5&amp;q=dataflow+optimization&amp;btnG=#d=gs_qabs&amp;u=%23p%3DTN6oEBjNKC8J</a></p>\n<p>Hoopl: Dataflow optimization made simple</p>",
+        "id": 207741475,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1598129176
+    },
+    {
+        "content": "<p>^ found it</p>",
+        "id": 207741480,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1598129199
+    },
+    {
+        "content": "<p>IIRC <span class=\"user-mention\" data-user-id=\"118594\">@ecstatic-morse</span> did a lot of work on dataflow in Rust. They may be interested in that paper ^</p>",
+        "id": 207743242,
+        "sender_full_name": "pachi",
+        "timestamp": 1598132364
+    },
+    {
+        "content": "<p>I read some parts of the paper used as a reference in the Hoopl paper. <a href=\"https://scholar.google.dk/scholar?q=Composing+dataflow+analyses+and+transformations.&amp;hl=da&amp;as_sdt=0&amp;as_vis=1&amp;oi=scholart\">https://scholar.google.dk/scholar?q=Composing+dataflow+analyses+and+transformations.&amp;hl=da&amp;as_sdt=0&amp;as_vis=1&amp;oi=scholart</a></p>\n<p>AFAIU it suggests making each pass modular in the sense that it receives a graph as input and can return a replacement graph. The framework can automatically interleave passes “depth first”. For example a const prop pass transforms “3 &lt; 4” into “true”. This new info is then used immediately in the passes run on successors</p>",
+        "id": 207744174,
+        "sender_full_name": "Simon Vandel Sillesen",
+        "timestamp": 1598134290
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"139182\">Simon Vandel Sillesen</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Optimization.20of.20const.20array.20access/near/207741037\">said</a>:</p>\n<blockquote>\n<p>Cool. Would that be a good candidate for a mir-opt issue on the issue tracker? I’m guessing with an overall design/mentoring it could be doable as a starter</p>\n</blockquote>\n<p>I've been waiting to implement this mir-opt as part of my thesis together with @oli's mentoring, but uni hasn't replied to my thesis application yet. Would you be willing to wait a couple more weeks Simon? If they reject my proposal, or if they don't come back to me by then, I would be happy to release this one so that you can implement it.</p>\n<p>Can we do that? A two-week deadline? :)</p>",
+        "id": 207746967,
+        "sender_full_name": "Félix Fischer",
+        "timestamp": 1598139579
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"212698\">@Félix Fischer</span> Of course it’s fine :) let’s all cheer for your uni’s application process</p>",
+        "id": 207759810,
+        "sender_full_name": "Simon Vandel Sillesen",
+        "timestamp": 1598165848
+    }
+]

@@ -1,0 +1,1286 @@
+[
+    {
+        "content": "<p>Hi <span class=\"user-mention\" data-user-id=\"248906\">@cjgillot</span> &amp; <span class=\"user-mention\" data-user-id=\"125294\">@Aaron Hill</span>, I just wanted to let you know that I'm also looking into the incr. comp. issues described in <a href=\"https://github.com/rust-lang/rust/issues/91696\">https://github.com/rust-lang/rust/issues/91696</a> and other places. I'm still in the process of trying to understand what exactly is going (i.e. trying to confirm Aaron's analysis). I don't think we should rush to merge a fix before we really understand what's going on (you all might be farther along there than me <code>;)</code>). This seems to be a somewhat fundamental problem in the tracking system and I suspect it will show up again and again if we don't fix it in a clean way.</p>",
+        "id": 264991621,
+        "sender_full_name": "mw",
+        "timestamp": 1639565443
+    },
+    {
+        "content": "<p>The reproducer in <a href=\"https://github.com/rust-lang/rust/issues/91696#issuecomment-991995520\">https://github.com/rust-lang/rust/issues/91696#issuecomment-991995520</a> is invaluable! :D</p>",
+        "id": 264991663,
+        "sender_full_name": "mw",
+        "timestamp": 1639565471
+    },
+    {
+        "content": "<p>I independently reached the same conclusion as <span class=\"user-mention\" data-user-id=\"125294\">@Aaron Hill</span> did. However, I don't agree with his PR. I think that ignoring all the dependencies edge arising from try_load_from_on_disk_cache_in_memory would be a more permanent solution, which would keep the ability to call queries from the cache decoding facility. This fixes the reproducer, but I still need to double check my reasoning.</p>",
+        "id": 265004522,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1639572564
+    },
+    {
+        "content": "<p>My concern is that this is a weird form of re-entrance - instead of invoking a query from the body of another query, we're running a new query from within the internal query infrastructure</p>",
+        "id": 265027100,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639582577
+    },
+    {
+        "content": "<p>Even if it works now, I think it could lead to problems later on</p>",
+        "id": 265027193,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639582615
+    },
+    {
+        "content": "<p>Also, I think ignoring dependencies would only work if the dependency we're adding (query and argument) already exists, right?</p>",
+        "id": 265027820,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639582840
+    },
+    {
+        "content": "<p>For example, let's say that someone decided to create a weird query that walks over the entire HIR, and only used that query during decoding</p>",
+        "id": 265027985,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639582893
+    },
+    {
+        "content": "<p>I think ignoring that dependency would be incorrect, since the next compilation would re-use the decoded result even if some of its dependencies had changed</p>",
+        "id": 265028154,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639582953
+    },
+    {
+        "content": "<p>Let's try to collect some assumptions:</p>\n<ul>\n<li>Before we load something from the cache we must have been able to mark it green, which means that all dependencies have also been marked green. That does not mean, however, that dependencies have been invoked or loaded from disk -- just their corresponding dep-nodes have been marked green.</li>\n<li>For a green dep-node, we expect that invoking the corresponding query would create the exact same dep-graph. That is, we are replaying queries that we already expect to yield the same result.</li>\n<li>As a consequence, when we invoke/force a query that is marked green, we don't expect any new nodes or edges to be added to the graph (modulo some weirdness around anonymous nodes). Forcing the query should only encounter nodes that are already green.</li>\n</ul>",
+        "id": 265029157,
+        "sender_full_name": "mw",
+        "timestamp": 1639583347
+    },
+    {
+        "content": "<ul>\n<li>The same should be true when loading something from the cache: we expect the corresponding dep-graph portion to already exist and be green -- thus if anything tries to add new edges or nodes, then something is wrong.</li>\n</ul>",
+        "id": 265029413,
+        "sender_full_name": "mw",
+        "timestamp": 1639583432
+    },
+    {
+        "content": "<ul>\n<li>But it also means that invoking queries while loading something from the cache should be fine, if that invocation is being done to re-compute a value that is not cached.</li>\n</ul>",
+        "id": 265029530,
+        "sender_full_name": "mw",
+        "timestamp": 1639583475
+    },
+    {
+        "content": "<p>does that sound right?</p>",
+        "id": 265029561,
+        "sender_full_name": "mw",
+        "timestamp": 1639583484
+    },
+    {
+        "content": "<p>If it does then one thing we could do is setting a \"don't allow new nodes or edges and expect all nodes encountered to be already green\" flag in the dep-graph while something is being loaded from the cache.</p>",
+        "id": 265029798,
+        "sender_full_name": "mw",
+        "timestamp": 1639583563
+    },
+    {
+        "content": "<p>I implemented something similar in my PR - it causes a panic on new edges</p>",
+        "id": 265029964,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639583620
+    },
+    {
+        "content": "<p>yes, that sounds like something we should do in any case.</p>",
+        "id": 265030116,
+        "sender_full_name": "mw",
+        "timestamp": 1639583671
+    },
+    {
+        "content": "<p>there's another facet to the problem, that is kind of independent: <span class=\"user-mention\" data-user-id=\"248906\">@cjgillot</span> made mapping from DefPathHash to LocalDefId return an Option.</p>",
+        "id": 265030346,
+        "sender_full_name": "mw",
+        "timestamp": 1639583750
+    },
+    {
+        "content": "<p>that does make sense when dealing with removed items</p>",
+        "id": 265030442,
+        "sender_full_name": "mw",
+        "timestamp": 1639583773
+    },
+    {
+        "content": "<p>however, I think we expected that case to never occur because queries should never be invoked for items that have been removed, because we expect another query before that rule such cases out</p>",
+        "id": 265030601,
+        "sender_full_name": "mw",
+        "timestamp": 1639583833
+    },
+    {
+        "content": "<p>e.g.</p>",
+        "id": 265030608,
+        "sender_full_name": "mw",
+        "timestamp": 1639583837
+    },
+    {
+        "content": "<p>some query does:</p>\n<ol>\n<li>get list of valid defids from some eval-always query</li>\n<li>invoke for def_id in list_of_valid_defids { some_other_query(def_id) }</li>\n</ol>",
+        "id": 265030836,
+        "sender_full_name": "mw",
+        "timestamp": 1639583917
+    },
+    {
+        "content": "<p>we expect the initial query to be re-executed because the query in step 1 is marked red, and thus step 2 is never invoked for outdated DefIds</p>",
+        "id": 265030966,
+        "sender_full_name": "mw",
+        "timestamp": 1639583987
+    },
+    {
+        "content": "<p>That's right - we bail out of marking it green before we try to load a stale defpathhash</p>",
+        "id": 265031053,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584007
+    },
+    {
+        "content": "<p>We should document that somewhere, if it's not already</p>",
+        "id": 265031152,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584036
+    },
+    {
+        "content": "<p>the question is: why do we try to force a query for an outdated defid anyway?</p>",
+        "id": 265031161,
+        "sender_full_name": "mw",
+        "timestamp": 1639584039
+    },
+    {
+        "content": "<p>is it because of cache loading invalidly introduces a new edge, as your investigation seems to suggest?</p>",
+        "id": 265031264,
+        "sender_full_name": "mw",
+        "timestamp": 1639584078
+    },
+    {
+        "content": "<p>I haven't had time to look into that part in any detail</p>",
+        "id": 265031305,
+        "sender_full_name": "mw",
+        "timestamp": 1639584099
+    },
+    {
+        "content": "<p>That's what I think. We're using the same TaskDeps when we start to decode</p>",
+        "id": 265031331,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584104
+    },
+    {
+        "content": "<p>So during the decoding of an intermediate query, any new queries that get invoked by decoding get attached to the ancestor query</p>",
+        "id": 265031434,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584136
+    },
+    {
+        "content": "<p>So, if we have A -&gt; (decode B) -&gt; C, we end up with an edge A -&gt; C</p>",
+        "id": 265031502,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584167
+    },
+    {
+        "content": "<p>which would normally never happen</p>",
+        "id": 265031522,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584175
+    },
+    {
+        "content": "<p>yeah, it sounds like we should introduce a new \"tracking mode\" for decoding</p>",
+        "id": 265031643,
+        "sender_full_name": "mw",
+        "timestamp": 1639584231
+    },
+    {
+        "content": "<p>that basically assert that no new stuff gets added to the dep-graph</p>",
+        "id": 265031714,
+        "sender_full_name": "mw",
+        "timestamp": 1639584247
+    },
+    {
+        "content": "<p>it sounds worse than it is :)</p>",
+        "id": 265031740,
+        "sender_full_name": "mw",
+        "timestamp": 1639584257
+    },
+    {
+        "content": "<p>That's what I was thinking</p>",
+        "id": 265031757,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584262
+    },
+    {
+        "content": "<p>basically add a check that no invariants are violated</p>",
+        "id": 265031791,
+        "sender_full_name": "mw",
+        "timestamp": 1639584275
+    },
+    {
+        "content": "<p>I thought you were going to suggest saving those deps in a new way</p>",
+        "id": 265031802,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584281
+    },
+    {
+        "content": "<p>From my PR, I only found two violations of that</p>",
+        "id": 265031875,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584307
+    },
+    {
+        "content": "<p>and opened PRs for each of them</p>",
+        "id": 265031902,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584318
+    },
+    {
+        "content": "<p>but that mode would allow invoking queries during de-serialization, right?</p>",
+        "id": 265031933,
+        "sender_full_name": "mw",
+        "timestamp": 1639584337
+    },
+    {
+        "content": "<p>Surprisingly, encoding the full AdtDef is a large perf and size win</p>",
+        "id": 265031945,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584345
+    },
+    {
+        "content": "<p>that is surprising and we should just do that -- but it would be more of a work-around, right?</p>",
+        "id": 265032059,
+        "sender_full_name": "mw",
+        "timestamp": 1639584379
+    },
+    {
+        "content": "<p>Well, that's necessary to pass the check</p>",
+        "id": 265032102,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584397
+    },
+    {
+        "content": "<p>yes, I'm wondering why that check fails otherwise</p>",
+        "id": 265032151,
+        "sender_full_name": "mw",
+        "timestamp": 1639584419
+    },
+    {
+        "content": "<p>Because those were two query executions happening during decoding, which we want to ban</p>",
+        "id": 265032158,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584422
+    },
+    {
+        "content": "<p>I'm not sure I understand</p>",
+        "id": 265032181,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584430
+    },
+    {
+        "content": "<p>I don't want to ban query invocations during decoding. I'd like to add assertions that such query invocations conform to the dep-graph the we already allocated while marking things green</p>",
+        "id": 265032299,
+        "sender_full_name": "mw",
+        "timestamp": 1639584481
+    },
+    {
+        "content": "<p>does that make sense?</p>",
+        "id": 265032402,
+        "sender_full_name": "mw",
+        "timestamp": 1639584512
+    },
+    {
+        "content": "<p>Oh, I see</p>",
+        "id": 265032411,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584515
+    },
+    {
+        "content": "<p>So, if decoding B invokes query C, then we should already have an identical B-&gt; C edge</p>",
+        "id": 265032464,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584538
+    },
+    {
+        "content": "<p>yes</p>",
+        "id": 265032488,
+        "sender_full_name": "mw",
+        "timestamp": 1639584548
+    },
+    {
+        "content": "<p>I <em>think</em> that's right - the only difficulty is the order</p>",
+        "id": 265032528,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584562
+    },
+    {
+        "content": "<p>As we said above, we rely on the green-marking bailing out before we reach a stale edge</p>",
+        "id": 265032594,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584593
+    },
+    {
+        "content": "<p>Is there any way that the edge from decoding could be in the \"wrong\" place in the edges list?</p>",
+        "id": 265032657,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584610
+    },
+    {
+        "content": "<p>that's an interesting thought</p>",
+        "id": 265032733,
+        "sender_full_name": "mw",
+        "timestamp": 1639584649
+    },
+    {
+        "content": "<p>This is why I wanted to ban queries entirely in decoding - to avoid needing to worry about that kind of problem :)</p>",
+        "id": 265032746,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584655
+    },
+    {
+        "content": "<p>yeah :)</p>",
+        "id": 265032793,
+        "sender_full_name": "mw",
+        "timestamp": 1639584672
+    },
+    {
+        "content": "<p>but we might not need to require decoding to do everything exactly as the original query</p>",
+        "id": 265032853,
+        "sender_full_name": "mw",
+        "timestamp": 1639584710
+    },
+    {
+        "content": "<p>That worries me, if we're talking about different invoking different queries</p>",
+        "id": 265032950,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584745
+    },
+    {
+        "content": "<p>intuitively it should be sufficient to check that anything we would add is already there</p>",
+        "id": 265032952,
+        "sender_full_name": "mw",
+        "timestamp": 1639584745
+    },
+    {
+        "content": "<p>I agree that that makes sense intuitively, but I'm concerned that we might not be thinking of some edge case</p>",
+        "id": 265033123,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584820
+    },
+    {
+        "content": "<p>you're certainly right to be concerned :)</p>",
+        "id": 265033178,
+        "sender_full_name": "mw",
+        "timestamp": 1639584839
+    },
+    {
+        "content": "<p>From my perspective, there isn't currently a real need for query invocation during decoding</p>",
+        "id": 265033238,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584849
+    },
+    {
+        "content": "<p>We could change the two I identified, and actually get a perf and disk usage win</p>",
+        "id": 265033301,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584876
+    },
+    {
+        "content": "<p>if the need ever arises in the future, we could revisit this</p>",
+        "id": 265033355,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584892
+    },
+    {
+        "content": "<p>But for now, we could take the safe approach of banning any new edges during decoding</p>",
+        "id": 265033399,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584909
+    },
+    {
+        "content": "<p>yeah, I'm just a bit worried that we might not actually understand the problem and are kind of papering over it</p>",
+        "id": 265033438,
+        "sender_full_name": "mw",
+        "timestamp": 1639584924
+    },
+    {
+        "content": "<p>Meaning the original reproducer?</p>",
+        "id": 265033685,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639584995
+    },
+    {
+        "content": "<p>The reproducer I investigated seems fundamentally relates to query decoding</p>",
+        "id": 265034043,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585117
+    },
+    {
+        "content": "<p>I mean: we construct a piece of dep-graph during marking, and the we load something from the cache and rely on that being correct without ever encountering that piece of dep-graph again. </p>\n<p>If we allowed queries during cache decoding, we would get a chance to verify that things are actually as we expect them</p>",
+        "id": 265034075,
+        "sender_full_name": "mw",
+        "timestamp": 1639585127
+    },
+    {
+        "content": "<p>ok, let me try to summarize:</p>",
+        "id": 265034203,
+        "sender_full_name": "mw",
+        "timestamp": 1639585176
+    },
+    {
+        "content": "<p>Well, we do have incremental_verify_ich partially turned on for loads from disk</p>",
+        "id": 265034344,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585223
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/blob/22c2d9ddbf356bcdb718e88ca6ee3665e1e42690/compiler/rustc_query_system/src/query/plumbing.rs#L534\">https://github.com/rust-lang/rust/blob/22c2d9ddbf356bcdb718e88ca6ee3665e1e42690/compiler/rustc_query_system/src/query/plumbing.rs#L534</a></p>",
+        "id": 265034368,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585236
+    },
+    {
+        "content": "<p>there are two options:</p>\n<ol>\n<li><span class=\"user-mention\" data-user-id=\"125294\">@Aaron Hill</span>'s approach of disallowing calling queries during decoding and making sure we don't have to do that by storing a few more things in the cache.</li>\n<li><span class=\"user-mention\" data-user-id=\"248906\">@cjgillot</span> approach of not adding any new edges during cache loading -- which I would somewhat  adapt to: also asserting that we would not add anything new to the dep-graph</li>\n</ol>",
+        "id": 265034512,
+        "sender_full_name": "mw",
+        "timestamp": 1639585300
+    },
+    {
+        "content": "<p>both approaches seem correct to me</p>",
+        "id": 265034543,
+        "sender_full_name": "mw",
+        "timestamp": 1639585317
+    },
+    {
+        "content": "<p>I'm a bit surprised that approach (1) does not need more stuff to be added to the cache</p>",
+        "id": 265034630,
+        "sender_full_name": "mw",
+        "timestamp": 1639585340
+    },
+    {
+        "content": "<p>Yeah, I was wondering if we're maybe not covering the decoding of all queries in our test cases</p>",
+        "id": 265034751,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585388
+    },
+    {
+        "content": "<p>However, I did a perf run, which passed</p>",
+        "id": 265034766,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585394
+    },
+    {
+        "content": "<p>I would have expected the cache to have quite a few \"holes\" where we need to re-compute instead of load</p>",
+        "id": 265034777,
+        "sender_full_name": "mw",
+        "timestamp": 1639585399
+    },
+    {
+        "content": "<p>And the incremental benchmarks should give us a fair amount of coverage</p>",
+        "id": 265034827,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585427
+    },
+    {
+        "content": "<p>yes, I think so too</p>",
+        "id": 265034866,
+        "sender_full_name": "mw",
+        "timestamp": 1639585441
+    },
+    {
+        "content": "<p>Well, this is separate from queries that are not cached on disk</p>",
+        "id": 265034870,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585442
+    },
+    {
+        "content": "<p>which are pretty common</p>",
+        "id": 265034917,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585450
+    },
+    {
+        "content": "<p>I wish we had extensive fuzzing from incr. comp. :)</p>",
+        "id": 265034927,
+        "sender_full_name": "mw",
+        "timestamp": 1639585457
+    },
+    {
+        "content": "<p>Yeah :)</p>",
+        "id": 265034947,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585464
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125294\">Aaron Hill</span> <a href=\"#narrow/stream/241847-t-compiler.2Fwg-incr-comp/topic/.2391696.20et.20al/near/265034870\">said</a>:</p>\n<blockquote>\n<p>Well, this is separate from queries that are not cached on disk</p>\n</blockquote>\n<p>in what way?</p>",
+        "id": 265034975,
+        "sender_full_name": "mw",
+        "timestamp": 1639585476
+    },
+    {
+        "content": "<p>This is when we encode a query result to disk, but we try to be smart about the encoding process</p>",
+        "id": 265035044,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585501
+    },
+    {
+        "content": "<p>E.g. encoding an AdtDef just encodes the DefId</p>",
+        "id": 265035075,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585518
+    },
+    {
+        "content": "<p>and then decoding uses that DefId to invoke a query that reconstructs the value</p>",
+        "id": 265035134,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585541
+    },
+    {
+        "content": "<p>Doing the \"obvious\" approach of deriving serialize/deserialize will never do that</p>",
+        "id": 265035202,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585567
+    },
+    {
+        "content": "<p>yes, I would have thought that we do that in many places</p>",
+        "id": 265035208,
+        "sender_full_name": "mw",
+        "timestamp": 1639585569
+    },
+    {
+        "content": "<p>I can check all of the various manual impls</p>",
+        "id": 265035234,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585582
+    },
+    {
+        "content": "<p>But I think there are limited opportunities for that kind of thing</p>",
+        "id": 265035273,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585602
+    },
+    {
+        "content": "<p>Considering that the impls are usually shares by the metadata encoding/decoding</p>",
+        "id": 265035343,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585631
+    },
+    {
+        "content": "<p>I think I can now articulate what I don't like about completely disallowing queries during decoding:<br>\nWe are actually pretty sure that it should work, but we don't trust our system to be correct enough to handle it</p>",
+        "id": 265035378,
+        "sender_full_name": "mw",
+        "timestamp": 1639585654
+    },
+    {
+        "content": "<p>which is kind of \"smell\"</p>",
+        "id": 265035399,
+        "sender_full_name": "mw",
+        "timestamp": 1639585668
+    },
+    {
+        "content": "<p>My view is that it could potentially break in the future if someone introduces a query in decoding that does something \"weird\"</p>",
+        "id": 265035618,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585748
+    },
+    {
+        "content": "<p>That is, it might not be possible to correctly handle in all cases</p>",
+        "id": 265035643,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585760
+    },
+    {
+        "content": "<p>otoh, it looks like we are going to cache ADTs for performance reasons anyway -- leaving us with exactly zero cases that would exercise those code paths :)</p>",
+        "id": 265035650,
+        "sender_full_name": "mw",
+        "timestamp": 1639585762
+    },
+    {
+        "content": "<p>But I'm not currently able to come up with anything concrete</p>",
+        "id": 265035671,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585776
+    },
+    {
+        "content": "<p>could we add assertions that guard against such cases?</p>",
+        "id": 265035725,
+        "sender_full_name": "mw",
+        "timestamp": 1639585802
+    },
+    {
+        "content": "<p>Here's the PR by the way: <a href=\"https://github.com/rust-lang/rust/pull/91924\">https://github.com/rust-lang/rust/pull/91924</a></p>",
+        "id": 265035770,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585809
+    },
+    {
+        "content": "<p>The problem is that I don't know what those cases.might look like :)</p>",
+        "id": 265035799,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585823
+    },
+    {
+        "content": "<p>disallowing anything new to be added would get us pretty far, I think</p>",
+        "id": 265035803,
+        "sender_full_name": "mw",
+        "timestamp": 1639585824
+    },
+    {
+        "content": "<p>Maybe I'm being overly cautious</p>",
+        "id": 265035815,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585829
+    },
+    {
+        "content": "<p>I completely understand where you are coming from :)</p>",
+        "id": 265035875,
+        "sender_full_name": "mw",
+        "timestamp": 1639585853
+    },
+    {
+        "content": "<p>But the fingerprint ICEs have been a nightmare to deal with, and I'd like to avoid a repeat of that</p>",
+        "id": 265035894,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585860
+    },
+    {
+        "content": "<p>My view that we should impose the strictest checks we can get away with, and then back then off if a concrete need ever arises</p>",
+        "id": 265036145,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585970
+    },
+    {
+        "content": "<p>E.g. if someone opens a PR that adds a query execution during decoding, and we decide that it's reasonable</p>",
+        "id": 265036179,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639585991
+    },
+    {
+        "content": "<p>But enabling the strictest possible checks will let us know if that ever happens, and prevent such a query invocation from slipping in by accident</p>",
+        "id": 265036270,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639586028
+    },
+    {
+        "content": "<p>Yes</p>",
+        "id": 265036366,
+        "sender_full_name": "mw",
+        "timestamp": 1639586053
+    },
+    {
+        "content": "<p>but I also don't want to lose sight of <span class=\"user-mention\" data-user-id=\"248906\">@cjgillot</span> correct discovery that queries invoked during decoding (should we ever allow that) need to happen in a new TaskDeps context</p>",
+        "id": 265036490,
+        "sender_full_name": "mw",
+        "timestamp": 1639586114
+    },
+    {
+        "content": "<p>or rather an ignore-new-stuff context</p>",
+        "id": 265036521,
+        "sender_full_name": "mw",
+        "timestamp": 1639586128
+    },
+    {
+        "content": "<p>Yeah, that sounds right</p>",
+        "id": 265036555,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639586138
+    },
+    {
+        "content": "<p>but it basically amounts to the same</p>",
+        "id": 265036558,
+        "sender_full_name": "mw",
+        "timestamp": 1639586138
+    },
+    {
+        "content": "<p>we don't need to decide right now.</p>",
+        "id": 265036710,
+        "sender_full_name": "mw",
+        "timestamp": 1639586196
+    },
+    {
+        "content": "<p>I do think we have a much better picture of what's going on!</p>",
+        "id": 265036744,
+        "sender_full_name": "mw",
+        "timestamp": 1639586211
+    },
+    {
+        "content": "<p>it's really awesome to have incr. comp. experts around :)</p>",
+        "id": 265036822,
+        "sender_full_name": "mw",
+        "timestamp": 1639586241
+    },
+    {
+        "content": "<p>I need to run now. I'll check back in tomorrow. Sleeping on the whole thing sounds like a good idea anyway.</p>",
+        "id": 265037054,
+        "sender_full_name": "mw",
+        "timestamp": 1639586337
+    },
+    {
+        "content": "<p>So I don't forget: anonymous queries are kind of weird. They might make adding proper assertions more complicated. But it's also possible that handling them correctly is not too hard.</p>",
+        "id": 265037353,
+        "sender_full_name": "mw",
+        "timestamp": 1639586474
+    },
+    {
+        "content": "<p>I fear I missed the battle. To clarify my position, in the light of your discussion: trying to decode B,</p>\n<ul>\n<li>queries could be allowed during decoding, for instance to benefit of their cache;</li>\n<li>all the queries C invoked during decoding of B must be a (recursive) dependency of B in the previous session;</li>\n<li>we know all these C are green because B is green;</li>\n<li>we must not create direct dependencies A -&gt; C.</li>\n</ul>\n<p>I think we have always created those direct dependencies, but we used to create A -&gt; B <em>before</em> A -&gt; C. <a href=\"https://github.com/rust-lang/rust/issues/78780\">#78780</a> changed this order and created our current situation.</p>\n<p>I think that:</p>\n<ul>\n<li>ignoring the A -&gt; C dependencies quring decoding;</li>\n<li>asserting that all the queries C are direct (for simplicity) dependencies of B and that they are green is a great idea. A debug-assertion could be a start and avoid more ICEs on stable.</li>\n</ul>",
+        "id": 265051903,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1639592213
+    },
+    {
+        "content": "<p>Great, it looks like we are all roughly on the same page.</p>",
+        "id": 265167339,
+        "sender_full_name": "mw",
+        "timestamp": 1639666628
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"248906\">cjgillot</span> <a href=\"#narrow/stream/241847-t-compiler.2Fwg-incr-comp/topic/.2391696.20et.20al/near/265051903\">said</a>:</p>\n<blockquote>\n<p>I think that:</p>\n<ul>\n<li>ignoring the A -&gt; C dependencies quring decoding;</li>\n<li>asserting that all the queries C are direct (for simplicity) dependencies of B and that they are green is a great idea. A debug-assertion could be a start and avoid more ICEs on stable.</li>\n</ul>\n</blockquote>\n<p>That sounds good to me. Let me try to re-phrase that a little and you can tell me if that still is what you mean:</p>\n<ol>\n<li>When we succeed to mark a query B as green, it means that we are allowed to load its result from the cache.</li>\n<li>The process of successfully marking query B as green has already \"promoted\" B's previous dep-graph to the new graph. That is, at that point we already expect B dependency information to already be in place and complete.</li>\n<li>Thus, when we load B's value from the cache, any queries that are invoked during that loading are expected to already be green and only introduce dependencies from B's dep-node  to other already green nodes (this is the <code>asserting that all the queries C are direct (for simplicity) dependencies of B and that they are green</code> part, <span class=\"user-mention\" data-user-id=\"248906\">@cjgillot</span>)</li>\n<li>Loading B in an A -&gt; B -&gt; C invocation conceptually does <em>not</em> introduce an A -&gt; C edge. Thus when loading B, it starts out in a new context, just as if B was called normally from A (this is the <code>ignoring the A -&gt; C dependencies quring decoding</code> part).</li>\n</ol>",
+        "id": 265169244,
+        "sender_full_name": "mw",
+        "timestamp": 1639667355
+    },
+    {
+        "content": "<p>Also caching ADT's as <span class=\"user-mention\" data-user-id=\"125294\">@Aaron Hill</span> suggested sounds like a good idea.</p>",
+        "id": 265169329,
+        "sender_full_name": "mw",
+        "timestamp": 1639667389
+    },
+    {
+        "content": "<p>I haven't looked at Aaron's <a href=\"https://github.com/rust-lang/rust/pull/91924\">https://github.com/rust-lang/rust/pull/91924</a> in detail, but I think we can merge that (modulo fixing any problems that show up during review)</p>",
+        "id": 265169831,
+        "sender_full_name": "mw",
+        "timestamp": 1639667590
+    },
+    {
+        "content": "<p>But I think we should try to get the other stuff (opening a new context during decoding, and adding assertions) before that.</p>",
+        "id": 265169923,
+        "sender_full_name": "mw",
+        "timestamp": 1639667626
+    },
+    {
+        "content": "<p>I think that strategy mostly alleviates my concerns about potentially introducing new bugs</p>",
+        "id": 265171678,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668329
+    },
+    {
+        "content": "<p>If we're \"just\" running already green queries that we already have as dependencies,.it's hard to imagine anything going wrong</p>",
+        "id": 265171781,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668363
+    },
+    {
+        "content": "<p>However, if we do decide to merge the AdtDef encoding PR, then we don't have any actual need for this functionality at the moment</p>",
+        "id": 265171965,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668438
+    },
+    {
+        "content": "<p>And I believe banning all new edges is easier to implement than checking if the edge already exists in the previous session</p>",
+        "id": 265172028,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668470
+    },
+    {
+        "content": "<p>(and it might be more efficient)</p>",
+        "id": 265172135,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668506
+    },
+    {
+        "content": "<p>Personally, I think it would be better to implement the simpler strategy, and document the slightly more complex strategy if the need ever arises in the future</p>",
+        "id": 265172246,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668555
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125294\">Aaron Hill</span> <a href=\"#narrow/stream/241847-t-compiler.2Fwg-incr-comp/topic/.2391696.20et.20al/near/265171965\">said</a>:</p>\n<blockquote>\n<p>However, if we do decide to merge the AdtDef encoding PR, then we don't have any actual need for this functionality at the moment</p>\n</blockquote>\n<p>Well, that PR still leaves the code in that generates the erroneous A -&gt; C edges, right? It just removes the currently only case that hits that code path</p>",
+        "id": 265172250,
+        "sender_full_name": "mw",
+        "timestamp": 1639668557
+    },
+    {
+        "content": "<p>Do you mean the code in the query infrastructure? Yes, we're still re-hsing the same TaskDeps during decoding</p>",
+        "id": 265172466,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668644
+    },
+    {
+        "content": "<p>yes, that's what I mean</p>",
+        "id": 265172494,
+        "sender_full_name": "mw",
+        "timestamp": 1639668660
+    },
+    {
+        "content": "<p>I think that should be fixed in any case</p>",
+        "id": 265172518,
+        "sender_full_name": "mw",
+        "timestamp": 1639668667
+    },
+    {
+        "content": "<p>how strict we do assertions is a separate question</p>",
+        "id": 265172569,
+        "sender_full_name": "mw",
+        "timestamp": 1639668690
+    },
+    {
+        "content": "<p>But, given that we're going to fix the TaskDeps in any case, I think \"ban new edges during decoding\" will be simpler to implement than \"ban new edges that fail a certain check during decoding\"</p>",
+        "id": 265172577,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668694
+    },
+    {
+        "content": "<p>We could certainly make a PR and compare the implementations</p>",
+        "id": 265172636,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668722
+    },
+    {
+        "content": "<p>I'd be fine with either option, as long as we document things properly</p>",
+        "id": 265172680,
+        "sender_full_name": "mw",
+        "timestamp": 1639668727
+    },
+    {
+        "content": "<p>I'm not sure how complicated the more accurate assertions would be</p>",
+        "id": 265172725,
+        "sender_full_name": "mw",
+        "timestamp": 1639668752
+    },
+    {
+        "content": "<p>My overall concern is that the incr comp system is very complex, and \"infects\" many other parts of the compiler</p>",
+        "id": 265172775,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668772
+    },
+    {
+        "content": "<p>E.g sorting by DefID leading to miscompilations</p>",
+        "id": 265172804,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668786
+    },
+    {
+        "content": "<p>So we should try to avoid introducing more complexity unless it's absolutely necessary</p>",
+        "id": 265172846,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668801
+    },
+    {
+        "content": "<p>I didn't even realize that new queries could run during decoding of an existing query, until I investigated that crash</p>",
+        "id": 265172908,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639668830
+    },
+    {
+        "content": "<p>In general I agree - in this particular instance I see it more as a case of adding assertions that things conform to the underlying formal model</p>",
+        "id": 265173041,
+        "sender_full_name": "mw",
+        "timestamp": 1639668880
+    },
+    {
+        "content": "<p>I wished we could pull the incr. comp. system out to be standalone and unit testable :)</p>",
+        "id": 265173295,
+        "sender_full_name": "mw",
+        "timestamp": 1639668983
+    },
+    {
+        "content": "<p>I think that's <em>more</em> feasible than in the past, thanks to some of <span class=\"user-mention\" data-user-id=\"248906\">@cjgillot</span> 's work</p>",
+        "id": 265173419,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639669029
+    },
+    {
+        "content": "<p>E.g. some parts of the system use a trait instead of directly accessing a <code>TyCtxt</code></p>",
+        "id": 265173474,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639669050
+    },
+    {
+        "content": "<p>Which is not to say that it would be easy ;)</p>",
+        "id": 265173549,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639669074
+    },
+    {
+        "content": "<p>I'd love to take a stab at implementing the more accurate assertion version -- but I don't know when I would find the time for that.</p>",
+        "id": 265177242,
+        "sender_full_name": "mw",
+        "timestamp": 1639670540
+    },
+    {
+        "content": "<p>It looks like the ADT caching PR is not quite as straightforward as I expected (because of the interning stuff). But if that can be sorted out, and we add a big fat comment on why we ban new edges, I'd be OK with merging <a href=\"https://github.com/rust-lang/rust/pull/91919\">https://github.com/rust-lang/rust/pull/91919</a> as a temporary solution.</p>",
+        "id": 265177603,
+        "sender_full_name": "mw",
+        "timestamp": 1639670722
+    },
+    {
+        "content": "<p>Just a thought, what happens of the decoded adt_Def and the recompiled one don't agree ? Should we force the adt_Def query to use the on-disk value when it exists ?</p>",
+        "id": 265178525,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1639671104
+    },
+    {
+        "content": "<p>How could they end up disagreeing?</p>",
+        "id": 265179508,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639671529
+    },
+    {
+        "content": "<p>/me is still concerned that the incr system trusts the disk to never get corrupted</p>",
+        "id": 265179762,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1639671615
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"125294\">@Aaron Hill</span> I agree they should not, since the adt_Def node must be Green, except for a bug (which could very well happen). Should we debug-assert somewhere before decoding that the depnode has been marked green ?</p>",
+        "id": 265180274,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1639671860
+    },
+    {
+        "content": "<p>For AdtDef specifically? Ok, that sounds good</p>",
+        "id": 265180414,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639671945
+    },
+    {
+        "content": "<p>Stupid question: shouldn't we just remove the adt_Def information from typeck output and tell the query consumer to invoke the query based on adt_Def ?</p>",
+        "id": 265181254,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1639672306
+    },
+    {
+        "content": "<p>I think it's used during the computation of typeck results</p>",
+        "id": 265181392,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639672352
+    },
+    {
+        "content": "<p>But I'll double check</p>",
+        "id": 265181403,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639672361
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"232545\">Joshua Nelson</span> <a href=\"#narrow/stream/241847-t-compiler.2Fwg-incr-comp/topic/.2391696.20et.20al/near/265179762\">said</a>:</p>\n<blockquote>\n<p>/me is still concerned that the incr system trusts the disk to never get corrupted</p>\n</blockquote>\n<p>it wouldn't be too hard to add a per-entry checksum. it's mostly a performance question.</p>",
+        "id": 265183504,
+        "sender_full_name": "mw",
+        "timestamp": 1639673178
+    },
+    {
+        "content": "<p>Is AdtDef interned?</p>",
+        "id": 265183859,
+        "sender_full_name": "mw",
+        "timestamp": 1639673365
+    },
+    {
+        "content": "<p>Yes</p>",
+        "id": 265184022,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639673425
+    },
+    {
+        "content": "<p>it would indeed be great if we could make sure that there are no two different AdtDef for the same DefId</p>",
+        "id": 265184485,
+        "sender_full_name": "mw",
+        "timestamp": 1639673643
+    },
+    {
+        "content": "<p>Do we know what happens to performance if we cache AdtDefs but still invoke the query during decoding? Then the existing fingerprinting infrastructure would take care of consistency checking</p>",
+        "id": 265184810,
+        "sender_full_name": "mw",
+        "timestamp": 1639673796
+    },
+    {
+        "content": "<p>(of course that only works if we allow queries to be invoked during decoding)</p>",
+        "id": 265184957,
+        "sender_full_name": "mw",
+        "timestamp": 1639673853
+    },
+    {
+        "content": "<p>I could investigate that, but this is pretty much the same as decoding any other type</p>",
+        "id": 265185003,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639673875
+    },
+    {
+        "content": "<p>TypeckResults, mir::Body, etc</p>",
+        "id": 265185085,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639673894
+    },
+    {
+        "content": "<p>Where we encode/decode them in the obvious way via a derive</p>",
+        "id": 265185125,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639673911
+    },
+    {
+        "content": "<p>yeah, I suspect that it would perform about the same as when decoding directly</p>",
+        "id": 265185154,
+        "sender_full_name": "mw",
+        "timestamp": 1639673926
+    },
+    {
+        "content": "<p>What's the point of caching things on disk, then?</p>",
+        "id": 265185238,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639673978
+    },
+    {
+        "content": "<p>Also, wait</p>",
+        "id": 265185439,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674020
+    },
+    {
+        "content": "<p>that we would go through the query and thus be inside the regular system that already does consistency checks (but still get the performance boost you found)</p>",
+        "id": 265185467,
+        "sender_full_name": "mw",
+        "timestamp": 1639674024
+    },
+    {
+        "content": "<p>Caching the result on disk but keeping the existing decoding scheme is pretty much identical to what we're doing now</p>",
+        "id": 265185542,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674058
+    },
+    {
+        "content": "<p>Since forcing the query uses the stored DefPathHash to re-run the query</p>",
+        "id": 265185580,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674078
+    },
+    {
+        "content": "<p>And \"caching\" the encoded DefId (using the current encoding impl) is basically just the same thing</p>",
+        "id": 265185648,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674108
+    },
+    {
+        "content": "<p>In both cases, we re-run the adt_ded query with a DefId</p>",
+        "id": 265185728,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674130
+    },
+    {
+        "content": "<p>All of the performance benefit is current coming from being able to decodr an AdtDef directly when it ends in the metadata or the result of another query</p>",
+        "id": 265185819,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674167
+    },
+    {
+        "content": "<p>yes, but it would hit the cache instead of re-compute (which might run other queries transitively) and thus might be faster</p>",
+        "id": 265185825,
+        "sender_full_name": "mw",
+        "timestamp": 1639674172
+    },
+    {
+        "content": "<p>I don't understand</p>",
+        "id": 265185863,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674186
+    },
+    {
+        "content": "<p>Are you talking about leaving the existing encoding impl for AdtDef the same?</p>",
+        "id": 265185916,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674215
+    },
+    {
+        "content": "<p>re-computing the AdtDef might be more expensive than loading it from the cache</p>",
+        "id": 265185918,
+        "sender_full_name": "mw",
+        "timestamp": 1639674216
+    },
+    {
+        "content": "<p>/me takes a look at the changes again ...</p>",
+        "id": 265186037,
+        "sender_full_name": "mw",
+        "timestamp": 1639674257
+    },
+    {
+        "content": "<p>I think we're talking about two different things here</p>",
+        "id": 265186074,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674274
+    },
+    {
+        "content": "<p>The current situation: Whenever we need to encode an AdtDef (when it occurs in the metadata, or inside the type of a query result that we <em>do</em> cache on disk), we write out a DefId</p>",
+        "id": 265186194,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674316
+    },
+    {
+        "content": "<p>When we need to decode it, we load that DefId, and re-run the AdtDef query. This gives us some automatic caching (the query result will get saved in the in-memory cache, since we only run a query once for a given input)</p>",
+        "id": 265186376,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674370
+    },
+    {
+        "content": "<p>My PR benchmark results come from encoding the full AdtDef to disk (recursively encoding all of the struct fields to disk)</p>",
+        "id": 265186447,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674405
+    },
+    {
+        "content": "<p>That yielded a large performance improvement</p>",
+        "id": 265186477,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674418
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"248906\">@cjgillot</span> suggested that I additionally cache the result of the <code>adt_def</code> query on disk. This would not affect decoding of other query results, but it would affect cases where some code explicitly calls <code>adt_def</code></p>",
+        "id": 265186633,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674482
+    },
+    {
+        "content": "<p>However, that caused a failure, and I still need to investigate and fix it so that I can get benchmark results</p>",
+        "id": 265186718,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674514
+    },
+    {
+        "content": "<p>This is complicated :)</p>",
+        "id": 265186836,
+        "sender_full_name": "mw",
+        "timestamp": 1639674582
+    },
+    {
+        "content": "<p>Yeah - that's why I was concerned about performing any queue invocations during decoding :)</p>",
+        "id": 265186934,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674608
+    },
+    {
+        "content": "<p>it would kind of make sense to only store a DefId in structs where we have an AdtDef now so other code has to go through the query</p>",
+        "id": 265186968,
+        "sender_full_name": "mw",
+        "timestamp": 1639674616
+    },
+    {
+        "content": "<p>You mean, refactor the code to no longer store an AdtDef?</p>",
+        "id": 265187033,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674644
+    },
+    {
+        "content": "<p>and then cache the adt_def query</p>",
+        "id": 265187037,
+        "sender_full_name": "mw",
+        "timestamp": 1639674645
+    },
+    {
+        "content": "<p>probably not a small change</p>",
+        "id": 265187082,
+        "sender_full_name": "mw",
+        "timestamp": 1639674662
+    },
+    {
+        "content": "<p>I think the main user is <code>TyKind</code>, which uses it to actually define the ADT</p>",
+        "id": 265187127,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674680
+    },
+    {
+        "content": "<p>but how AdtDef is handled right now is indeed a bit weird</p>",
+        "id": 265187142,
+        "sender_full_name": "mw",
+        "timestamp": 1639674686
+    },
+    {
+        "content": "<p>yeah, that does not seem like a straightforward refactoring</p>",
+        "id": 265187204,
+        "sender_full_name": "mw",
+        "timestamp": 1639674721
+    },
+    {
+        "content": "<p>I'll try to fix the error in the current PR, and see how it affects benchmark results</p>",
+        "id": 265187462,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639674825
+    },
+    {
+        "content": "<p>OK</p>",
+        "id": 265188414,
+        "sender_full_name": "mw",
+        "timestamp": 1639675277
+    },
+    {
+        "content": "<p>(maybe removing the direct AdtDef value from TyKind wouldn't be that hard after all? I only get 5 matches for the string <code>TyKind::Adt(</code>...)</p>",
+        "id": 265189443,
+        "sender_full_name": "mw",
+        "timestamp": 1639675729
+    },
+    {
+        "content": "<p>In light of this discussion, I think we should indeed ban using queries during decoding as Aaron sugested.  No datatype should need to decode needs another query's result.  TyKind::Adt should store the DefId.  Code which needs the full AdtDef would be responsible for calling adt_def query.  Likewise for any other query and datatype.  This would (1) simplify our life, (2) decode less stuff we probably won't use, (3) reduce query invalidations.</p>",
+        "id": 265207717,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1639683097
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124287\">mw</span> <a href=\"#narrow/stream/241847-t-compiler.2Fwg-incr-comp/topic/.2391696.20et.20al/near/265189443\">said</a>:</p>\n<blockquote>\n<p>(maybe removing the direct AdtDef value from TyKind wouldn't be that hard after all? I only get 5 matches for the string <code>TyKind::Adt(</code>...)</p>\n</blockquote>\n<p>I've trying this out locally - there appears to be a very large number of usages (over 50)</p>",
+        "id": 265219474,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639688701
+    },
+    {
+        "content": "<p>Most of them are <code>ty::Adt</code>, not <code>TyKind::Adt</code></p>",
+        "id": 265219497,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639688715
+    },
+    {
+        "content": "<p>and many places will require us to pass in a <code>TyCtxt</code> to existing methods, so that we can look up information from the <code>AdtDef</code></p>",
+        "id": 265219536,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639688736
+    },
+    {
+        "content": "<p>I think this isn't worth the effort for now (but I may revisit it later)</p>",
+        "id": 265235691,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1639697929
+    },
+    {
+        "content": "<blockquote>\n<p>How could they end up disagreeing?</p>\n</blockquote>\n<p>The decoded value does not go through <code>incremental_verify_ich</code>. Should it?</p>",
+        "id": 265302147,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1639751349
+    },
+    {
+        "content": "<p>We do verify a subset of decoded results unconditionally: <a href=\"https://github.com/rust-lang/rust/blob/2595d038273a4c7746320efd06200764f99bd760/compiler/rustc_query_system/src/query/plumbing.rs#L527-L539\">https://github.com/rust-lang/rust/blob/2595d038273a4c7746320efd06200764f99bd760/compiler/rustc_query_system/src/query/plumbing.rs#L527-L539</a></p>",
+        "id": 265303497,
+        "sender_full_name": "mw",
+        "timestamp": 1639751942
+    },
+    {
+        "content": "<p>but that might not cover the error case here where various different query results might contain an AdtDef for the same DefId. We will end up only using one of them (because of interning) but we don't verify that they all agree.</p>",
+        "id": 265303785,
+        "sender_full_name": "mw",
+        "timestamp": 1639752076
+    },
+    {
+        "content": "<p>but the same is true for any other value that is encoded by value inside of a query result -- so I'm not sure how to think about this</p>",
+        "id": 265303890,
+        "sender_full_name": "mw",
+        "timestamp": 1639752125
+    },
+    {
+        "content": "<p>we could add some additional verification that debug_asserts equality at the point of interning? might be a good idea because the current interning infrastructure seems a bit fragile to me.</p>",
+        "id": 265304161,
+        "sender_full_name": "mw",
+        "timestamp": 1639752261
+    },
+    {
+        "content": "<p>I approved <a href=\"https://github.com/rust-lang/rust/pull/91924\">https://github.com/rust-lang/rust/pull/91924</a> just now. I agree with Aaron that merging <a href=\"https://github.com/rust-lang/rust/pull/91919\">https://github.com/rust-lang/rust/pull/91919</a> sooner rather than later is a good idea.</p>",
+        "id": 265544531,
+        "sender_full_name": "mw",
+        "timestamp": 1639995922
+    },
+    {
+        "content": "<p>I just saw you assigned yourself to <a href=\"https://github.com/rust-lang/rust/issues/91924\">#91924</a>, <span class=\"user-mention\" data-user-id=\"248906\">@cjgillot</span>. I hope you don't mind my approving the PR.</p>",
+        "id": 265544745,
+        "sender_full_name": "mw",
+        "timestamp": 1639996049
+    },
+    {
+        "content": "<p>Please go ahead. I won't have time to take a detailed look, and I agree we shouldn't delay this PR.</p>",
+        "id": 265546711,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1639997247
+    }
+]

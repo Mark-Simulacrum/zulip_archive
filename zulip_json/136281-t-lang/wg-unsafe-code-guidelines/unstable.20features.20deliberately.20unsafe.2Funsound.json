@@ -1,0 +1,308 @@
+[
+    {
+        "content": "<h3>Context</h3>\n<p>So, I wanted to poll the <code>unsafe</code>-sensitive people about one thing: you know that there are things in Rust which can lead to compiling code that can exhibit non-well-defined behavior (historically called UB) inside the language itself without requiring the use of <code>unsafe</code>. This is technically, the very definition of something being unsound.</p>",
+        "id": 269019320,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946685
+    },
+    {
+        "content": "<p>A historical example was <code>#[no_mangle]</code>, for instance.</p>\n<p>Nowadays, the <code>unsafe_code</code> lint has been improved to catch these things, and thus, <em>technically</em>, whether something is <code>unsafe</code> or not is really defined by whether it triggers the <code>unsafe_code</code> lint or not. <code>unsafe impl</code>s and <code>unsafe { … }</code> blocks do, but so do <code>#[no_mangle]</code> and <code>#[export_name]</code>.</p>\n<ul>\n<li>We still have some outher outstanding unresolved questions, such as <code>extern { … }</code> <em>declarations</em>, which are currently known to be able to influence LLVM, but let's not talk of them atm.</li>\n</ul>",
+        "id": 269019325,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946692
+    },
+    {
+        "content": "<p>There is also the problem of soundness holes in the language —in stable Rust I mean—, and I think the fact those exist can just be labelled as a bug, so that <em>conceptually</em>, there is nothing wrong here.</p>",
+        "id": 269019329,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946698
+    },
+    {
+        "content": "<p>Finally, there is the case of <code>incomplete_feature</code>s, such as <code>specialization</code> (or even <code>min_specialization</code> <span aria-label=\"scream\" class=\"emoji emoji-1f631\" role=\"img\" title=\"scream\">:scream:</span>), which are unsound / allow code with <code>#![forbid(unsafe_code)]</code> to be able to exhibit non-well-defined behavior. Again, it's an <code>incomplete_feature</code>, so it should be fine? I already start thinking that if a feature is known to <em>ever so potentially</em> feature UB, it ought to be linted by <code>unsafe_code</code>.</p>",
+        "id": 269019338,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946710
+    },
+    {
+        "content": "<hr>",
+        "id": 269019339,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946711
+    },
+    {
+        "content": "<h3>Question at hand</h3>\n<p>Now, let's consider a <code>feature</code> which is <strong>not</strong> <code>incomplete</code>; instead, it's \"just\" perma-<code>unstable</code> and straight-on designed to never be <strong>enabled</strong> (enabled ≠ used, more on that below).</p>",
+        "id": 269019342,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946717
+    },
+    {
+        "content": "<p>To better see what I'm talking about, let's consider the following scenario:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"c1\">// In core or std.</span>\n<span class=\"cp\">#[macro_export]</span><span class=\"w\"></span>\n<span class=\"fm\">macro_rules!</span><span class=\"w\"> </span><span class=\"n\">make_non_null</span><span class=\"w\"> </span><span class=\"p\">{(</span><span class=\"w\"> </span><span class=\"cm\">/* … */</span><span class=\"w\"> </span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"cp\">$crate</span>::<span class=\"n\">ptr</span>::<span class=\"n\">NonNull</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">pointer</span>: <span class=\"cm\">/* some non-zero address */</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">)}</span><span class=\"w\"></span>\n</code></pre></div>\n<ul>\n<li>Ignore why this is a macro and not a function or <code>const fn</code>, just consider that for some reason it has to be macro which uses braced struct construction. There is an actual example of that in the works right now (i just don't want to name that elephant in the room yet), so trust me on this.</li>\n</ul>",
+        "id": 269019348,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946724
+    },
+    {
+        "content": "<p>Now, such a constructor would need to have access to the private non-<code>pub</code> field of <code>NonNull</code>: that is, it currently cannot be written, unless fully hygienic <code>macro</code> macros were to be used, but that's then problematic for other reasons.</p>",
+        "id": 269019350,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946728
+    },
+    {
+        "content": "<p>The solution then is to do what <code>fmt_internals</code> kind of already does <em>elsewhere</em> (not exactly the same + according to <span class=\"user-mention\" data-user-id=\"210267\">@Nemo157</span> the current implementation there is sound since it does perform a sanity check) :</p>\n<ol>\n<li>make the <code>pointer</code> field be actually <code>pub</code>;</li>\n<li>but make it <code>#[doc(hidden)]</code>, and more importantly, <code>feature</code>-gated (say <code>nonnull_ptr_internals</code>);</li>\n<li>finally, the macro can be annotated with <code>#[rustc_allow_internal_unstable(nonnull_ptr_internals)]</code> to be granted access to the field.</li>\n</ol>",
+        "id": 269019352,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946732
+    },
+    {
+        "content": "<p>And all is well… except <code>nonnull_ptr_internals</code> is now unsound:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#![feature(nonnull_ptr_internals)]</span><span class=\"w\"></span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">core</span>::<span class=\"n\">ptr</span>::<span class=\"n\">NonNull</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">pointer</span>: <span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"> </span><span class=\"c1\">// No unsafe!</span>\n</code></pre></div>",
+        "id": 269019354,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946739
+    },
+    {
+        "content": "<p>I personally find this not to be acceptable, even if an <code>unstable</code> feature has been used: such a feature is deliberately unsound; it's just not intended to be enabled. <strong>But it <em>can</em> be enabled!</strong></p>",
+        "id": 269019366,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946759
+    },
+    {
+        "content": "<ul>\n<li>Granted, the feature can be given a scarier name, such as <code>rustc_unsafe_nonnull_ptr_internals</code>, but I'd hope for us to have a more resilient tool for proper soundness boundaries than naming conventions (in other words: I'm all up for the scary name, I just don't think it <em>suffices</em>).</li>\n</ul>",
+        "id": 269019384,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946762
+    },
+    {
+        "content": "<ul>\n<li>It can be declared to be an <code>incomplete_feature</code>, which is, as I view it, not a bad thing, since it achieves the desired effect of \"from this point onwards you've opted into featuring non-well-defined behavior without ever having to use <code>unsafe</code>\".<br>\n    This is technically <em>ugly</em>, from the point of view of the compiler, since an <code>#[unstable(feature = \"…\", …)]</code>is a <em>library</em> feature, whereas <code>incomplete_feature</code>s are <em>language</em> features. That being said, everything works fine with this.</li>\n</ul>",
+        "id": 269019409,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946766
+    },
+    {
+        "content": "<ul>\n<li>FWIW, there currently is even a way to actually declare a <code>feature</code> as not being possible to enable, since there is a mechanism for \"a set of incompatible features that thus can't be all enabled at once\", and one can define such a set with only the one feature. Quite hacky, but it does have the merit to achieve 100% soundness. And since the whole thing is <code>unstable</code> to begin with, the hacky aspect does not seem that important.</li>\n</ul>",
+        "id": 269019417,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946774
+    },
+    {
+        "content": "<p>But some people out there have pointed out that an <code>unstable</code> feature (as in <em>any</em> unstable feature, which, I'm sorry, includes library APIs, such as <code>result_copied</code> which adds a <code>.copied()</code> adaptor to <code>Result</code>s) by virtue of being <code>unstable</code>, ought to be allowed to be unsound, and that thus people using such features would already be opting into weird behavior.</p>",
+        "id": 269019423,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946779
+    },
+    {
+        "content": "<ul>\n<li>That, to me, feels rather like the case of <code>incomplete_features</code>; I would loathe to see somebody having UB in their code just because they enabled <code>Result::copied</code>; or rather, that seems like a rather extreme position to showcase.</li>\n</ul>",
+        "id": 269019426,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946782
+    },
+    {
+        "content": "<p>In other words, back to the initial context at hand: the <code>unsafe_code</code> lint is the tool to detect which code can lead to the language featuring UB. If <code>unstable</code> features are <em>all</em> deemed potentially unsound, then the <code>unsafe_code</code> lints ought to trigger on them.</p>",
+        "id": 269019429,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946786
+    },
+    {
+        "content": "<p>So, should a <code>#![forbid(unsafe_code)]</code> codebase be unable to use <code>result_copied</code>? I hope by now we can see that considering <em>all</em> the <code>unstable</code> features to be allowed to be unsound is too much.</p>",
+        "id": 269019433,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946789
+    },
+    {
+        "content": "<p>To me, there should be a category of such features, which could either be <code>incomplete_features</code> or a superset of it, wherein the above hypothetical <code>nonnull_ptr_internals</code> would be a part of.</p>",
+        "id": 269019445,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642946793
+    },
+    {
+        "content": "<p>And for those concerned about the maintainability burden <em>w.r.t.</em> those <code>unstable</code> features: by virtue of being unstable, their soundness is allowed to change, so it should pose no maintainability burden on compiler maintainers other than \"tagging\" features that happen to be unsound, which can even be discovered late. Just grant <code>nightly</code> users a tool to better gauge how dangerous a feature may be, other than naming conventions</p>",
+        "id": 269019875,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642947290
+    },
+    {
+        "content": "<p>To me this all sounds very reasonable. It amounts to saying that features can be marked as <code>unsafe</code> and the <code>unsafe_code</code> lint should respect that</p>",
+        "id": 269034781,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1642966080
+    },
+    {
+        "content": "<p>certainly it would be a good thing to record our best knowledge about whether certain features are unsafe or not (e.g. <code>min_specialization</code> seems like something which you might easily stumble into thinking it is safe, since <code>specialization</code> isn't)</p>",
+        "id": 269034858,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1642966182
+    },
+    {
+        "content": "<p>I don't think it should necessarily have any particular relation with <code>incomplete_features</code>; a complete feature might still be unsafe if it was designed that way (something like <code>no_mangle</code>)</p>",
+        "id": 269034924,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1642966272
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/unstable.20features.20deliberately.20unsafe.2Funsound/near/269034781\">said</a>:</p>\n<blockquote>\n<p>To me this all sounds very reasonable. It amounts to saying that features can be marked as <code>unsafe</code> and the <code>unsafe_code</code> lint should respect that</p>\n</blockquote>\n<p>I like the idea of marking a feature as <code>unsafe</code>, but in this case the hypothetical <code>nonnull_ptr_internals</code> feature is not merely <code>unsafe</code>, it is also <em>unsound</em>. IMHO unsafe and unsound are not the same thing. <code>unsafe</code> means that you have to manually uphold certain safety rules and take care to not to expose (temporary) violation of these safety rules outside of the <code>unsafe</code> block (or privately abstract that away behind a safe wrapper API). <em>unsound</em> means that the program failed to uphold the safety rules outside of <code>unsafe</code> blocks (or safe wrapper APIs) and typically there is no way to recover from this. As an example, a crate could safely re-export the <code>make_non_null</code> macro or a method which constructs a <code>NonNull</code> which is <em>null</em>. This would be hard to catch, and consumers of that crate will probably get no warning from <code>#![forbid(unsafe_code)]</code> because their own crate doesn't directly depend on the <code>unsafe nonnull_ptr_internals</code> feature. In summary, I think the soundness of a program should not depend on the safe code always behaving well: the <code>unsafe</code> code should guard against all possible mis-uses so that it always leaves the program in a sound state when the safety rules have been upheld and the unsafe block is exited.</p>",
+        "id": 269066635,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1643008204
+    },
+    {
+        "content": "<p>One (not so fun) hypothetical work-around could be that when the  <code>nonnull_ptr_internals</code> is enabled, you now have to wrap every code block in <code>unsafe</code> and promise you won't use <code>nonnull_ptr_internals</code> to create soundness holes. This basically constitutes a hypothetical <code>#![forbid(safe_code)]</code>. Then at the public API level it might be possible to recover from the unsoundness that <code>nonnull_ptr_internals</code> introduces :) I'm not actually suggesting this as a feasible work-around :P</p>",
+        "id": 269066885,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1643008513
+    },
+    {
+        "content": "<p>Another idea for a work-around: what if you add another <code>#[doc(hidden)]</code> public field to <code>NonNull</code> (optionally gated behind the <code>nonnull_ptr_internals</code> feature) which holds a non-<code>Copy</code> ZST type which can only be constructed through the use of <code>unsafe</code>, then at least there is some level of unsafe linting when instantiating a <code>NonNull</code> through braced struct construction:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#![feature(nonnull_ptr_internals)]</span><span class=\"w\"></span>\n\n<span class=\"c1\">// SAFETY: I swear I won't use the `UnsafeNonCopyZst` to pair it with a `null`-`NonNull` pointer</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">core</span>::<span class=\"n\">ptr</span>::<span class=\"n\">NonNull</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">pointer</span>: <span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"n\">_unsafe</span>: <span class=\"nc\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">UnsafeNonCopyZst</span>::<span class=\"n\">new</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Admittedly, this still doesn't uphold \"<em>unsafe means that you have to manually uphold certain safety rules and take care to not to expose (temporary) violation of these safety rules outside of the unsafe block (or privately abstract that away behind a safe wrapper API).</em>\", but it's still better than nothing.</p>\n<p>Also, this would make <code>NonNull</code> non-<code>Copy</code>, <code>NonNull</code> is currently <code>Copy</code>. The idea behind making the ZST non-<code>Copy</code> is so that it can't be safely obtained by copying another ZST.</p>\n<p>Not a great work-around, if I say so myself, just thinking out loud :)</p>",
+        "id": 269069639,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1643011193
+    },
+    {
+        "content": "<p>I think that \"an unsafe block\" is just the way for people to do unsafe expressions. We already admit to ourselves that there's non-expression unsafe things that can happen with a program. Accordingly, it's a bit of a non-starter to try and have every possible unsafe thing all also be in unsafe blocks.</p>\n<p>I think what is important is a clear marking of <em>some kind</em>. You've stepped outside of default rust, and now something might go wrong. Right now we've got that down for expressions, but unsafe non-expressions we don't mark well. So maybe features and attributes that can be blocked by forbid(unsafe_code) should <em>also</em> warn by default if you use them at all. Thay way the either crate as a whole or each use site would have an extra label at the potential problem point.</p>",
+        "id": 269070150,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643011515
+    },
+    {
+        "content": "<p>Like, the fact that a feature, if turned on, <em>could</em> let you do a bad thing at all isn't really a big deal  because you can always do bad things at any time. What's a problem is that the otherwise bland name of the feature doesn't clearly signal to an unsuspecting reader that they need to be careful.</p>",
+        "id": 269070349,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643011667
+    },
+    {
+        "content": "<blockquote>\n<p>Accordingly, it's a bit of a non-starter to try and have every possible unsafe thing all also be in unsafe blocks.</p>\n</blockquote>\n<p>That's fair :) The literature <a href=\"https://dl.acm.org/doi/pdf/10.1145/3418295\">also</a> <a href=\"https://www.cs.ubc.ca/~alexsumm/papers/AstrauskasMathejaPoliMuellerSummers20.pdf\">often</a> <a href=\"https://cacm.acm.org/magazines/2021/4/251364-safe-systems-programming-in-rust/fulltext#:~:text=Safe%20encapsulation%20means%20that%2C%20regardless,the%20use%20of%20unsafe%20code\">speaks</a> of <em>safe encapsulation</em>, I'm a big fan of that approach myself.</p>\n<blockquote>\n<p>Safe encapsulation means that, regardless of the fact that Rust APIs like Arc or Vec are implemented with unsafe code, users of those APIs should not be affected: so long as users write well-typed code in the safe fragment of Rust, they should never be able to observe anomalous behaviors due to the use of unsafe code in the APIs' implementation.</p>\n</blockquote>\n<p>The <code>nonnull_ptr_internals</code> feature would not be able to adhere to the principle of safe encapsulation as it's currently proposed.</p>",
+        "id": 269077300,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1643015863
+    },
+    {
+        "content": "<p>(although it is possible to build safe encapsulations on top of the unsound <code>nonnull_ptr_internals</code> feature)</p>",
+        "id": 269078725,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1643016547
+    },
+    {
+        "content": "<p>I think it's fine to have unsound features as long as they can't be enabled with <code>#![feature()]</code>, only with <code>rustc_allow_internal_unstable</code></p>",
+        "id": 269087481,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1643021514
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"303710\">Gary Guo</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/unstable.20features.20deliberately.20unsafe.2Funsound/near/269087481\">said</a>:</p>\n<blockquote>\n<p>I think it's fine to have unsound features as long as they can't be enabled with <code>#![feature()]</code>, only with <code>rustc_allow_internal_unstable</code></p>\n</blockquote>\n<p>My objective exactly</p>",
+        "id": 269092211,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643023981
+    },
+    {
+        "content": "<p>FWIW, the elephant in the room was the <code>pin!</code> macro, which for extension-of-temporaries questions (paramount for the macro API), had to have access to the until-now private <code>.pointer</code> field of <code>Pin</code>.<br>\nMade technically public behind a <code>pin_internals</code> feature-gate, I've made the choice to rename it to <code>unsafe_pin_internals</code>, and to also achieve what <span class=\"user-mention\" data-user-id=\"303710\">@Gary Guo</span> just said, even if through a hack (declaring the feature \"incompatible with itself\", which is something checked while enabling features): <a href=\"https://github.com/rust-lang/rust/pull/93176/commits/15da1789f182e26f8decd719a3a8b03a147cd9c7\">https://github.com/rust-lang/rust/pull/93176/commits/15da1789f182e26f8decd719a3a8b03a147cd9c7</a></p>",
+        "id": 269092530,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643024153
+    },
+    {
+        "content": "<p><a href=\"https://doc.rust-lang.org/src/core/pin.rs.html#403-410\"><code>Pin</code></a> is <code>#[repr(transparent)]</code>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[lang = </span><span class=\"s\">\"pin\"</span><span class=\"cp\">]</span><span class=\"w\"></span>\n<span class=\"cp\">#[fundamental]</span><span class=\"w\"></span>\n<span class=\"cp\">#[repr(transparent)]</span><span class=\"w\"></span>\n<span class=\"cp\">#[derive(Copy, Clone)]</span><span class=\"w\"></span>\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">struct</span> <span class=\"nc\">Pin</span><span class=\"o\">&lt;</span><span class=\"n\">P</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pointer</span>: <span class=\"nc\">P</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>in theory it can obtain the <code>pointer</code> field by <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=114a9b45bd380a516b62725f0dd2ad91\">transmuting/casting</a> it to <code>P</code> as well without the use of <code>pin_internals</code>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"k\">usize</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">pin</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">pin</span>::<span class=\"n\">Pin</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">a</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">pointer</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">usize</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">mem</span>::<span class=\"n\">transmute</span><span class=\"p\">(</span><span class=\"n\">pin</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"{}\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">pointer</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">pointer</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">usize</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"o\">&amp;**</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">pin</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">)};</span><span class=\"w\"></span>\n<span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"{}\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">pointer</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 269095359,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1643025835
+    },
+    {
+        "content": "<p>In order to cause UB in that fashion, <code>unsafe</code> would be needed (<em>e.g.</em>, when transmuting): so there is no unsoundness there</p>",
+        "id": 269097703,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643027251
+    },
+    {
+        "content": "<p>In the snippet of that commit, we can see the following being written:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#![forbid(unsafe_code)]</span><span class=\"w\"></span>\n<span class=\"cp\">#![feature(unsafe_pin_internals)]</span><span class=\"w\"></span>\n\n<span class=\"k\">use</span><span class=\"w\"> </span><span class=\"n\">core</span>::<span class=\"p\">{</span><span class=\"n\">marker</span>::<span class=\"n\">PhantomPinned</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">pin</span>::<span class=\"n\">Pin</span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">non_unsafe_pin_new_unchecked</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">pointer</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">Pin</span><span class=\"o\">&lt;&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">Pin</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">pointer</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">self_referential</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">PhantomPinned</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">_</span>: <span class=\"nc\">Pin</span><span class=\"o\">&lt;&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">PhantomPinned</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">non_unsafe_pin_new_unchecked</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">self_referential</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">core</span>::<span class=\"n\">mem</span>::<span class=\"n\">forget</span><span class=\"p\">(</span><span class=\"n\">self_referential</span><span class=\"p\">);</span><span class=\"w\"> </span><span class=\"c1\">// move and disable drop glue!</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>this means that arbitrary non-<code>unsafe</code> code would be able to cause UB (replace <code>self_referential</code> with some <code>async { … }</code> future, with a captured cross-<code>.await</code> reference, call that non-<code>unsafe</code> constructor, poll until that await point, move the future, and poll again: use of dangling reference).</p>",
+        "id": 269098350,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643027647
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"400735\">Pointerbender</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/unstable.20features.20deliberately.20unsafe.2Funsound/near/269066635\">said</a>:</p>\n<blockquote>\n<p>I like the idea of marking a feature as <code>unsafe</code>, but in this case the hypothetical <code>nonnull_ptr_internals</code> feature is not merely <code>unsafe</code>, it is also <em>unsound</em>. IMHO unsafe and unsound are not the same thing. <code>unsafe</code> means that you have to manually uphold certain safety rules and take care to not to expose (temporary) violation of these safety rules outside of the <code>unsafe</code> block (or privately abstract that away behind a safe wrapper API). <em>unsound</em> means that the program failed to uphold the safety rules outside of <code>unsafe</code> blocks (or safe wrapper APIs) and typically there is no way to recover from this.</p>\n</blockquote>\n<p>The only difference between unsafe and unsound is the content of the safety message. Usually we only think of unsoundness in the context of safe functions (which is to say that it is possible to cause UB using only the safe interface of the function), but you can also have unsound <code>unsafe</code> functions, when you can cause UB even if you follow the stated safety requirements of the function. The easy solution to this latter problem is to modify the safety requirements of the function until they preclude the discovered UB.</p>\n<p>We can imagine the same thing in the context of unsafe features. Let's say that there was a mechanism for unsafe features and <code>nonnull_ptr_internals</code> is marked <code>unsafe</code>. Then you might write (strawman syntax):</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"c1\">// SAFETY: I never pass `0` to the `pointer` field in this crate</span>\n<span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"cp\">#![feature(nonnull_ptr_internals)]</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>which would match with the documented <code>// SAFETY</code> comment on the <code>nonnull_ptr_internals</code> which says that you must not use the internals access to assign 0 to a <code>NonNull</code>.</p>\n<p>The result is that <code>nonnull_ptr_internals</code> is unsafe, but not unsound: you can't cause UB by using the feature unless you violate the documented safety precondition.</p>\n<p>Now, writing <code>unsafe { ... }</code> is of course not an option for features, but alternatives include <code>unsafe_feature(...)</code> or sticking <code>unsafe</code> somewhere in the name of the feature, or just not acknowledging it at all textually but having <code>unsafe_code</code> lint fire on it. (The <code>// SAFETY</code> comment should still be used though.)</p>",
+        "id": 269102218,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1643029664
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/unstable.20features.20deliberately.20unsafe.2Funsound/near/269102218\">said</a>:</p>\n<blockquote>\n<p>We can imagine the same thing in the context of unsafe features. Let's say that there was a mechanism for unsafe features and <code>nonnull_ptr_internals</code> is marked <code>unsafe</code>. Then you might write (strawman syntax):</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"c1\">// SAFETY: I never pass `0` to the `pointer` field in this crate</span>\n<span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"cp\">#![feature(nonnull_ptr_internals)]</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>which would match with the documented <code>// SAFETY</code> comment on the <code>nonnull_ptr_internals</code> which says that you must not use the internals access to assign 0 to a <code>NonNull</code>.</p>\n<p>The result is that <code>nonnull_ptr_internals</code> is unsafe, but not unsound: you can't cause UB by using the feature unless you violate the documented safety precondition.</p>\n</blockquote>\n<p>I once tried to make the same argument (<a href=\"https://www.reddit.com/r/rust/comments/mjsezp/comment/gtcnhhk/?utm_source=share&amp;utm_medium=web2x&amp;context=3\">see this Reddit thread</a>) for a crate I had published last year :) I got some really constructive feedback from the Rust community and ended up changing my mind about this: the gist of that Reddit thread is that it makes it unnecessarily hard to prove the soundness of the encapsulating public API that uses an unsound inner API (like <code>nonnull_ptr_internals</code> or the crate I had published), although it is not impossible. I felt quite compelled by the arguments given by other contributors in that Reddit thread, I think it's a very interesting read :) p.s. after all this time, I did not get around to updating its public API yet and the unsoundness is still present in the crate, I should do something about that one of these days :)</p>",
+        "id": 269111471,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1643033775
+    },
+    {
+        "content": "<blockquote>\n<p>The <code>nonnull_ptr_internals</code> feature would not be able to adhere to the principle of safe encapsulation as it's currently proposed.</p>\n</blockquote>\n<p>My point exactly. The concept of Safe Encapsulation is nice, but <em>fundamentally limited</em>. It works for common code situations, but it presumes that encapsulation exists in some form. With language features the \"encapsulation\" is at the \"whole crate\" level. If you turn on the feature you're promising that the entire crate won't misuse it. This isn't a new concept at all this is already how unsafe works for functions and modules. All that's different is the number of lines of code that have to be double checked for misuse.</p>",
+        "id": 269119607,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643037254
+    },
+    {
+        "content": "<p>Like, if you open the file for the Vec type you <em>can</em> type in new words and some of those words would make everything go bad. You can even type in a function that's <em>fully safe</em> and that causes UB, because the scope of safety checking within the Vec's definition is <em>the entire module</em>, not just one function at a time.</p>\n<p>The only thing stopping you is that you in that case is yourself. And yet Vec is sound because soundness is a property of a <em>particular</em> API, not of <em>all possible</em> APIs.</p>",
+        "id": 269120308,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643037495
+    },
+    {
+        "content": "<p>I kind of agree with what is going on, but I don't really see what the conclusion should be <em>w.r.t</em> my initial point / cases where safe encapsulation can't really be offered: some things may require \"crate-global\" <code>unsafe</code>, and the lack of locality for the \"I don't misuse this <code>unsafe</code>\" property is indeed problematic, since, for instance, brittle to future updates. But not even having an <code>unsafe</code> in there would be even worse, since the situation remains the same, but now the user ought to know about it.</p>\n<p>That is, this is reminiscent of <code>cxx</code>'s <code>unsafe extern { … }</code> blocks question: it seems <em>wishful</em> to consider that the Rust code that writes the <code>unsafe extern { … }</code> is necessarily aware of the linkage situation, the one then, and the one from any potential future situation. So it's kind of a \"hypocrite <code>unsafe</code> pledge\", of sorts. Which is worse than a true \"I hereby declare I know what I am doing\" <code>unsafe</code>, I won't deny it, nor the existence of \"hypocrite <code>unsafe</code>\"-requiring APIs. But it's better than no <code>unsafe</code> at all, since that would just totally hide the idea that Bad Things™ could happen. This example, incidentally, brings us back to <code>#[no_mangle]</code> and other linker-related safety questions, which, in turn, goes back to \"there can be UB-capable APIs beyond traits / functions, and <code>unsafe_code</code> ought to lint about those\".</p>",
+        "id": 269147309,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643048439
+    },
+    {
+        "content": "<p>Well given that <em>simply declaring</em> mismatching extern entries can lead to UB in some situations even if you never call the function, then <code>extern</code> blocks (very likely) need to at some point be fixed up to be unsafe too.</p>",
+        "id": 269202364,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643078823
+    },
+    {
+        "content": "<p>To put it shortly, I think that Safe Encapsulation is nice when it's possible but when it's not then the fallback strategy is to give the programmer who builds a thing and the people who follow after a way to clearly communicate across time <strong>what knobs are full of danger</strong>.</p>\n<p>For expressions we kinda have this. <code>unsafe</code> blocks are ergonomically incomplete but they do let us accomplish the task <em>at all</em>.</p>\n<p>For non-expressions, we basically have nothing, and we should have something.</p>",
+        "id": 269202972,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643079365
+    },
+    {
+        "content": "<p>The exact nature of the \"something\" that lets us mark out that there's a big danger I'm not sure about.</p>",
+        "id": 269202999,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643079403
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224471\">Lokathor</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/unstable.20features.20deliberately.20unsafe.2Funsound/near/269202972\">said</a>:</p>\n<blockquote>\n<p>For non-expressions, we basically have nothing, and we should have something.</p>\n<p>The exact nature of the \"something\" that lets us mark out that there's a big danger I'm not sure about.</p>\n</blockquote>\n<p><span aria-label=\"100\" class=\"emoji emoji-1f4af\" role=\"img\" title=\"100\">:100:</span> totally agreed. Right now the <code>unsafe_code </code>lint is the least bad thing we can have, but I'd expect there to be <code>unsafe</code> attributes (<em>e.g.</em>, <code>#[unsafe(no_mangle)]</code>) and either <code>unsafe</code> <em>item blocks</em> (<em>e.g.</em>, <code>unsafe { impl Send for … }</code>), or <code>unsafe</code> keywords on more items (<em>e.g.</em>, <code>unsafe extern</code> —which kind of connects to the \"trusted extern\" blocks idea you've been providing).</p>",
+        "id": 269251173,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643114807
+    },
+    {
+        "content": "<p>I strongly disagree with making such a <code>unsafe_pin_internals</code> feature not available via <code>#![feature(unsafe_pin_internals)]</code>. When I debug macros, it’s sometimes useful to just compile the output of <code>cargo expand</code>. On nightly, this will politely inform me of all the necessary <code>#![feature(…)]</code> flags I need to enable, e.g. for the desugared <code>println</code>s and so on, but eventually the code <em>will compile</em> (assuming there’s no issues with things like macro hygiene stuff that <code>cargo expand</code> output cannot properly represent). It would be a terrible user experience IMO, if this approach no longer worked with code that contains the <code>pin!</code> macro somewhere.</p>\n<p>FWIW, why not make it an “incomplete feature” with the rationale that it will be “complete” once we have <code>unsafe</code> fields? If you want, as additional measures, also have/keep <code>unsafe</code> it its name and perhaps even make <code>warn(unsafe_code)</code>catch the activation of the feature.</p>",
+        "id": 269253668,
+        "sender_full_name": "Frank Steffahn",
+        "timestamp": 1643116038
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"400735\">Pointerbender</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/unstable.20features.20deliberately.20unsafe.2Funsound/near/269095359\">said</a>:</p>\n<blockquote>\n<p><a href=\"https://doc.rust-lang.org/src/core/pin.rs.html#403-410\"><code>Pin</code></a> is <code>#[repr(transparent)]</code>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[lang = </span><span class=\"s\">\"pin\"</span><span class=\"cp\">]</span><span class=\"w\"></span>\n<span class=\"cp\">#[fundamental]</span><span class=\"w\"></span>\n<span class=\"cp\">#[repr(transparent)]</span><span class=\"w\"></span>\n<span class=\"cp\">#[derive(Copy, Clone)]</span><span class=\"w\"></span>\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">struct</span> <span class=\"nc\">Pin</span><span class=\"o\">&lt;</span><span class=\"n\">P</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pointer</span>: <span class=\"nc\">P</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>in theory it can obtain the <code>pointer</code> field by <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=114a9b45bd380a516b62725f0dd2ad91\">transmuting/casting</a> it to <code>P</code> as well without the use of <code>pin_internals</code>:</p>\n<p><div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"k\">usize</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">pin</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">pin</span>::<span class=\"n\">Pin</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">a</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">pointer</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">usize</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">mem</span>::<span class=\"n\">transmute</span><span class=\"p\">(</span><span class=\"n\">pin</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"{}\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">pointer</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">pointer</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">usize</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"o\">&amp;**</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">pin</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">)};</span><span class=\"w\"></span>\n<span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"{}\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">pointer</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div><br>\n</p>\n</blockquote>\n<p>I think this is the cleanest solution.</p>",
+        "id": 269253977,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1643116190
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"280891\">@Frank Steffahn</span> thanks for pointing out the case of \"feeding back <code>cargo-expand</code>\" output; I'll replace the full deny with an <code>incomplete_feature</code> instead —as I had initially done (some reluctancy regarding <code>incomplete</code> was expressed at the time, but I hope the current discussion will convince them otherwise).</p>",
+        "id": 269291813,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643131612
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"280891\">Frank Steffahn</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/unstable.20features.20deliberately.20unsafe.2Funsound/near/269253668\">said</a>:</p>\n<blockquote>\n<p>I strongly disagree with making such a <code>unsafe_pin_internals</code> feature not available via <code>#![feature(unsafe_pin_internals)]</code>. When I debug macros, it’s sometimes useful to just compile the output of <code>cargo expand</code>. On nightly, this will politely inform me of all the necessary <code>#![feature(…)]</code> flags I need to enable, e.g. for the desugared <code>println</code>s and so on, but eventually the code <em>will compile</em> (assuming there’s no issues with things like macro hygiene stuff that <code>cargo expand</code> output cannot properly represent). It would be a terrible user experience IMO, if this approach no longer worked with code that contains the <code>pin!</code> macro somewhere.</p>\n</blockquote>\n<p>FWIW, I strongly hope we will have proper hygienic macros some day, and that <em>will</em> make this kind of \"re-injection\" impossible. macros should be able to refer to private parts <em>of the crate that defined them</em>; we currently need ugly work-arounds for that and I think those should go away long-term.<br>\nWe have the same for regular functions, so all this does is make macros a more proper citizen of the Rust ecosystem.</p>",
+        "id": 270897994,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1644164890
+    },
+    {
+        "content": "<p>I thought about that as well: if <code>pin!</code> had been properly implemented as a(n <code>opaque</code>) <code>macro</code>, then indeed reinjection would already have been impossible. The \"incompatible with itself feature\" is just a hacky way to achieve the same.</p>\n<p>That being said, the question of <code>cargo expand</code> reinjection is legitimate, imho. It leads to an interesting (but orthogonal to this topic) idea: to see if there could be a way to \"encode\" hygiene in a way that can thus be funnelled back to <code>rustc</code>; there is <code>-Zunpretty=expanded,hygiene</code>, but I'm pretty sure it still emits lossy output</p>",
+        "id": 270966982,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1644234910
+    },
+    {
+        "content": "<p>yeah, one could imagine (de)serializing the scope information... that would be grossly unsound but I guess could be useful for debugging</p>",
+        "id": 271001202,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1644250211
+    }
+]

@@ -1,0 +1,62 @@
+[
+    {
+        "content": "<p>Hi, I need to implement Send for a structure which is not send. <br>\nThe struct should be readonly, so I don't really care if multiple threads access the same memory at the same time, but I don't find any appropriate way to express that. <br>\nwith 1.57, this implementation worked well</p>\n<div class=\"codehilite\"><pre><span></span><code>/// it is readonly so thread-safe\n#[derive(Clone)]\npub struct ReadonlyDocument {\n    /// the parsed document [select::document::Document]\n    doc: Document\n    /// the raw string content\n    content: String,\n}\n\nunsafe impl Send for ReadonlyDocument {}\nunsafe impl Sync for ReadonlyDocument {}\n</code></pre></div>\n<p>but rust clippy 1.58 panics saying a non-send field in a struct make is non send, what I find perfectly legit. <br>\nI tried to wrap my field in a mutex/arc, and the same error occurs : </p>\n<div class=\"codehilite\"><pre><span></span><code>/// it is readonly so thread-safe\n#[derive(Clone)]\npub struct ReadonlyDocument {\n    /// the parsed document [select::document::Document]\n    doc: std::sync::Arc&lt;std::sync::Mutex&lt;Document&gt;&gt;,\n    /// the raw string content\n    content: String,\n}\n\nunsafe impl Send for ReadonlyDocument {}\nunsafe impl Sync for ReadonlyDocument {}\n</code></pre></div>",
+        "id": 268814621,
+        "sender_full_name": "regis portalez",
+        "timestamp": 1642756736
+    },
+    {
+        "content": "<ol>\n<li>You can allow the clippy lint.</li>\n<li>You shouldn't do this. The reason it doesn't implement Send is because it uses non-atomic reference counting internally, so cloning it from multiple threads causes a data race which is UB. <a href=\"https://docs.rs/tendril/0.4.2/src/tendril/tendril.rs.html#86\">https://docs.rs/tendril/0.4.2/src/tendril/tendril.rs.html#86</a></li>\n</ol>",
+        "id": 268815664,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1642757293
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"133247\">bjorn3</span> <a href=\"#narrow/stream/122651-general/topic/readonly.20struct.20send/near/268815664\">said</a>:</p>\n<blockquote>\n<ol>\n<li>You can allow the clippy lint.</li>\n<li>You shouldn't do this. The reason it doesn't implement Send is because it uses non-atomic reference counting internally, so cloning it from multiple threads causes a data race which is UB. <a href=\"https://docs.rs/tendril/0.4.2/src/tendril/tendril.rs.html#86\">https://docs.rs/tendril/0.4.2/src/tendril/tendril.rs.html#86</a></li>\n</ol>\n</blockquote>\n<p>hmmm apparently, rust 1.58.1 disables this clippy warning.</p>",
+        "id": 268816963,
+        "sender_full_name": "regis portalez",
+        "timestamp": 1642757937
+    },
+    {
+        "content": "<p>that lint had too many false positives</p>",
+        "id": 268817952,
+        "sender_full_name": "Pietro Albini",
+        "timestamp": 1642758458
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust-clippy/issues/8045\">https://github.com/rust-lang/rust-clippy/issues/8045</a></p>",
+        "id": 268818053,
+        "sender_full_name": "Pietro Albini",
+        "timestamp": 1642758503
+    },
+    {
+        "content": "<p>Hello, I think I may have spotted a bug (cargo related) - what's the best place to raise it?<br>\nI think it's checking the wrong directory for dependencies on cross-compiles (target/debug/deps rather than target/&lt;architecture&gt;/debug/deps)  resulting in unnecessarily rebuilding.</p>",
+        "id": 268822251,
+        "sender_full_name": "Marc Brevoort",
+        "timestamp": 1642760586
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"436706\">regis portalez</span> <a href=\"#narrow/stream/122651-general/topic/readonly.20struct.20send/near/268814621\">said</a>:</p>\n<blockquote>\n<p>Hi, I need to implement Send for a structure which is not send. <br>\nThe struct should be readonly, so I don't really care if multiple threads access the same memory at the same time, </p>\n</blockquote>\n<p>\"multiple threads access the same memory at the same time\" is a property checked by being <code>Sync</code>, not <code>Send</code>. <code>Send</code> is about unique access to a type being able to be performed from a different thread where the instance was originally created. This limitation is most often caused by one of the following things:</p>\n<ul>\n<li>the instance is (potentially) a clone of a (shared) reference / handle to a non-<code>Sync</code> type (<em>e.g.</em>, <code>T = &amp;NotSync</code> or <code>T = Arc&lt;NotSync&gt;</code>). In that case sending (an owned) instance of <code>T</code> could lead to multi-threaded shared access to the <code>NonSync</code> type, which is not allowed.</li>\n<li>the instance may involve (global) thread-local storage (this is, alas, a too common pattern in the C world, used to have different entities communicate / share state with one another). This means that if the entity changes, mid-life, of thread, then all this (global) thread-local state is suddenly not the one expected.</li>\n</ul>\n<p>So, <code>Sync</code> is the more \"intuitive\" thread-safety concept, and one which indeed can be tackled by <code>Mutex</code>-ing stuff (<code>Arc</code>, on the other hand, won't help make things <em>more thread-safe</em>; it just allows <em>sharing</em> without losing <code>: 'static</code>.</p>\n<p><code>Send</code>, on the other hand, in the more general case, <strong>has no \"cure\"</strong>. If something is thread-bound, then you can't move it to another thread (in the case where you suspect that, <em>at runtime</em>, there will be no thread-crossing —<em>e.g.</em>, much like <code>RefCell</code> is a dynamic tool againt \"overlapping <code>&amp;mut</code>\"— there is <a href=\"https://docs.rs/send_wrapper\">https://docs.rs/send_wrapper</a> as a dynamic tool to which you would assert that no thread-crossing ends up happening (betting a <code>panic!</code> in that regard); but the panic-on-misusage makes this tool a way worse idea than it may initially appear).</p>\n<p><span class=\"user-mention silent\" data-user-id=\"436706\">regis portalez</span> <a href=\"#narrow/stream/122651-general/topic/readonly.20struct.20send/near/268814621\">said</a>:</p>\n<blockquote>\n<p>but I don't find any appropriate way to express that. </p>\n</blockquote>\n<p>There is, however, one useful —albeit expensive— pattern: if you imagine an instance being thread-bound as an inmate being locked in a cell, then yeah, you can't have them escape the cell. But you can still \"visit\" them, <em>talk</em> to them. So there is this pattern of \"create a jail\" (start spinning a dedicated thread), where you shall lock the inmate (where you shall <em>create</em> the instance), so as to, later on, and from anywhere, <em>talk to it</em> (<a href=\"https://docs.rs/diplomatic-bag/0.2.0/diplomatic_bag/struct.DiplomaticBag.html#method.and_then\">send \"usage queries\" (usage closures) to it</a>).</p>\n<p>This pattern has already been written, and is thus available at:</p>\n<ul>\n<li><a href=\"https://docs.rs/diplomatic_bag\">https://docs.rs/diplomatic_bag</a></li>\n</ul>\n<p>With it, you have a genuine \"send wrapper\" (the diplomatic bag), which is <code>Send</code> even if the inner value isn't, at the cost of having <a href=\"https://docs.rs/diplomatic-bag/0.2.0/diplomatic_bag/struct.DiplomaticBag.html#method.and_then\">operations on the value take the form of a closure</a>, and, at runtime / implementation-wise, involve message-passing and synchronization with that dedicated thread.</p>\n<p>My only criticism regarding that crate is that it doesn't currently use a thread pool: just the one thread. This means that if you have multiple <code>DiplomaticBag</code> instances, there will be unnecessary contention (back to our parallel: it's as if the jail only had <em>one</em> cell, and thus each \"inmate visitor\" requires exclusive access, preventing visits to \"other inmates\" from being done simultaneously. If it were me, I'd give that jail some funds so that they can get some extra cells! <span aria-label=\"big smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"big smile\">:big_smile:</span>)</p>",
+        "id": 268827605,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1642763654
+    },
+    {
+        "content": "<p>thanks  everyone</p>",
+        "id": 268851177,
+        "sender_full_name": "regis portalez",
+        "timestamp": 1642776069
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"473259\">@Marc Brevoort</span> you should create a new topic for that</p>",
+        "id": 268854475,
+        "sender_full_name": "The 8472",
+        "timestamp": 1642777513
+    },
+    {
+        "content": "<ol>\n<li>You can allow the clippy lint.</li>\n<li>You shouldn't do this. The reason it doesn't implement Send is because it uses non-atomic reference counting internally, so cloning it from multiple threads causes a data race which is UB. <a href=\"https://docs.rs/tendril/0.4.2/src/tendril/tendril.rs.html#86\">https://docs.rs/tendril/0.4.2/src/tendril/tendril.rs.html#86</a></li>\n</ol>",
+        "id": 268872848,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1642785274
+    }
+]

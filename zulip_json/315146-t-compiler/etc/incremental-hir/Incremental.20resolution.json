@@ -1,0 +1,140 @@
+[
+    {
+        "content": "<p>Once we get incremental HIR, we will have to progress towards incremental name resolution.  A first step is probably to split up resolution.  There are two axes: by expansion vs by definition.<br>\nIn the current state, splitting up late resolution by definition would probably easiest, and give time to design an incremental resolver.  The question would be: can we compose a speciative \"early\" resolution in TypeNS and ValueNS, corrected by a late resolution which has no access to <code>Resolver</code>?<br>\nWhat would you recommend <span class=\"user-mention\" data-user-id=\"123856\">@Vadim Petrochenkov</span>?</p>",
+        "id": 275871058,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1647643142
+    },
+    {
+        "content": "<p>I'm not sure what do you mean.</p>\n<ul>\n<li>What is \"splitting by definition\"?</li>\n<li>Which part of the work do you plan to do without accessing <code>Resolver</code>? To resolve a path in <code>TypeNS</code> you need a significant part of data from resolver, especially if the current diagnostics are preserved.</li>\n</ul>",
+        "id": 275896540,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1647676398
+    },
+    {
+        "content": "<p>Right now, late resolution walks the whole crate in one go.  The idea would be to late-resolve each item independently.  However, the <code>Resolver</code> is not compatible with the incremental engine, because it has mutable state everywhere.  One way out would be to separate the part that requires a proper <code>Resolver</code> (for instance paths in <code>TypeNS</code>) from a part which does not (for instance locals).</p>",
+        "id": 275899765,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1647681252
+    },
+    {
+        "content": "<blockquote>\n<p>for instance locals</p>\n</blockquote>\n<p>If we have a single-segment path <code>x</code> that may resolve to a local variable, we still need to go through blocks from inside to outside to find the closest definition of <code>x</code> (whether a local variable or not).<br>\nSo we can't just resolve <code>x</code> before the locals are available (res1, needs <code>Resolver</code>), and then resolve <code>x</code> as a local variable only (res2, no <code>Resolver</code> needed), and then fall back from res2 to res1 if necessary.<br>\nLocals and non-locals either need to be walked in a single pass (needs <code>Resolver</code>), or you need to keep the resolution positions in some form to choose from res1 and res2 correctly.</p>",
+        "id": 275906203,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1647690455
+    },
+    {
+        "content": "<p>One of the most annoying things is that late and early resolutions share a lot of common logic (which is good, that allows to avoid a huge amount of duplication and possible mismatches), but that common logic will modify the resolver (populate its structures) if run early and won't modify the resolver if run late.</p>",
+        "id": 275906529,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1647690802
+    },
+    {
+        "content": "<p>I wonder which parts of the resolver are actually mutable during late resolution (modulo resolver outputs).<br>\nMaybe we can try splitting <code>Resolver</code> into <code>ResolverEarly</code> and (much less mutable) <code>ResolverLate</code> and making all its methods generic on some set of functions that will modify <code>ResolverEarly</code> when run early and panic when run late (with <code>ResolverLate</code> as <code>self</code>).</p>",
+        "id": 275906709,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1647691005
+    },
+    {
+        "content": "<p>When we're talking about incremental resolution, what does that actually mean? Resolve modules without resolving inside items first? Then resolve item bodies individually?</p>",
+        "id": 275907500,
+        "sender_full_name": "oli",
+        "timestamp": 1647691952
+    },
+    {
+        "content": "<p>Reusing as much of the results of resolution when compiling again in incremental mode I think.</p>",
+        "id": 275908255,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1647693027
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124288\">@oli</span> The end-goal is end-to-end queries, with incremental parsing and incremental macro expansion.  To get there, I chose to progress from lowering towards the front-end.  The next step is then to refactor all that happens in <code>Resolver</code> into queries.  This is a large task, and the current <code>Resolver</code> has a lot of mutable state, so is not incremental-friendly.</p>\n<p>Late resolution is a large pass that walks the whole crate.  My objective is to split it into:</p>\n<ul>\n<li>a whole-crate pass that uses <code>Resolver</code>;</li>\n<li>an item-local pass that only accesses resolver outputs, and could be made a query.</li>\n</ul>\n<p>Why item-local? It seems the most logical barrier, which allows to treat an impl-block as a whole (to handle stuff like <code>Self</code>), while being able to ignore what happens elsewhere.  The global influences (like types or functions) should be done by the whole-crate pass.</p>\n<p>My high-level view of the resolution algorithm is a mix of early resolution (ie. the same algorithm that macro resolution uses, which accounts for modules), and of a simpler lexical resolution (ie. walking scopes to find locals).  However, both are very intertwined, and splitting them up is very difficult.</p>\n<p>In your example <span class=\"user-mention\" data-user-id=\"123856\">@Vadim Petrochenkov</span>, my vision was:</p>\n<ol>\n<li>try resolving <code>x</code> using the early algorithm and a simplified lexical algorithm (don't account for locals, labels...), and stash the result;</li>\n<li>try to resolve <code>x</code> using the full lexical algorithm, and chose the better resolution between the stashed one and the new one.</li>\n</ol>\n<p>I wonder how much of the lexical algorithm we need to keep to have step 1 working properly.  <code>use</code> statements in a function body will definitely account for something, but isn't that already handled for macro resolution?</p>",
+        "id": 275932667,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1647728026
+    },
+    {
+        "content": "<blockquote>\n<p>I wonder how much of the lexical algorithm we need to keep to have step 1 working properly.</p>\n</blockquote>\n<p>Most of it, if we are talking about the top-level algorithm.<br>\nThe simplified algorithm is  \"search in all places from <code>enum Scope</code>\" (<code>fn visit_scopes</code>, <code>fn early_resolve_ident_in_lexical_scope</code>), and the full algorithm is \"search in all places from <code>enum Scope</code> and in local variables\" (<code>fn resolve_ident_in_lexical_scope</code>, currently has some bugs in corner cases).</p>",
+        "id": 275952340,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1647759687
+    },
+    {
+        "content": "<p>I'd expect performing all the late resolution in incremental way a more promising alternative than resolving just locals incrementally.<br>\nIf we split current <code>Resolver</code> into <code>ResolverEarly</code> and <code>ResolverLate</code> implementing a common <code>ResolverTrait</code> interface, then I'd expect <code>ResolverLate</code> to be mostly immutable, except for 1) the outputs that it builds 2) maybe some caches like external modules that are loaded lazily on demand.</p>",
+        "id": 275952601,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1647760262
+    },
+    {
+        "content": "<blockquote>\n<p>maybe some caches like external modules ...</p>\n</blockquote>\n<p>Ah, and new crates in cstore, which are also loaded on demand, that may be more annoying.</p>",
+        "id": 275952691,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1647760414
+    },
+    {
+        "content": "<p>External modules are loaded as part of macro expansion I believe.</p>",
+        "id": 275957796,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1647768945
+    },
+    {
+        "content": "<p>If some path resolved during late resolution like type <code>a::b::c::Type</code> touches a module from other crate that wasn't touched before, then the module will be loaded during late resolution (see how <code>ModuleData::populate_on_access</code> is used).</p>",
+        "id": 275960614,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1647773215
+    },
+    {
+        "content": "<p>Ok, so I understand that migrating layer by layer will be hard.  Besides the outputs, is there a lot of mutable state in the resolver.  Is there a documentation of which is used where and for what purpose?  I mean: distinguish outputs from memorization from transitory state.</p>",
+        "id": 276737164,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1648316608
+    },
+    {
+        "content": "<blockquote>\n<p>Is there a documentation of which is used where and for what purpose?</p>\n</blockquote>\n<p>Of course not!</p>",
+        "id": 276744051,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1648326244
+    },
+    {
+        "content": "<p>The outputs are the easiest to recognize though because they all have the same names as in <code>ResolverOutputs</code>.</p>",
+        "id": 276744068,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1648326314
+    },
+    {
+        "content": "<p>I feel like I need to dive right into the resolver to understand it better.  Do you have any \"I'd be great if\" refactoring to give me as an exercise?</p>",
+        "id": 276751810,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1648337133
+    },
+    {
+        "content": "<p>It'd be great if all the diagnostic-reporting code lived in <code>compiler\\rustc_resolve\\src\\diagnostics.rs</code> and <code>compiler\\rustc_resolve\\src\\late\\diagnostics.rs</code>.</p>",
+        "id": 276752860,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1648338602
+    },
+    {
+        "content": "<p>I recently did a public review of the rustc_resolve code in <a href=\"#narrow/stream/305296-rustc-reading-club/topic/resolver.20presentation.20from.20vadim.20petrochenkov\">https://rust-lang.zulipchat.com/#narrow/stream/305296-rustc-reading-club/topic/resolver.20presentation.20from.20vadim.20petrochenkov</a> but you'll probably have to set the speed to 2x for it to become watchable.</p>",
+        "id": 276752940,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1648338710
+    },
+    {
+        "content": "<p>Here is a proposal for a battle plan:</p>\n<ol>\n<li>wrap all mutable state in <code>Resolver</code> inside <code>RefCell</code>s, and take the resolver by non-mutable reference everywhere;</li>\n<li>wrap the resolver as a trait object inside the <code>TyCtxt</code>, with appropriate plumbing for accesses to the <code>CrateStore</code> and <code>Definitions</code>, and implement <code>resolutions</code> query that drops the reference to the resolver;</li>\n<li>start querifying passes.</li>\n</ol>\n<p>These queries' results will replace the <code>RefCell</code>s we put inside the resolver. All these queries are <code>eval_always</code> and forced by <code>resolutions</code> before dropping the resolver. The first passes to querify are probably the visibilities, access levels, and late resolution.</p>\n<p>From here, the plan get a bit blurrier:</p>\n<ol start=\"4\">\n<li>integrate loading new crates and loading modules from metadata into the query system;</li>\n<li>make the macro expansion code recursive and pull-based;</li>\n<li>make querify early resolution and macro expansion, keyed on the <code>LocalExpnId</code>;</li>\n<li>remove the <code>resolutions</code> query, remove <code>Resolver, and stop releasing </code>ResolverArenas` memory.</li>\n</ol>",
+        "id": 277431722,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1648825497
+    },
+    {
+        "content": "<p>In your public review, you mentionned that late resolution could be refactored to operate per-module.  Do you know if somebody has started doing it yet?</p>",
+        "id": 277432164,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1648825662
+    },
+    {
+        "content": "<blockquote>\n<p>Do you know if somebody has started doing it yet?</p>\n</blockquote>\n<p>I'm not aware of any such work.</p>",
+        "id": 277446569,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1648831678
+    }
+]

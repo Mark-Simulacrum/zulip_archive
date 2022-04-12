@@ -1,0 +1,416 @@
+<html>
+<head><meta charset="utf-8"><title>Miri: supporting more code vs detecting more bugs · t-lang/wg-unsafe-code-guidelines · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/index.html">t-lang/wg-unsafe-code-guidelines</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html">Miri: supporting more code vs detecting more bugs</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="169203396"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203396" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203396">(Jun 28 2019 at 07:10)</a>:</h4>
+<p>We hit a spot in Miri where we have the choice between either supporting more (real) code or finding more (real) bugs. My plan is to offer both modes with a flag, but realistically most people are going to use the default mode, so what should that be?</p>
+<p>The following program is fine:</p>
+<div class="codehilite"><pre><span></span><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="k">u8</span><span class="p">;</span><span class="w"> </span><span class="mi">3</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">base_addr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Make sure we cast an even address to &amp;mut u16</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">u16_ref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">base_addr</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">base_addr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u16</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="o">*</span><span class="p">((</span><span class="n">base_addr</span><span class="o">+</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u16</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="o">*</span><span class="n">u16_ref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">x</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+<p>But the following program is UB if you have "bad luck" and the alignment is not what you guessed:</p>
+<div class="codehilite"><pre><span></span><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="p">[</span><span class="mi">0</span><span class="k">u8</span><span class="p">;</span><span class="w"> </span><span class="mi">3</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">base_addr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">_</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Just hope that base_addr is even.</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">u16_ref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="o">*</span><span class="p">(</span><span class="n">base_addr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u16</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="o">*</span><span class="n">u16_ref</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">x</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+<p>The problem is, Miri cannot really know if the user did their job and checked alignment before casting, or if they were just lucky.</p>
+<p>What Miri <em>can</em> do is disallow exploiting "extra alignment" that arises just because of where the base addresses have been. This is weird, but the upshot is that Miri can have two modes, where the "support more code mode" will always accept the first program and sometimes accept the second program; and the "find more bugs mode" will always reject both programs.</p>
+<p>Which mode, do you think, should be the default? Cc <span class="user-mention" data-user-id="116155">@Jake Goulding</span> <span class="user-mention" data-user-id="124288">@oli</span> <span class="user-mention" data-user-id="126931">@centril</span> <span class="user-mention" data-user-id="132920">@gnzlbg</span>  and anyone else</p>
+
+
+
+<a name="169203533"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203533" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203533">(Jun 28 2019 at 07:14)</a>:</h4>
+<p>miri is a dynamic checker, and every dynamic checker has this problem</p>
+
+
+
+<a name="169203538"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203538" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203538">(Jun 28 2019 at 07:14)</a>:</h4>
+<p>Sure, but how does that help answer this question?</p>
+
+
+
+<a name="169203554"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203554" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203554">(Jun 28 2019 at 07:15)</a>:</h4>
+<p>All other dynamic checkers accept the code if the access is correct, and reject it if it isn't (e.g. because the alignment doesn't hold)</p>
+
+
+
+<a name="169203563"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203563" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203563">(Jun 28 2019 at 07:15)</a>:</h4>
+<p>running the checker twice, can accept the code the first run, and reject it the second run</p>
+
+
+
+<a name="169203567"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203567" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203567">(Jun 28 2019 at 07:15)</a>:</h4>
+<p>(that can happen under ASan, for example)</p>
+
+
+
+<a name="169203622"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203622" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203622">(Jun 28 2019 at 07:16)</a>:</h4>
+<p>For the defaults, we have to balance having false positives  vs not catching all potential bugs</p>
+
+
+
+<a name="169203626"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203626" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203626">(Jun 28 2019 at 07:16)</a>:</h4>
+<p>or at least not catching them in one single run</p>
+
+
+
+<a name="169203647"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203647" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203647">(Jun 28 2019 at 07:17)</a>:</h4>
+<p>I prefer having zero false positives, so that if miri says you have a bug, then you are always sure you have a bug</p>
+
+
+
+<a name="169203704"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203704" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203704">(Jun 28 2019 at 07:18)</a>:</h4>
+<p>The option with adding a flag that's more "strict" but might come with false positives sounds good as an extension</p>
+
+
+
+<a name="169203716"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203716" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203716">(Jun 28 2019 at 07:18)</a>:</h4>
+<p>A different extension would be for miri to randomize address of memory allocations (of both the stack and the heap)</p>
+
+
+
+<a name="169203725"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203725" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203725">(Jun 28 2019 at 07:19)</a>:</h4>
+<p>so that you can "fuzz" your program with miri, getting a different memory address each time, hopefully revealing the bug</p>
+
+
+
+<a name="169203802"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169203802" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> gnzlbg <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169203802">(Jun 28 2019 at 07:20)</a>:</h4>
+<p>e.g. in the heap miri could give you random access, and for the stack, it could insert random padding between allocations</p>
+
+
+
+<a name="169205225"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169205225" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169205225">(Jun 28 2019 at 07:51)</a>:</h4>
+<blockquote>
+<p>I prefer having zero false positives, so that if miri says you have a bug, then you are always sure you have a bug</p>
+</blockquote>
+<p>the message would not say "this is a bug", it would say "this operation is not supported in your current config, enable this flag to support it but notice that that might introduce false negatives"</p>
+
+
+
+<a name="169205285"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169205285" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169205285">(Jun 28 2019 at 07:52)</a>:</h4>
+<p>If we only had to consider miri being run locally I'd lean fairly strongly towards "default mode should avoid false negatives", because we can always tell people to enable more flags to avoid false positives -- but not the other way around</p>
+
+
+
+<a name="169205293"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169205293" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169205293">(Jun 28 2019 at 07:52)</a>:</h4>
+<p>however, that doesn't work in playground...</p>
+
+
+
+<a name="169205313"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169205313" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169205313">(Jun 28 2019 at 07:52)</a>:</h4>
+<blockquote>
+<p>A different extension would be for miri to randomize address of memory allocations (of both the stack and the heap)</p>
+</blockquote>
+<p>oh it will totally do that</p>
+
+
+
+<a name="169205332"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169205332" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169205332">(Jun 28 2019 at 07:53)</a>:</h4>
+<p>also miri doesnt do "stack" allocation. all allocations are treated equal.</p>
+
+
+
+<a name="169237164"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169237164" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169237164">(Jun 28 2019 at 15:59)</a>:</h4>
+<p>I would favor detecting more code with the appropriate message</p>
+
+
+
+<a name="169237178"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169237178" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169237178">(Jun 28 2019 at 15:59)</a>:</h4>
+<p>or at least emit a warning</p>
+
+
+
+<a name="169237198"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169237198" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169237198">(Jun 28 2019 at 15:59)</a>:</h4>
+<p>supporting more code with a warning is also a reasonable compromise imo</p>
+
+
+
+<a name="169237304"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169237304" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169237304">(Jun 28 2019 at 16:00)</a>:</h4>
+<p>the point of miri being not to blindly rubber stamp but to make you think more</p>
+
+
+
+<a name="169238799"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169238799" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169238799">(Jun 28 2019 at 16:14)</a>:</h4>
+<p>I would go for MIRI never producing false positives. That's what sets ASAN apart from the rest: if it complains, you know for sure you have a problem. Most of its alternatives (Valgrind, DUMA) have false positives and that makes them unusable in projects where your dependencies that are outside your direct control trigger false positives.</p>
+
+
+
+<a name="169238899"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169238899" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169238899">(Jun 28 2019 at 16:15)</a>:</h4>
+<p>Treating that as a warning by default sounds like a good idea</p>
+
+
+
+<a name="169240971"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169240971" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169240971">(Jun 28 2019 at 16:40)</a>:</h4>
+<blockquote>
+<p>supporting more code with a warning is also a reasonable compromise imo</p>
+</blockquote>
+<p>we don't have a good way to warn during execution. maybe we should, but I am not sure what that would look like.</p>
+
+
+
+<a name="169240997"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169240997" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169240997">(Jun 28 2019 at 16:41)</a>:</h4>
+<p>maybe we can even re-use the existing linting stuff for that?^^</p>
+
+
+
+<a name="169241016"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241016" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241016">(Jun 28 2019 at 16:41)</a>:</h4>
+<p>in general though, that output gets mixed with the program output, which seems messy</p>
+
+
+
+<a name="169241042"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241042" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241042">(Jun 28 2019 at 16:41)</a>:</h4>
+<p>and the warning would be one that lots of false positives, that's the entire problem</p>
+
+
+
+<a name="169241045"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241045" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241045">(Jun 28 2019 at 16:41)</a>:</h4>
+<p>Just put it on stderr and prefix it with [MIRI] and you're good as far as un-mixing it goes</p>
+
+
+
+<a name="169241097"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241097" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241097">(Jun 28 2019 at 16:42)</a>:</h4>
+<p>not sure if we can make the rustc diagnostic printing stuff do that</p>
+
+
+
+<a name="169241103"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241103" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241103">(Jun 28 2019 at 16:42)</a>:</h4>
+<p>(which would let us point at spans etc for free)</p>
+
+
+
+<a name="169241124"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241124" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241124">(Jun 28 2019 at 16:42)</a>:</h4>
+<p>In that case print only once that miri has more to say and provide a key to print the entire thing</p>
+
+
+
+<a name="169241147"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241147" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241147">(Jun 28 2019 at 16:43)</a>:</h4>
+<p>but anyway this is useful feedback, thanks! unfortunately it's also conflicting feedback. ;)</p>
+
+
+
+<a name="169241259"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241259" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241259">(Jun 28 2019 at 16:44)</a>:</h4>
+<p>I think the information about the situation presented to the user can be summarized as "MIRI has detected behavior that might depend on memory addresses chosen at runtime. You may need to re-run it several times to detect an error." which is a single print and should only be done once</p>
+
+
+
+<a name="169241474"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241474" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241474">(Jun 28 2019 at 16:47)</a>:</h4>
+<p>so you think pointing to a span (where in the code this happened) is not useful?</p>
+
+
+
+<a name="169241557"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241557" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241557">(Jun 28 2019 at 16:48)</a>:</h4>
+<p><span class="user-mention" data-user-id="120791">@RalfJ</span>  <code>struct_span_warn</code> instead of <code>struct_span_err</code> basically</p>
+
+
+
+<a name="169241574"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241574" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241574">(Jun 28 2019 at 16:48)</a>:</h4>
+<p>Pointing to a span is useful, definitely.</p>
+
+
+
+<a name="169241602"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241602" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241602">(Jun 28 2019 at 16:49)</a>:</h4>
+<blockquote>
+<p>I think the information about the situation presented to the user can be summarized as "MIRI has detected behavior that might depend on memory addresses chosen at runtime. You may need to re-run it several times to detect an error." which is a single print and should only be done once</p>
+</blockquote>
+<p>that's a very nice way to frame this. not sure how to apply this to other things one might want to downgrade to a warning though, such as validation failures -- those are definitely UB but downgrading can allow execution to continue</p>
+
+
+
+<a name="169241603"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241603" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241603">(Jun 28 2019 at 16:49)</a>:</h4>
+<p>The rustc diagnostics framework handles errors and warnings very symmetrically</p>
+
+
+
+<a name="169241942"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169241942" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169241942">(Jun 28 2019 at 16:53)</a>:</h4>
+<p>I guess from everything I know about <span class="user-mention" data-user-id="126931">@centril</span> and <span class="user-mention" data-user-id="127617">@Shnatsel</span> I shouldnt be surprised that I got quick, definite and contradicting answers to which mode (fewer false positives or fewer false negatives) should be the default. ;)</p>
+
+
+
+<a name="169242095"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169242095" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169242095">(Jun 28 2019 at 16:55)</a>:</h4>
+<p>Warnings with weasel words sounds like a way to breach the impasse ^^</p>
+
+
+
+<a name="169242136"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169242136" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169242136">(Jun 28 2019 at 16:56)</a>:</h4>
+<p>lots of "possibly"</p>
+
+
+
+<a name="169242147"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169242147" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169242147">(Jun 28 2019 at 16:56)</a>:</h4>
+<p>true that</p>
+
+
+
+<a name="169242298"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169242298" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169242298">(Jun 28 2019 at 16:58)</a>:</h4>
+<p>ASAN aborts as soon as it finds something is definitely wrong. I have only wanted to circumvent that behavior once, and my use case might have been a bit crazy.</p>
+
+
+
+<a name="169242310"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169242310" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169242310">(Jun 28 2019 at 16:58)</a>:</h4>
+<p>This makes for a very simple user interface, and chains nicely with other tools.</p>
+
+
+
+<a name="169242726"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169242726" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169242726">(Jun 28 2019 at 17:04)</a>:</h4>
+<p>hm. other people did ask for "suppression" support in Miri though. but maybe that's a niche use case.</p>
+
+
+
+<a name="169242882"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169242882" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169242882">(Jun 28 2019 at 17:05)</a>:</h4>
+<p>FWIW asan lets you suppress certain checks, like "one definition rule violation" check. That seems to be a C++ only thing, and sometimes complains about Rust code for whatever reason, so I just suppress it.</p>
+
+
+
+<a name="169243572"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169243572" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169243572">(Jun 28 2019 at 17:13)</a>:</h4>
+<p><span class="user-mention" data-user-id="127617">@Shnatsel</span> you mentioned above "run miri multiple times", so you think it is reasonable that this might not be deterministic? we had some discussion about this in <a href="https://github.com/rust-lang/miri/issues/785" target="_blank" title="https://github.com/rust-lang/miri/issues/785">https://github.com/rust-lang/miri/issues/785</a></p>
+
+
+
+<a name="169243627"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169243627" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169243627">(Jun 28 2019 at 17:13)</a>:</h4>
+<p>my reaction to that was "maybe we should make <code>cargo miri test</code> without extra flags have a fixed seed"</p>
+
+
+
+<a name="169243658"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169243658" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169243658">(Jun 28 2019 at 17:13)</a>:</h4>
+<p>but then the warning above would have to be reworded to "run Miri multiple times with different seeds"</p>
+
+
+
+<a name="169243805"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169243805" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169243805">(Jun 28 2019 at 17:15)</a>:</h4>
+<p>I'd prefer to have it deterministic if possible. Using different seeds sounds like a way better idea.</p>
+
+
+
+<a name="169243958"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169243958" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169243958">(Jun 28 2019 at 17:16)</a>:</h4>
+<p>kk</p>
+
+
+
+<a name="169243973"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169243973" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169243973">(Jun 28 2019 at 17:17)</a>:</h4>
+<p>I'm kind of used to the fact that deterministic execution is not really achievable, but for an interpreter such as MIRI it could actually be possible, and that's great</p>
+
+
+
+<a name="169243999"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169243999" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169243999">(Jun 28 2019 at 17:17)</a>:</h4>
+<p>I'd take deterministic execution over non-deterministic any day, all other things being equal</p>
+
+
+
+<a name="169244019"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169244019" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169244019">(Jun 28 2019 at 17:17)</a>:</h4>
+<p>currently Miri doesnt support any communication with the outside world so its even fairly easy</p>
+
+
+
+<a name="169244154"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169244154" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169244154">(Jun 28 2019 at 17:19)</a>:</h4>
+<p>my longer-term plan is that we will eventually allow opening files and such, and then of course its not deterministic any more. then when the program does <code>getrandom</code> we can also use OS randomness. (we'll still use a seed for our own non-determinism though, such as allocations.) but we can have a flag like <code>-Zmiri-isolate</code> that would turn off all of that communication and re-route <code>getrandom</code> to our own pseudo-random RNG.</p>
+
+
+
+<a name="169729516"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169729516" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169729516">(Jul 05 2019 at 19:01)</a>:</h4>
+<p><span class="user-mention" data-user-id="127617">@Shnatsel</span> <span class="user-mention" data-user-id="126931">@centril</span> see <a href="https://github.com/rust-lang/rust/issues/62420" target="_blank" title="https://github.com/rust-lang/rust/issues/62420">https://github.com/rust-lang/rust/issues/62420</a> for an issue closely related to this discussion (about being able to reliably detect misaligned pointer accesses)</p>
+
+
+
+<a name="169731009"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/169731009" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Shnatsel <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#169731009">(Jul 05 2019 at 19:29)</a>:</h4>
+<p>We can also take a third option: symbolic execution in MIRI</p>
+
+
+
+<a name="171268270"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/171268270" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ehsan M. Kermani <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#171268270">(Jul 19 2019 at 15:42)</a>:</h4>
+<p>(deleted)</p>
+
+
+
+<a name="171268500"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri%3A%20supporting%20more%20code%20vs%20detecting%20more%20bugs/near/171268500" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ehsan M. Kermani <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/Miri.3A.20supporting.20more.20code.20vs.20detecting.20more.20bugs.html#171268500">(Jul 19 2019 at 15:45)</a>:</h4>
+<p>(deleted)</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

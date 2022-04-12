@@ -1,0 +1,96 @@
+<html>
+<head><meta charset="utf-8"><title>Fixing #92804 · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html">Fixing #92804</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="268217554"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Fixing%20%2392804/near/268217554" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html#268217554">(Jan 17 2022 at 01:09)</a>:</h4>
+<p><span class="user-mention" data-user-id="248906">@cjgillot</span> : <a href="https://github.com/rust-lang/rust/issues/92804">#92804</a> is actually not correct, it fails on</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="c1">// check-pass</span>
+
+<span class="cp">#![warn(rust_2021_incompatible_closure_captures)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Foo</span><span class="p">(</span><span class="n">Bar</span><span class="p">);</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Goo</span><span class="p">(</span><span class="n">Foo</span><span class="p">);</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Bar</span><span class="p">(</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Goo</span><span class="o">&gt;</span><span class="p">);</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Foo</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">bar</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">v</span>: <span class="nc">Bar</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Bar</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="o">||</span><span class="w"> </span><span class="n">v</span><span class="p">)()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+</code></pre></div>
+<p>To explain what is going on: The <code>adt_components</code> closure takes an ADT and returns the list of "subtypes" (not the type theory kind) that need to not have (possibly significant) drop glue in order for the ADT to not have significant drop glue. The returned types are basically either the fields (after a <code>.subst()</code> call) or the generic args. Importantly, in general we are allowed to do circular reasoning here. In the example above, the list of types that we look to prove don't need a significant drop changes like <code>[Bar] -&gt; [Vec&lt;Goo&gt;] -&gt; [Goo] -&gt; [Foo] -&gt; [Bar]</code>, at which point we should report that <code>Bar</code> does not need significant drop. The way this is implemented is via the <code>seen_tys</code> set, which stores all the types we've seen and can circularly assume will report that they don't need a drop, as long as everything else does too.</p>
+<p>In <a href="https://github.com/rust-lang/rust/issues/90845">#90845</a> , the steps shown above were allowed to go through the query system which helped greatly with perf because we can cut that chain short if the question had already been answered for eg <code>Goo</code>. The problem is that blindly recursing through the query system is going to cause issues with cycles. The patch up in the PR right now doesn't actually address this correctly, it just fixes some of the cases. I can see two ways to resolve this:</p>
+<ol>
+<li>Get the query system to help out here. If there is some way for me to ask "run this query, and if it would cause a query cycle report back and let me know" that would be perfect.</li>
+<li>Revert <a href="https://github.com/rust-lang/rust/issues/90845">#90845</a></li>
+</ol>
+
+
+
+<a name="268269122"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Fixing%20%2392804/near/268269122" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html#268269122">(Jan 17 2022 at 13:19)</a>:</h4>
+<p>Actually, I don't really see how to make option 1 work above. Maybe someone knows some query system tricks I don't, but if not then probably <a href="https://github.com/rust-lang/rust/issues/90845">#90845</a> needs to be reverted</p>
+
+
+
+<a name="268296449"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Fixing%20%2392804/near/268296449" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html#268296449">(Jan 17 2022 at 17:19)</a>:</h4>
+<p>In option 1, I'm not sure that the information "this call is cyclic" can be used in any meaningful way, <em>except</em> if there is an obvious absorbing solution.  I mean: if cycle implies that <code>needs_drop</code> is true, then we can use the cycle information to propagate returning true.  If there is no such absorbing element, I fear that option 1 would only lead to bugs.</p>
+
+
+
+<a name="268296855"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Fixing%20%2392804/near/268296855" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html#268296855">(Jan 17 2022 at 17:23)</a>:</h4>
+<p>We could use an option 3: gather all the dependencies in anticipation of the computation, and look for queries at that stage.  This would require: (1) a function taking a <code>DefId</code> and returning the list of the <code>DefId</code>s for which it will evaluation <code>needs_drop(def_id)</code>, (2) to walk this graph looking for strongly connected components, (3) invoke the query normally for non-cyclic parts of the graph, (4) invoke a specific handler function for cycles.<br>
+This seems quite a lot of heavy lifting, but I haven't found a simpler method yet.  I've got a WIP branch, I'll push it when once I get time to finish it.</p>
+
+
+
+<a name="268330022"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Fixing%20%2392804/near/268330022" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html#268330022">(Jan 18 2022 at 00:54)</a>:</h4>
+<p>Is gathering all the DefIds not likely to undo the performance benefits on its own? I'd imagine that the expensive part of the non-query cache enabled solution would be iterating the full dependency graph</p>
+
+
+
+<a name="268350402"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Fixing%20%2392804/near/268350402" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html#268350402">(Jan 18 2022 at 07:01)</a>:</h4>
+<p>The current implementation already walks the dependency graph using recursive calls and manual recursion handling.  This method would move this walking part to the query engine.  I'm not proposing to walk the whole crate at once, rather to build the fragments of graph when needed.</p>
+
+
+
+<a name="268351281"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Fixing%20%2392804/near/268351281" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html#268351281">(Jan 18 2022 at 07:14)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="248906">cjgillot</span> <a href="#narrow/stream/131828-t-compiler/topic/Fixing.20.2392804/near/268350402">said</a>:</p>
+<blockquote>
+<p>The current implementation already walks the dependency graph using recursive calls and manual recursion handling.  This method would move this walking part to the query engine.  I'm not proposing to walk the whole crate at once, rather to build the fragments of graph when needed.</p>
+</blockquote>
+<p>Hm, I must have misunderstood something. In the current implementation, with code like</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">Foo</span><span class="p">(</span><span class="n">Many</span><span class="p">,</span><span class="w"> </span><span class="n">Different</span><span class="p">,</span><span class="w"> </span><span class="n">Fields</span><span class="p">);</span><span class="w"></span>
+<span class="k">struct</span> <span class="nc">Bar</span><span class="p">(</span><span class="n">Foo</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+<p>calling <code>needs_drop(Foo)</code> and then <code>needs_drop(Bar)</code> does not touch <code>needs_drop(Many | Different | Fields)</code> again - in this sense that entire branch of the computation is pruned. Is this not changed by your step 1, where each of the fields will need to be visited by the proposed "gather <code>DefId</code>s" step?</p>
+
+
+
+<a name="268628459"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Fixing%20%2392804/near/268628459" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html#268628459">(Jan 20 2022 at 01:22)</a>:</h4>
+<p><span class="user-mention" data-user-id="248906">@cjgillot</span> I just realized there might be a much simpler solution: the code currently in master is correct for the general <code>needs_drop</code> code, it's only wrong for <code>needs_significant_drop</code>. I expect that the second case is much less common (does it get called at all in Edition 2021?) so how about just restricting the optimization in <a href="https://github.com/rust-lang/rust/issues/90845">#90845</a> to that case?</p>
+
+
+
+<a name="268628791"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Fixing%20%2392804/near/268628791" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Fixing.20.2392804.html#268628791">(Jan 20 2022 at 01:26)</a>:</h4>
+<p>The reason it's correct for <code>needs_drop</code> is because for ADTs, that always returns the fields, and so all sources of query cycles must have a pointer/reference in the way, which are trivially not drop and so our search stops there</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

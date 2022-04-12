@@ -1,0 +1,95 @@
+<html>
+<head><meta charset="utf-8"><title>ItemTree uses too much memory · t-compiler/rust-analyzer · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/index.html">t-compiler/rust-analyzer</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html">ItemTree uses too much memory</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="203995698"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203995698" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203995698">(Jul 15 2020 at 18:41)</a>:</h4>
+<p>I've spent some time investigating the pretty big memory usage of <code>ItemTree</code>s today, and tried to optimize the <code>ItemTree</code> representation, but without much success. I collected some data via <code>analysis-bench --memory-usage --highlight src/lib.rs</code> in the rust-analyzer crate:</p>
+<ul>
+<li>We create 2046 <code>ItemTree</code>s from real source files, totaling in at 77mb</li>
+<li>We create 38144 trees from macro expansions, totaling in at 62mb</li>
+<li>This is a total of 40190 <code>ItemTree</code>s</li>
+<li>Most trees (37539 of them) don't contain any inner items, but turning the inner item map into an <code>Option&lt;Box&lt;Map&gt;&gt;</code> only saves 2mb of memory</li>
+<li>Many trees (25815 of them) don't contain any items with attributes, but turning the attribute map into an <code>Option&lt;Box&lt;Map&gt;&gt;</code> has no visible impact on memory usage</li>
+<li>The "empty item tree" optimization that doesn't allocate memory when the tree contains 0 items only kicks in 757 times, but most item trees <em>are</em> very small (usually containing 1-2 items).</li>
+</ul>
+<p>To help with the latter point, I tried storing all items in a shared arena by converting everything that's stored in the tree to an enum, but this initially just used even more memory due to the enum being as large as the largest contained type. I then used <code>Box</code>es inside the enum, which helped a bit, but still saved almost nothing.</p>
+<p>I think to improve the memory efficiency here we need to do some larger-scale changes. Maybe we need to avoid creating so many small macro-derived item trees in the first place, by side-stepping the item tree in the right places – I briefly chatted with <span class="user-mention" data-user-id="133169">@matklad</span> about this. I'm not sure where these "right places" are though, is the def collector alone enough? And how do we reduce the memory used by non-macro trees? Rely on periodic GC to clean them up? Open for ideas here :)</p>
+
+
+
+<a name="203996353"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203996353" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203996353">(Jul 15 2020 at 18:46)</a>:</h4>
+<p>One idea I had is to have a <em>global</em> arena for items</p>
+
+
+
+<a name="203996416"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203996416" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203996416">(Jul 15 2020 at 18:47)</a>:</h4>
+<p>I don't think we can implement it without salsa, but it might be a good idea to prototype, to get a rough memory usage</p>
+
+
+
+<a name="203996524"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203996524" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203996524">(Jul 15 2020 at 18:48)</a>:</h4>
+<p>Like, literarrly just sticking an <code>Arc&lt;Mutext(Arena&lt;Struct&gt;, Arena&lt;Enum&gt;, ...)&gt;</code> into a DB, and store only <code>id</code>s in <code>ItemTree</code></p>
+
+
+
+<a name="203996586"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203996586" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203996586">(Jul 15 2020 at 18:48)</a>:</h4>
+<p>That should be horribly slow, but should give us a fair assesment of overhead of many arenas</p>
+
+
+
+<a name="203996707"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203996707" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203996707">(Jul 15 2020 at 18:49)</a>:</h4>
+<p>It also seems that ItemTrees, while being the heaviset thing, are still just 15% of overall memory usage...</p>
+
+
+
+<a name="203996739"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203996739" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203996739">(Jul 15 2020 at 18:49)</a>:</h4>
+<p>I wonder if that means that some wide-reaching optimizations are more important, like interning of names</p>
+
+
+
+<a name="203996836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203996836" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203996836">(Jul 15 2020 at 18:50)</a>:</h4>
+<p>Quite possible, yeah</p>
+
+
+
+<a name="203996903"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203996903" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203996903">(Jul 15 2020 at 18:51)</a>:</h4>
+<p>Maybe that is a good next thing to look into - how much memory is actually occupied by names?</p>
+
+
+
+<a name="203997928"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203997928" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203997928">(Jul 15 2020 at 18:59)</a>:</h4>
+<p>Just did a quick check, making <code>Name</code> twice as <strong>bit</strong> leads to +120mb of memory</p>
+
+
+
+<a name="203998061"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203998061" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203998061">(Jul 15 2020 at 19:00)</a>:</h4>
+<p><a href="https://github.com/matklad/rust-analyzer/commit/4df3407d253e606e580ac8fbf1d748a6f44f9cba">https://github.com/matklad/rust-analyzer/commit/4df3407d253e606e580ac8fbf1d748a6f44f9cba</a></p>
+
+
+
+<a name="203998300"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/ItemTree%20uses%20too%20much%20memory/near/203998300" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/ItemTree.20uses.20too.20much.20memory.html#203998300">(Jul 15 2020 at 19:02)</a>:</h4>
+<p>Okay, that seems promising!</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

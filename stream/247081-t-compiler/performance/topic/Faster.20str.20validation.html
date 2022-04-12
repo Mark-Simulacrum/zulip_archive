@@ -1,0 +1,838 @@
+<html>
+<head><meta charset="utf-8"><title>Faster str validation · t-compiler/performance · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/index.html">t-compiler/performance</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html">Faster str validation</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="263312378"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263312378" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263312378">(Dec 01 2021 at 16:00)</a>:</h4>
+<p>I ended up seeing about ~18% improvement in validation speed for my test data compared to nightly. YMMV.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#![feature(const_intrinsic_copy)]</span><span class="w"></span>
+<span class="cp">#![feature(const_mut_refs)]</span><span class="w"></span>
+<span class="cp">#![feature(const_ptr_offset)]</span><span class="w"></span>
+
+<span class="cp">#[derive(Copy, Eq, PartialEq, Clone, Debug)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Utf8Error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">valid_up_to</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">error_len</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// https://github.com/rust-lang/rust/blob/d384ff79308c4eb0a3679817cd0def0147ad8612/library/core/src/str/validations.rs#L128</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">fn</span> <span class="nf">run_utf8_validation</span><span class="p">(</span><span class="n">v</span>: <span class="kp">&amp;</span><span class="p">[</span><span class="kt">u8</span><span class="p">])</span><span class="w"> </span>-&gt; <span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Utf8Error</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">old_offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">index</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">        </span><span class="cp">#[inline(always)]</span><span class="w"></span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="k">fn</span> <span class="nf">err</span><span class="p">(</span><span class="n">err_offset</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">err_len</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Utf8Error</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">Err</span><span class="p">(</span><span class="n">Utf8Error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">valid_up_to</span>: <span class="nc">err_offset</span><span class="p">,</span><span class="w"></span>
+<span class="w">                </span><span class="n">error_len</span>: <span class="nc">err_len</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="p">});</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="fm">macro_rules!</span><span class="w"> </span><span class="n">next</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="p">()</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{{</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">                </span><span class="c1">// we needed data, but there was none: error!</span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">None</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="n">v</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"></span>
+<span class="w">            </span><span class="p">}};</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">first</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">v</span><span class="p">[</span><span class="n">index</span><span class="p">];</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// 1-byte encoding is all bytes less than \u{0080} (0..=127)</span>
+<span class="w">        </span><span class="c1">// 2-byte encoding is for codepoints  \u{0080} to  \u{07ff}</span>
+<span class="w">        </span><span class="c1">//        first  C2 80        last DF BF</span>
+<span class="w">        </span><span class="c1">// 3-byte encoding is for codepoints  \u{0800} to  \u{ffff}</span>
+<span class="w">        </span><span class="c1">//        first  E0 A0 80     last EF BF BF</span>
+<span class="w">        </span><span class="c1">//   excluding surrogates codepoints  \u{d800} to  \u{dfff}</span>
+<span class="w">        </span><span class="c1">//               ED A0 80 to       ED BF BF</span>
+<span class="w">        </span><span class="c1">// 4-byte encoding is for codepoints \u{1000}0 to \u{10ff}ff</span>
+<span class="w">        </span><span class="c1">//        first  F0 90 80 80  last F4 8F BF BF</span>
+<span class="w">        </span><span class="c1">//</span>
+<span class="w">        </span><span class="c1">// Use the UTF-8 syntax from the RFC</span>
+<span class="w">        </span><span class="c1">//</span>
+<span class="w">        </span><span class="c1">// https://tools.ietf.org/html/rfc3629</span>
+<span class="w">        </span><span class="c1">// UTF8-1      = %x00-7F</span>
+<span class="w">        </span><span class="c1">// UTF8-2      = %xC2-DF UTF8-tail</span>
+<span class="w">        </span><span class="c1">// UTF8-3      = %xE0 %xA0-BF UTF8-tail / %xE1-EC 2( UTF8-tail ) /</span>
+<span class="w">        </span><span class="c1">//               %xED %x80-9F UTF8-tail / %xEE-EF 2( UTF8-tail )</span>
+<span class="w">        </span><span class="c1">// UTF8-4      = %xF0 %x90-BF 2( UTF8-tail ) / %xF1-F3 3( UTF8-tail ) /</span>
+<span class="w">        </span><span class="c1">//               %xF4 %x80-8F 2( UTF8-tail )</span>
+<span class="w">        </span><span class="k">match</span><span class="w"> </span><span class="n">first</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="mi">0</span><span class="o">..=</span><span class="mi">127</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">                </span><span class="k">const</span><span class="w"> </span><span class="n">ASCII_MASK</span>: <span class="kt">usize</span> <span class="o">=</span><span class="w"></span>
+<span class="w">                    </span><span class="kt">usize</span>::<span class="n">from_ne_bytes</span><span class="p">([</span><span class="mb">0b10000000</span><span class="p">;</span><span class="w"> </span><span class="p">(</span><span class="kt">usize</span>::<span class="n">BITS</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">]);</span><span class="w"></span>
+<span class="w">                </span><span class="k">while</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="cm">/*</span>
+<span class="cm">                    let maybe_ascii = unsafe {</span>
+<span class="cm">                        *(v.as_ptr().add(index) as *const usize)</span>
+<span class="cm">                    };</span>
+<span class="cm">                    */</span><span class="w"></span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">maybe_ascii</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="k">usize</span><span class="p">.</span><span class="n">to_ne_bytes</span><span class="p">();</span><span class="w"></span>
+<span class="w">                    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                        </span><span class="n">core</span>::<span class="n">ptr</span>::<span class="n">copy_nonoverlapping</span><span class="p">(</span><span class="w"></span>
+<span class="w">                            </span><span class="n">v</span><span class="p">.</span><span class="n">as_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">index</span><span class="p">),</span><span class="w"></span>
+<span class="w">                            </span><span class="n">maybe_ascii</span><span class="p">.</span><span class="n">as_mut_ptr</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                            </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                        </span><span class="p">)</span><span class="w"></span>
+<span class="w">                    </span><span class="p">}</span><span class="w"></span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="n">maybe_ascii</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span>::<span class="n">from_ne_bytes</span><span class="p">(</span><span class="n">maybe_ascii</span><span class="p">);</span><span class="w"></span>
+<span class="w">                    </span><span class="k">if</span><span class="w"> </span><span class="n">maybe_ascii</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">ASCII_MASK</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                        </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">();</span><span class="w"> </span><span class="c1">// Skip while ascii</span>
+<span class="w">                    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                        </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">                        </span><span class="c1">// TODO: Instead of throwing maybe_ascii away, check for a partial match by counting zeros</span>
+<span class="w">                    </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="k">while</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">v</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">128</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="c1">// Skip while ascii</span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="mi">194</span><span class="o">..=</span><span class="mi">223</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">-</span><span class="mi">64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="mi">224</span><span class="o">..=</span><span class="mi">243</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="fm">matches!</span><span class="p">(</span><span class="w"></span>
+<span class="w">                    </span><span class="p">(</span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()),</span><span class="w"></span>
+<span class="w">                    </span><span class="p">(</span><span class="mh">0xE0</span><span class="p">,</span><span class="w"> </span><span class="mh">0xA0</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xE1</span><span class="o">..=</span><span class="mh">0xEC</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xED</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0x9F</span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xEE</span><span class="o">..=</span><span class="mh">0xEF</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"></span>
+<span class="w">                </span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">-</span><span class="mi">64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">2</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="mi">240</span><span class="o">..=</span><span class="mi">244</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="fm">matches!</span><span class="p">(</span><span class="w"></span>
+<span class="w">                    </span><span class="p">(</span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()),</span><span class="w"></span>
+<span class="w">                    </span><span class="p">(</span><span class="mh">0xF0</span><span class="p">,</span><span class="w"> </span><span class="mh">0x90</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xF1</span><span class="o">..=</span><span class="mh">0xF3</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xF4</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0x8F</span><span class="p">)</span><span class="w"></span>
+<span class="w">                </span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">-</span><span class="mi">64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">2</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">-</span><span class="mi">64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">3</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">1</span><span class="p">)),</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nb">Ok</span><span class="p">(())</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Smaller but slower alternative to LUT</span>
+<span class="cp">#[inline]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">fn</span> <span class="nf">utf8_char_width</span><span class="p">(</span><span class="n">b</span>: <span class="kt">u8</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">usize</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">b</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="fm">matches!</span><span class="p">(</span><span class="n">b</span><span class="p">,</span><span class="w"> </span><span class="mi">194</span><span class="o">..=</span><span class="mi">244</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="c1">// shift is * 2</span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="fm">matches!</span><span class="p">(</span><span class="n">b</span><span class="p">,</span><span class="w"> </span><span class="mi">224</span><span class="o">..=</span><span class="mi">244</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="fm">matches!</span><span class="p">(</span><span class="n">b</span><span class="p">,</span><span class="w"> </span><span class="mi">240</span><span class="o">..=</span><span class="mi">244</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"></span>
+<span class="w">    </span><span class="cm">/*</span>
+<span class="cm">        let mut r = (b &amp; 0b10000000 == 0) as _;</span>
+<span class="cm">        if matches!(b, 194..=244) {</span>
+<span class="cm">            r += 2; // 2</span>
+<span class="cm">        }</span>
+<span class="cm">        if matches!(b, 224..=244) {</span>
+<span class="cm">            r += 1; // 3</span>
+<span class="cm">        }</span>
+<span class="cm">        if matches!(b, 240..=244) {</span>
+<span class="cm">            r += 1; // 4</span>
+<span class="cm">        }</span>
+<span class="cm">        r</span>
+<span class="cm">    */</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Branchless goes brrr</span>
+<span class="cp">#[inline(always)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">fn</span> <span class="nf">len_utf8</span><span class="p">(</span><span class="n">code</span>: <span class="kt">char</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">usize</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="p">(</span><span class="n">code</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mh">0x80</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="p">(</span><span class="n">code</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mh">0x800</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="p">(</span><span class="n">code</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mh">0x10000</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="263313121"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263313121" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263313121">(Dec 01 2021 at 16:04)</a>:</h4>
+<p>is your test-data pure ascii or does it contain multi-byte chars?</p>
+
+
+
+<a name="263313793"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263313793" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263313793">(Dec 01 2021 at 16:08)</a>:</h4>
+<p>Mixed English, German, Spanish, Japanese, Korean, Swedish, Finnish, and Russian from Wikipedia.</p>
+
+
+
+<a name="263314469"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263314469" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263314469">(Dec 01 2021 at 16:13)</a>:</h4>
+<p>Yeah, you might be trading performance between single vs. multi-byte. I think the standard library validation is biased towards the ascii case since that's important for the compiler and we can't implement lemire's yet due to lack of simd feature detection in core.</p>
+<p>Well, maybe it could be implemented for the apple targets since they have a higher baseline.</p>
+
+
+
+<a name="263314755"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263314755" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263314755">(Dec 01 2021 at 16:15)</a>:</h4>
+<p>maybe just plug your changes into the source and run the microbenchmarks in core and then against perf.rlo. if it's only improvements and no regressions it'd be an easy decision.</p>
+
+
+
+<a name="263315933"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263315933" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263315933">(Dec 01 2021 at 16:22)</a>:</h4>
+<p>Ugh wait, the existing microbenchmarks for validation don't cover the different char lengths, only those for char counting do.</p>
+
+
+
+<a name="263317834"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263317834" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263317834">(Dec 01 2021 at 16:34)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/issues/90414">#90414</a> adds a few more benchmarks for counting that could be adapted to validation.</p>
+
+
+
+<a name="263324338"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263324338" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263324338">(Dec 01 2021 at 17:16)</a>:</h4>
+<p>You're right my changes slightly regress perf for ascii only text.</p>
+
+
+
+<a name="263327297"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263327297" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263327297">(Dec 01 2021 at 17:36)</a>:</h4>
+<p>Fix that autovectorizes to avx2:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#![feature(const_intrinsic_copy)]</span><span class="w"></span>
+<span class="cp">#![feature(const_mut_refs)]</span><span class="w"></span>
+<span class="cp">#![feature(const_ptr_offset)]</span><span class="w"></span>
+
+<span class="cp">#[derive(Copy, Eq, PartialEq, Clone, Debug)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Utf8Error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">valid_up_to</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">error_len</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// https://github.com/rust-lang/rust/blob/d384ff79308c4eb0a3679817cd0def0147ad8612/library/core/src/str/validations.rs#L128</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">fn</span> <span class="nf">run_utf8_validation</span><span class="p">(</span><span class="n">v</span>: <span class="kp">&amp;</span><span class="p">[</span><span class="kt">u8</span><span class="p">])</span><span class="w"> </span>-&gt; <span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Utf8Error</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">old_offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">index</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">        </span><span class="cp">#[inline(always)]</span><span class="w"></span>
+<span class="w">        </span><span class="k">const</span><span class="w"> </span><span class="k">fn</span> <span class="nf">err</span><span class="p">(</span><span class="n">err_offset</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">err_len</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">Utf8Error</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">Err</span><span class="p">(</span><span class="n">Utf8Error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">valid_up_to</span>: <span class="nc">err_offset</span><span class="p">,</span><span class="w"></span>
+<span class="w">                </span><span class="n">error_len</span>: <span class="nc">err_len</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="p">});</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="fm">macro_rules!</span><span class="w"> </span><span class="n">next</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="p">()</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{{</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">                </span><span class="c1">// we needed data, but there was none: error!</span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">None</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="n">v</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"></span>
+<span class="w">            </span><span class="p">}};</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">first</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">v</span><span class="p">[</span><span class="n">index</span><span class="p">];</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// 1-byte encoding is all bytes less than \u{0080} (0..=127)</span>
+<span class="w">        </span><span class="c1">// 2-byte encoding is for codepoints  \u{0080} to  \u{07ff}</span>
+<span class="w">        </span><span class="c1">//        first  C2 80        last DF BF</span>
+<span class="w">        </span><span class="c1">// 3-byte encoding is for codepoints  \u{0800} to  \u{ffff}</span>
+<span class="w">        </span><span class="c1">//        first  E0 A0 80     last EF BF BF</span>
+<span class="w">        </span><span class="c1">//   excluding surrogates codepoints  \u{d800} to  \u{dfff}</span>
+<span class="w">        </span><span class="c1">//               ED A0 80 to       ED BF BF</span>
+<span class="w">        </span><span class="c1">// 4-byte encoding is for codepoints \u{1000}0 to \u{10ff}ff</span>
+<span class="w">        </span><span class="c1">//        first  F0 90 80 80  last F4 8F BF BF</span>
+<span class="w">        </span><span class="c1">//</span>
+<span class="w">        </span><span class="c1">// Use the UTF-8 syntax from the RFC</span>
+<span class="w">        </span><span class="c1">//</span>
+<span class="w">        </span><span class="c1">// https://tools.ietf.org/html/rfc3629</span>
+<span class="w">        </span><span class="c1">// UTF8-1      = %x00-7F</span>
+<span class="w">        </span><span class="c1">// UTF8-2      = %xC2-DF UTF8-tail</span>
+<span class="w">        </span><span class="c1">// UTF8-3      = %xE0 %xA0-BF UTF8-tail / %xE1-EC 2( UTF8-tail ) /</span>
+<span class="w">        </span><span class="c1">//               %xED %x80-9F UTF8-tail / %xEE-EF 2( UTF8-tail )</span>
+<span class="w">        </span><span class="c1">// UTF8-4      = %xF0 %x90-BF 2( UTF8-tail ) / %xF1-F3 3( UTF8-tail ) /</span>
+<span class="w">        </span><span class="c1">//               %xF4 %x80-8F 2( UTF8-tail )</span>
+<span class="w">        </span><span class="k">match</span><span class="w"> </span><span class="n">first</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="mi">0</span><span class="o">..=</span><span class="mi">127</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">                </span><span class="k">const</span><span class="w"> </span><span class="n">ASCII_MASK</span>: <span class="kt">usize</span> <span class="o">=</span><span class="w"></span>
+<span class="w">                    </span><span class="kt">usize</span>::<span class="n">from_ne_bytes</span><span class="p">([</span><span class="mb">0b10000000</span><span class="p">;</span><span class="w"> </span><span class="p">(</span><span class="kt">usize</span>::<span class="n">BITS</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">8</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">]);</span><span class="w"></span>
+
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">loop</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                        </span><span class="c1">// TODO: core_simd u8x32</span>
+<span class="w">                        </span><span class="cm">/*</span>
+<span class="cm">                        let maybe_ascii = unsafe {</span>
+<span class="cm">                            *(v.as_ptr().add(index) as *const usize)</span>
+<span class="cm">                        };</span>
+<span class="cm">                        */</span><span class="w"></span>
+<span class="w">                        </span><span class="c1">// Read 4 x usize, OR them together, and then check against ASCII_MASK.</span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">maybe_ascii0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="k">usize</span><span class="p">.</span><span class="n">to_ne_bytes</span><span class="p">();</span><span class="w"></span>
+<span class="w">                        </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                            </span><span class="n">core</span>::<span class="n">ptr</span>::<span class="n">copy_nonoverlapping</span><span class="p">(</span><span class="w"></span>
+<span class="w">                                </span><span class="n">v</span><span class="p">.</span><span class="n">as_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">index</span><span class="p">),</span><span class="w"></span>
+<span class="w">                                </span><span class="n">maybe_ascii0</span><span class="p">.</span><span class="n">as_mut_ptr</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                                </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                            </span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="p">}</span><span class="w"></span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="n">maybe_ascii0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span>::<span class="n">from_ne_bytes</span><span class="p">(</span><span class="n">maybe_ascii0</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">maybe_ascii1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="k">usize</span><span class="p">.</span><span class="n">to_ne_bytes</span><span class="p">();</span><span class="w"></span>
+<span class="w">                        </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                            </span><span class="n">core</span>::<span class="n">ptr</span>::<span class="n">copy_nonoverlapping</span><span class="p">(</span><span class="w"></span>
+<span class="w">                                </span><span class="n">v</span><span class="p">.</span><span class="n">as_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">()),</span><span class="w"></span>
+<span class="w">                                </span><span class="n">maybe_ascii1</span><span class="p">.</span><span class="n">as_mut_ptr</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                                </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                            </span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="p">}</span><span class="w"></span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="n">maybe_ascii1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span>::<span class="n">from_ne_bytes</span><span class="p">(</span><span class="n">maybe_ascii1</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">maybe_ascii2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="k">usize</span><span class="p">.</span><span class="n">to_ne_bytes</span><span class="p">();</span><span class="w"></span>
+<span class="w">                        </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                            </span><span class="n">core</span>::<span class="n">ptr</span>::<span class="n">copy_nonoverlapping</span><span class="p">(</span><span class="w"></span>
+<span class="w">                                </span><span class="n">v</span><span class="p">.</span><span class="n">as_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">()),</span><span class="w"></span>
+<span class="w">                                </span><span class="n">maybe_ascii2</span><span class="p">.</span><span class="n">as_mut_ptr</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                                </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                            </span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="p">}</span><span class="w"></span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="n">maybe_ascii2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span>::<span class="n">from_ne_bytes</span><span class="p">(</span><span class="n">maybe_ascii2</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">maybe_ascii3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="k">usize</span><span class="p">.</span><span class="n">to_ne_bytes</span><span class="p">();</span><span class="w"></span>
+<span class="w">                        </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                            </span><span class="n">core</span>::<span class="n">ptr</span>::<span class="n">copy_nonoverlapping</span><span class="p">(</span><span class="w"></span>
+<span class="w">                                </span><span class="n">v</span><span class="p">.</span><span class="n">as_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">()),</span><span class="w"></span>
+<span class="w">                                </span><span class="n">maybe_ascii3</span><span class="p">.</span><span class="n">as_mut_ptr</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                                </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                            </span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="p">}</span><span class="w"></span>
+<span class="w">                        </span><span class="kd">let</span><span class="w"> </span><span class="n">maybe_ascii3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span>::<span class="n">from_ne_bytes</span><span class="p">(</span><span class="n">maybe_ascii3</span><span class="p">);</span><span class="w"></span>
+<span class="w">                        </span><span class="k">if</span><span class="w"> </span><span class="n">maybe_ascii0</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">ASCII_MASK</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">                            </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">maybe_ascii1</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">ASCII_MASK</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">                            </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">maybe_ascii2</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">ASCII_MASK</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">                            </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">maybe_ascii3</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">ASCII_MASK</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">                        </span><span class="p">{</span><span class="w"></span>
+<span class="w">                            </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">();</span><span class="w"> </span><span class="c1">// Skip while ascii</span>
+<span class="w">                            </span><span class="k">if</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                                </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">                            </span><span class="p">}</span><span class="w"></span>
+<span class="w">                        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                            </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">                            </span><span class="c1">// TODO: Instead of throwing maybe_ascii away, check for a partial match by counting zeros</span>
+<span class="w">                        </span><span class="p">}</span><span class="w"></span>
+<span class="w">                    </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="k">while</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="cm">/*</span>
+<span class="cm">                    let maybe_ascii = unsafe {</span>
+<span class="cm">                        *(v.as_ptr().add(index) as *const usize)</span>
+<span class="cm">                    };</span>
+<span class="cm">                    */</span><span class="w"></span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">maybe_ascii</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="k">usize</span><span class="p">.</span><span class="n">to_ne_bytes</span><span class="p">();</span><span class="w"></span>
+<span class="w">                    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                        </span><span class="n">core</span>::<span class="n">ptr</span>::<span class="n">copy_nonoverlapping</span><span class="p">(</span><span class="w"></span>
+<span class="w">                            </span><span class="n">v</span><span class="p">.</span><span class="n">as_ptr</span><span class="p">().</span><span class="n">add</span><span class="p">(</span><span class="n">index</span><span class="p">),</span><span class="w"></span>
+<span class="w">                            </span><span class="n">maybe_ascii</span><span class="p">.</span><span class="n">as_mut_ptr</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                            </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                        </span><span class="p">)</span><span class="w"></span>
+<span class="w">                    </span><span class="p">}</span><span class="w"></span>
+<span class="w">                    </span><span class="kd">let</span><span class="w"> </span><span class="n">maybe_ascii</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span>::<span class="n">from_ne_bytes</span><span class="p">(</span><span class="n">maybe_ascii</span><span class="p">);</span><span class="w"></span>
+<span class="w">                    </span><span class="k">if</span><span class="w"> </span><span class="n">maybe_ascii</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">ASCII_MASK</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                        </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">core</span>::<span class="n">mem</span>::<span class="n">size_of</span>::<span class="o">&lt;</span><span class="kt">usize</span><span class="o">&gt;</span><span class="p">();</span><span class="w"> </span><span class="c1">// Skip while ascii</span>
+<span class="w">                    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                        </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">                        </span><span class="c1">// TODO: Instead of throwing maybe_ascii away, check for a partial match by counting zeros</span>
+<span class="w">                    </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">                </span><span class="k">while</span><span class="w"> </span><span class="n">index</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">v</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">v</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">128</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="c1">// Skip while ascii</span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="mi">194</span><span class="o">..=</span><span class="mi">223</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">-</span><span class="mi">64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="mi">224</span><span class="o">..=</span><span class="mi">243</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="fm">matches!</span><span class="p">(</span><span class="w"></span>
+<span class="w">                    </span><span class="p">(</span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()),</span><span class="w"></span>
+<span class="w">                    </span><span class="p">(</span><span class="mh">0xE0</span><span class="p">,</span><span class="w"> </span><span class="mh">0xA0</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xE1</span><span class="o">..=</span><span class="mh">0xEC</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xED</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0x9F</span><span class="p">)</span><span class="w"></span>
+<span class="w">                        </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xEE</span><span class="o">..=</span><span class="mh">0xEF</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"></span>
+<span class="w">                </span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">-</span><span class="mi">64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">2</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="mi">240</span><span class="o">..=</span><span class="mi">244</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="fm">matches!</span><span class="p">(</span><span class="w"></span>
+<span class="w">                    </span><span class="p">(</span><span class="n">first</span><span class="p">,</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()),</span><span class="w"></span>
+<span class="w">                    </span><span class="p">(</span><span class="mh">0xF0</span><span class="p">,</span><span class="w"> </span><span class="mh">0x90</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xF1</span><span class="o">..=</span><span class="mh">0xF3</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0xBF</span><span class="p">)</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="p">(</span><span class="mh">0xF4</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="o">..=</span><span class="mh">0x8F</span><span class="p">)</span><span class="w"></span>
+<span class="w">                </span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">1</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">-</span><span class="mi">64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">2</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="n">next</span><span class="o">!</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i8</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="o">-</span><span class="mi">64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                    </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">3</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">                </span><span class="n">index</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="n">err</span><span class="p">(</span><span class="n">old_offset</span><span class="p">,</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="mi">1</span><span class="p">)),</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nb">Ok</span><span class="p">(())</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Smaller but slower alternative to LUT</span>
+<span class="cp">#[inline]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">fn</span> <span class="nf">utf8_char_width</span><span class="p">(</span><span class="n">b</span>: <span class="kt">u8</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">usize</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">b</span><span class="w"> </span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="mi">7</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="p">(</span><span class="fm">matches!</span><span class="p">(</span><span class="n">b</span><span class="p">,</span><span class="w"> </span><span class="mi">194</span><span class="o">..=</span><span class="mi">244</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="c1">// shift is * 2</span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="fm">matches!</span><span class="p">(</span><span class="n">b</span><span class="p">,</span><span class="w"> </span><span class="mi">224</span><span class="o">..=</span><span class="mi">244</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="fm">matches!</span><span class="p">(</span><span class="n">b</span><span class="p">,</span><span class="w"> </span><span class="mi">240</span><span class="o">..=</span><span class="mi">244</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"></span>
+<span class="w">    </span><span class="cm">/*</span>
+<span class="cm">        let mut r = (b &amp; 0b10000000 == 0) as _;</span>
+<span class="cm">        if matches!(b, 194..=244) {</span>
+<span class="cm">            r += 2; // 2</span>
+<span class="cm">        }</span>
+<span class="cm">        if matches!(b, 224..=244) {</span>
+<span class="cm">            r += 1; // 3</span>
+<span class="cm">        }</span>
+<span class="cm">        if matches!(b, 240..=244) {</span>
+<span class="cm">            r += 1; // 4</span>
+<span class="cm">        }</span>
+<span class="cm">        r</span>
+<span class="cm">    */</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Branchless goes brrr</span>
+<span class="cp">#[inline(always)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="k">fn</span> <span class="nf">len_utf8</span><span class="p">(</span><span class="n">code</span>: <span class="kt">char</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">usize</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u32</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="p">(</span><span class="n">code</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mh">0x80</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="p">(</span><span class="n">code</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mh">0x800</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="p">(</span><span class="n">code</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mh">0x10000</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">r</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="263330019"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263330019" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263330019">(Dec 01 2021 at 17:53)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="330154">The 8472</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Faster.20str.20validation/near/263314469">said</a>:</p>
+<blockquote>
+<p>Yeah, you might be trading performance between single vs. multi-byte. I think the standard library validation is biased towards the ascii case since that's important for the compiler and we can't implement lemire's yet due to lack of simd feature detection in core.</p>
+<p>Well, maybe it could be implemented for the apple targets since they have a higher baseline.</p>
+</blockquote>
+<p>We could implement it and use it internally in core / the compiler.</p>
+
+
+
+<a name="263330276"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263330276" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Hans Kratz <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263330276">(Dec 01 2021 at 17:56)</a>:</h4>
+<p>There is <a href="https://github.com/rusticstuff/simdutf8">https://github.com/rusticstuff/simdutf8</a> . I did not get around to getting at ready for inclusion into core yet though.</p>
+
+
+
+<a name="263340402"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263340402" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263340402">(Dec 01 2021 at 19:02)</a>:</h4>
+<blockquote>
+<p>Fix that autovectorizes to avx2:</p>
+</blockquote>
+<p>The baseline for most x86_64 builds (including the compiler itself) is SSE2 most of the time (barring LTO <em>and</em> -Ctarget-cpu). So yeah, a pretty sad state for utf8 validation.</p>
+
+
+
+<a name="263341932"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263341932" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263341932">(Dec 01 2021 at 19:12)</a>:</h4>
+<p>To clarify why we can implement feature detection inside the compiler without dependencies:<br>
+It's because it's valid to use assembly-only feature detection on <strong>x86</strong>. Not so for other architectures... but many architectures people are likely to build the compiler on, like AArch64, actually have <strong>more</strong> powerful baseline intrinsics. At least, where SIMD for UTF-8 is concerned.</p>
+<p>This is something I would like to see <code>core::simd</code> tried out for, but currently it's <code>not(bootstrap)</code> to allow us to churn a few things (hopefully it will settle down soon).</p>
+
+
+
+<a name="263342922"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263342922" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263342922">(Dec 01 2021 at 19:19)</a>:</h4>
+<p><span class="user-mention" data-user-id="281757">@Jubilee</span> FWIW, unfortunately "assembly-only feature detection" may not always be sufficient on x86, because the Linux kernel seems to be pushing for a world in which you have to poke the kernel to enable certain features (e.g. tmul).</p>
+
+
+
+<a name="263342971"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263342971" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263342971">(Dec 01 2021 at 19:19)</a>:</h4>
+<p>I'm hoping that's not where it ultimately lands, but it's sure looking that way right now.</p>
+
+
+
+<a name="263343032"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263343032" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263343032">(Dec 01 2021 at 19:20)</a>:</h4>
+<p>But everything up through avx2 should be detectable with cpuid.</p>
+
+
+
+<a name="263343139"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263343139" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263343139">(Dec 01 2021 at 19:20)</a>:</h4>
+<p>Yeah I uh,  don't think we should actually use anything beyond AVX2 inside the compiler even as a conditional dispatch.</p>
+
+
+
+<a name="263343281"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263343281" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263343281">(Dec 01 2021 at 19:21)</a>:</h4>
+<p>until someone finds a really good reason to cram a neural net in there</p>
+
+
+
+<a name="263343325"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263343325" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263343325">(Dec 01 2021 at 19:21)</a>:</h4>
+<p>There are a few AVX512 features I think we should entertain, and it's not clear if all of <em>those</em> will be usable by CPUID detection alone either.</p>
+
+
+
+<a name="263343431"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263343431" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263343431">(Dec 01 2021 at 19:22)</a>:</h4>
+<p>But we can get a <em>long</em> way with avx2, yeah.</p>
+
+
+
+<a name="263343535"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263343535" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263343535">(Dec 01 2021 at 19:22)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="330154">The 8472</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Faster.20str.20validation/near/263343281">said</a>:</p>
+<blockquote>
+<p>until someone finds a really good reason to cram a neural net in there</p>
+</blockquote>
+<p>I <em>can</em> imagine using one inside the compiler, but not inside the standard library. :)</p>
+
+
+
+<a name="263343762"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263343762" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263343762">(Dec 01 2021 at 19:24)</a>:</h4>
+<p>Weeeell, the things I think we might consider for AVX512 are likely to be the ones that can use ymm and xmm registers as well, so may dodge any power licensing issues on weaker machines.</p>
+
+
+
+<a name="263343918"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263343918" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263343918">(Dec 01 2021 at 19:25)</a>:</h4>
+<p>Right, exactly.</p>
+
+
+
+<a name="263343979"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263343979" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263343979">(Dec 01 2021 at 19:25)</a>:</h4>
+<p>I don't think we'd want to use zmm registers, but there are <em>instructions</em> we may want to use that only exist in avx512 even though they don't use zmm.</p>
+
+
+
+<a name="263344081"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263344081" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263344081">(Dec 01 2021 at 19:26)</a>:</h4>
+<p>(Also, we could consider using zmm on newer systems that don't slow down for avx512.)</p>
+
+
+
+<a name="263345259"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263345259" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263345259">(Dec 01 2021 at 19:32)</a>:</h4>
+<p>It would be very tricky to reliably identify those because as I understand it, while they are much better off, they still allow themselves to do power licensing if they live in poor conditions, and we don't automatically have knowledge of the surrounding processor state (i.e. "is this CPU fine or is it 'this is fine'-on-fire-dog?")</p>
+
+
+
+<a name="263349190"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263349190" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cuviper <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263349190">(Dec 01 2021 at 19:58)</a>:</h4>
+<p>What about soft-float environments like the kernel?</p>
+
+
+
+<a name="263349351"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263349351" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cuviper <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263349351">(Dec 01 2021 at 19:59)</a>:</h4>
+<p>(where the cpu may support it, but they're not dealing with that register state)</p>
+
+
+
+<a name="263349579"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263349579" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263349579">(Dec 01 2021 at 20:00)</a>:</h4>
+<p>The targets for those environments shouldn't enable it, or should require people to opt into it.</p>
+
+
+
+<a name="263349584"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263349584" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263349584">(Dec 01 2021 at 20:00)</a>:</h4>
+<p>we could limit it to specific targets where we know it's fine</p>
+
+
+
+<a name="263354886"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263354886" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263354886">(Dec 01 2021 at 20:43)</a>:</h4>
+<p>Too bad the compiler cannot automagically generate polyglot binaries for each gen of x86 <a href="https://rust.godbolt.org/z/E6ha48Mhn">https://rust.godbolt.org/z/E6ha48Mhn</a></p>
+<p>changelog: Use const_eval_select for major ascii only speedup.</p>
+
+
+
+<a name="263354962"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263354962" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263354962">(Dec 01 2021 at 20:44)</a>:</h4>
+<p>Maybe future is wasm and compiled binaries are shipped in byte code instead of machine code.</p>
+
+
+
+<a name="263357961"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263357961" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cuviper <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263357961">(Dec 01 2021 at 21:08)</a>:</h4>
+<p>The dream of Java's "write once, run anywhere" lives on!</p>
+
+
+
+<a name="263357972"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263357972" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cuviper <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263357972">(Dec 01 2021 at 21:08)</a>:</h4>
+<p>but something has to run that byte code</p>
+
+
+
+<a name="263375974"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263375974" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263375974">(Dec 02 2021 at 00:04)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="138448">cuviper</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Faster.20str.20validation/near/263349351">said</a>:</p>
+<blockquote>
+<p>(where the cpu may support it, but they're not dealing with that register state)</p>
+</blockquote>
+<p>Ah, I thought we were just talking about using this in the compiler itself?</p>
+
+
+
+<a name="263376202"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263376202" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263376202">(Dec 02 2021 at 00:06)</a>:</h4>
+<p>I thought we were talking about using it in std.</p>
+
+
+
+<a name="263376363"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263376363" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263376363">(Dec 02 2021 at 00:08)</a>:</h4>
+<p>If it's actually about in methods that will be implemented or called by users, especially often, then the answer as to whether they should dynamically dispatch to various vector impls is<br>
+No.</p>
+
+
+
+<a name="263378878"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263378878" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263378878">(Dec 02 2021 at 00:41)</a>:</h4>
+<p>You absolutely must check the relevant CPUID, etc. values, and even if you cache that, then you have to branch on the cache. For <code>std</code>, that should happen in basically 0 of the exposed methods, for the usual reasons to avoid branching in a hot loop. It's fine if the compiler has internal methods which implement such tactics because those aren't exposed, and because we e.g. are aware we're probably going to receive something worth vectorizing, like validating a big source file or concatenation of several.</p>
+
+
+
+<a name="263397664"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263397664" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263397664">(Dec 02 2021 at 06:22)</a>:</h4>
+<p>Added heuristic to avoid ascii fast path with mixed-len inputs. This improved my microbench ~60_000ns =&gt; ~~54_500ns. (nightly is ~84_000ns)</p>
+<p><a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2021&amp;gist=309963b8c6e83017d9879de5d2377040">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2021&amp;gist=309963b8c6e83017d9879de5d2377040</a></p>
+
+
+
+<a name="263412772"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263412772" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263412772">(Dec 02 2021 at 09:42)</a>:</h4>
+<p>changes: <br>
+Incorrect magic number caused emoji to be rejected. ALL PREVIOUS VERSIONS ARE INCORRECT.<br>
+Copy paste error in run_utf8_validation_iter accidentally erased v[0] &gt;= 128 which lead to rejecting all inputs starting with non-ascii. <br>
+Fixed regression for small ascii-only inputs.<br>
+<a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2021&amp;gist=5bc89467658defb93727c3f37c467adf">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2021&amp;gist=5bc89467658defb93727c3f37c467adf</a></p>
+
+
+
+<a name="263412832"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263412832" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263412832">(Dec 02 2021 at 09:43)</a>:</h4>
+<p>Also ran benches from <a href="https://github.com/rusticstuff/simdutf8/tree/main/bench">https://github.com/rusticstuff/simdutf8/tree/main/bench</a><br>
+TL;DR: On long ascii only inputs run_utf8_validation_iter beats simdutf8 137.19 GiB/s vs 129.60 GiB/s. For non-ascii, simdutf8 obviously wins big (3-chinese/131072 is 21 GiB/s vs 2.1 GiB/s in favor of SIMD) except on tiny inputs. Nightly is beaten everywhere by at least ~10%-50%. Ascii is twice as fast as Nightly manages only ~65.5 GiB/s.</p>
+
+
+
+<a name="263413739"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263413739" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Hans Kratz <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263413739">(Dec 02 2021 at 09:52)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="420380">Bot+</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Faster.20str.20validation/near/263412832">said</a>:</p>
+<blockquote>
+<p>Also ran benches from <a href="https://github.com/rusticstuff/simdutf8/tree/main/bench">https://github.com/rusticstuff/simdutf8/tree/main/bench</a><br>
+TL;DR: On long ascii only inputs run_utf8_validation_iter beats simdutf8 137.19 GiB/s vs 129.60 GiB/s. </p>
+</blockquote>
+<p>That is a really cool result! Is that with AVX2 auto-vectorization? What CPU?</p>
+
+
+
+<a name="263413961"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263413961" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263413961">(Dec 02 2021 at 09:54)</a>:</h4>
+<p>zenver3 avx2</p>
+
+
+
+<a name="263414426"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263414426" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Hans Kratz <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263414426">(Dec 02 2021 at 09:58)</a>:</h4>
+<p>The 128 byte block size might play a role there, simdutf8 uses 64.</p>
+
+
+
+<a name="263414683"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263414683" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Hans Kratz <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263414683">(Dec 02 2021 at 10:01)</a>:</h4>
+<p>How much of a win is it compared to std with just sse2?</p>
+
+
+
+<a name="263423450"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263423450" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263423450">(Dec 02 2021 at 11:28)</a>:</h4>
+<p><a href="https://rust.godbolt.org/z/GssEa5njE">https://rust.godbolt.org/z/GssEa5njE</a><br>
+std doesn't vectorize at all.  For ascii it attempts (u64 || u64) &amp; mask == 0 which is only half as fast as 128 byte avx2.</p>
+
+
+
+<a name="263423538"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263423538" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Bot+ <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263423538">(Dec 02 2021 at 11:29)</a>:</h4>
+<p>I did try running with different -C target-cpu x86-64 versions but any differences were lost in turbo boost noise.</p>
+
+
+
+<a name="263423807"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263423807" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263423807">(Dec 02 2021 at 11:32)</a>:</h4>
+<p>If you're on linux you can disable turbo at runtime. <code>echo 0 &gt; /sys/devices/system/cpu/cpufreq/boost</code> for AMDs.</p>
+
+
+
+<a name="263427802"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263427802" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263427802">(Dec 02 2021 at 12:15)</a>:</h4>
+<p>I often use <code>echo performance | sudo -k tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor</code> during benchmarking.</p>
+
+
+
+<a name="263615836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263615836" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263615836">(Dec 03 2021 at 18:02)</a>:</h4>
+<p><span class="user-mention" data-user-id="133247">@bjorn3</span> Why <code>-k</code>?</p>
+
+
+
+<a name="263616100"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263616100" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263616100">(Dec 03 2021 at 18:04)</a>:</h4>
+<p>So sudo will ask again for my password the next time it is used, even inside the same pty. I don't need to run sudo while benchmarking, so this slightly improves security.</p>
+
+
+
+<a name="263623845"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263623845" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263623845">(Dec 03 2021 at 19:07)</a>:</h4>
+<p>Do you want that for sudo in general, or just in this case?</p>
+
+
+
+<a name="263628918"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263628918" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263628918">(Dec 03 2021 at 19:49)</a>:</h4>
+<p>I do the same for the command to lower perf's paranoid level. If what I am doing is anything for which I may need to run multiple sudo commands, I don't use <code>-k</code>.</p>
+
+
+
+<a name="263872612"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263872612" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263872612">(Dec 06 2021 at 16:07)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="281757">Jubilee</span> <a href="#narrow/stream/247081-t-compiler.2Fperformance/topic/Faster.20str.20validation/near/263343762">said</a>:</p>
+<blockquote>
+<p>Weeeell, the things I think we might consider for AVX512 are likely to be the ones that can use ymm and xmm registers as well, so may dodge any power licensing issues on weaker machines.</p>
+</blockquote>
+<p>I’m sorry, can someone clarify for me what “power licensing” denotes? Is this something technological, e.g. dynamically adjusting which CPU components are active in order to reduce overall energy consumption? Or is it something legal, e.g. some aspect of CPU design being patented due to original innovation in POWER architecture?</p>
+
+
+
+<a name="263873222"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263873222" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263873222">(Dec 06 2021 at 16:11)</a>:</h4>
+<p>I believe it is basically that a cpu core is downclocked for a non-negligible amount of time if you execute even a single instruction that requires a lot of power, thus causing a net slowdown if you don't use such instructions a lot.</p>
+
+
+
+<a name="263882881"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263882881" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263882881">(Dec 06 2021 at 17:12)</a>:</h4>
+<blockquote>
+<p>There are three frequency levels, so-called licenses, from fastest to slowest: L0, L1 and L2. L0 is the "nominal" speed you'll see written on the box: when the chip says "3.5 GHz turbo", they are referring to the single-core L0 turbo. L1 is a lower speed sometimes called AVX turbo or AVX2 turbo5, originally associated with AVX and AVX2 instructions1. L2 is a lower speed than L1, sometimes called "AVX-512 turbo".</p>
+</blockquote>
+<p><a href="https://stackoverflow.com/questions/56852812/simd-instructions-lowering-cpu-frequency/56861355#56861355">https://stackoverflow.com/questions/56852812/simd-instructions-lowering-cpu-frequency/56861355#56861355</a></p>
+
+
+
+<a name="263884979"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/263884979" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#263884979">(Dec 06 2021 at 17:26)</a>:</h4>
+<p>It's more complicated than that and it changes between CPU generations, but the rough outline is fine.</p>
+
+
+
+<a name="264215776"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/264215776" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#264215776">(Dec 08 2021 at 20:30)</a>:</h4>
+<p>The other answers are good. Yes, it's technological only, the "licensing". It is also, I should note, a somewhat overrated concern even for e.g. Skylake, but it is much less of a concern as of Ice Lake. These two posts are good, reflecting good guidelines for AVX512 around ~Skylake and then on ~Ice Lake.<br>
+<a href="https://lemire.me/blog/2018/09/07/avx-512-when-and-how-to-use-these-new-instructions/">https://lemire.me/blog/2018/09/07/avx-512-when-and-how-to-use-these-new-instructions/</a><br>
+<a href="https://travisdowns.github.io/blog/2020/08/19/icl-avx512-freq.html">https://travisdowns.github.io/blog/2020/08/19/icl-avx512-freq.html</a></p>
+
+
+
+<a name="264223636"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/264223636" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#264223636">(Dec 08 2021 at 21:32)</a>:</h4>
+<p>Recent glibc thread talking about generations of processors that can assume the safe use of small amounts of AVX512: <a href="https://sourceware.org/pipermail/libc-alpha/2021-December/133643.html">https://sourceware.org/pipermail/libc-alpha/2021-December/133643.html</a></p>
+
+
+
+<a name="264223690"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/264223690" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#264223690">(Dec 08 2021 at 21:32)</a>:</h4>
+<p>The current hypothesis is "if you have AVX512-VNNI, you can assume the whole CPU doesn't slow down for AVX512 enough to matter".</p>
+
+
+
+<a name="264224361"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/264224361" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#264224361">(Dec 08 2021 at 21:37)</a>:</h4>
+<p>The thread only seems to be about load and store instructions. For anything other than memcpy/memset we'd need more than that.</p>
+
+
+
+<a name="264224671"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/264224671" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#264224671">(Dec 08 2021 at 21:39)</a>:</h4>
+<p>I think that's because that's the most common thing glibc wants to use from AVX512.</p>
+
+
+
+<a name="264225271"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/264225271" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#264225271">(Dec 08 2021 at 21:45)</a>:</h4>
+<p>Yeah, that doesn't really apply to even integral arithmetic code, only like... load, store, and some things like bitwhacks.</p>
+
+
+
+<a name="264225659"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/264225659" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#264225659">(Dec 08 2021 at 21:49)</a>:</h4>
+<p>And they're only measuring dips in the turbo frequency, there's also this: <a href="https://travisdowns.github.io/blog/2020/01/17/avxfreq1.html#voltage-only-transitions">https://travisdowns.github.io/blog/2020/01/17/avxfreq1.html#voltage-only-transitions</a><br>
+granted, the impact of that is lower, but non-zero</p>
+<blockquote>
+<p>Here, we have the worst case scenario of transitions packed as closely as possible, but we lose only ~20 μs (for 2 transitions) out of 760 μs, less than a 3% impact.</p>
+</blockquote>
+
+
+
+<a name="264226104"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/247081-t-compiler/performance/topic/Faster%20str%20validation/near/264226104" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/247081-t-compiler/performance/topic/Faster.20str.20validation.html#264226104">(Dec 08 2021 at 21:52)</a>:</h4>
+<p>Oh, wait, that also applies to 256bit instructions</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

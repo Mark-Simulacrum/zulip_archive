@@ -1,0 +1,507 @@
+<html>
+<head><meta charset="utf-8"><title>THIR-dependent queries design · project-thir-unsafeck · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/index.html">project-thir-unsafeck</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html">THIR-dependent queries design</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="230276499"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230276499" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230276499">(Mar 14 2021 at 22:49)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> I'd like some advice about the query model for all the queries that need THIR. I've been thinking about this and I have a few ideas, I'd love to have your feedback</p>
+<p>First, how do I pass the THIR across the query boundary? I'm assuming that the keys are hashed to be stored in cache, and I don't think the THIR should be hashed, so I thought I could create a wrapper that looks like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">ThirAnd</span><span class="o">&lt;'</span><span class="na">thir</span><span class="p">,</span><span class="w"> </span><span class="o">'</span><span class="na">tcx</span><span class="p">,</span><span class="w"> </span><span class="n">T</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">key</span>: <span class="nc">T</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">thir</span>: <span class="kp">&amp;</span><span class="o">'</span><span class="na">thir</span> <span class="nc">Expr</span><span class="o">&lt;'</span><span class="na">thir</span><span class="p">,</span><span class="w"> </span><span class="o">'</span><span class="na">tcx</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="o">&lt;'</span><span class="na">thir</span><span class="p">,</span><span class="w"> </span><span class="o">'</span><span class="na">tcx</span><span class="p">,</span><span class="w"> </span><span class="n">T</span>: <span class="nc">Hash</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Hash</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">ThirAnd</span><span class="o">&lt;'</span><span class="na">thir</span><span class="p">,</span><span class="w"> </span><span class="o">'</span><span class="na">tcx</span><span class="p">,</span><span class="w"> </span><span class="n">T</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">hash</span><span class="o">&lt;</span><span class="n">H</span>: <span class="nc">Hasher</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">state</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="n">H</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">key</span><span class="p">.</span><span class="n">hash</span><span class="p">(</span><span class="n">state</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>And then define my queries to take e.g. <code>ThirAnd&lt;LocalDefId&gt;</code>.</p>
+<p>Second, how do I share the THIR with every query that needs it? I thought that instead of queries ensuring themselves all over the place, I could have the <code>analysis</code> query create the THIR and call all relevant queries, which allows to call e.g. the thir unsafeck without building MIR.</p>
+<p>Third, in the unsafeck, I need to be able to know in which safety context a particular closure has been created, and I see two options to solve this problem:</p>
+<ul>
+<li>after unsafe-checking the parent body, return a list of closures and their safety context, and handle closures last in <code>analysis</code> (the list gets stored as the result of a query, which sounds suboptimal)</li>
+<li>have the THIR be a stealable query, and make the unsafeck generate THIR for closures when it needs to (might cause the THIR for closures to pile up in memory before getting freed)</li>
+</ul>
+
+
+
+<a name="230392344"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230392344" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230392344">(Mar 15 2021 at 18:04)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="255061">Léo Lanteri Thauvin</span> <a href="#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design/near/230276499">said</a>:</p>
+<blockquote>
+<p>First, how do I pass the THIR across the query boundary?</p>
+</blockquote>
+<p>The simplest would probably be <code>LocalDefId -&gt; Steal&lt;Thir&lt;'tcx, 'tcx&gt;&gt;</code> query.<br>
+I agree the THIR should not be hashed. Since it merges the HIR and the type checking results,<br>
+an anonymous query could be enough.</p>
+<blockquote>
+<p>Second, how do I share the THIR with every query that needs it? I thought that instead of queries ensuring themselves all over the place, I could have the <code>analysis</code> query create the THIR and call all relevant queries, which allows to call e.g. the thir unsafeck without building MIR.</p>
+</blockquote>
+<p>IIUC, the THIR will be stolen by <code>mir_built</code>.<br>
+In that case, it makes sense for that query to ensure that all THIR-dependent queries have run.</p>
+<blockquote>
+<p>Third, in the unsafeck, I need to be able to know in which safety context a particular closure has been created, and I see two options to solve this problem:</p>
+<ul>
+<li>after unsafe-checking the parent body, return a list of closures and their safety context, and handle closures last in <code>analysis</code> (the list gets stored as the result of a query, which sounds suboptimal)</li>
+<li>have the THIR be a stealable query, and make the unsafeck generate THIR for closures when it needs to (might cause the THIR for closures to pile up in memory before getting freed)</li>
+</ul>
+</blockquote>
+<p>I guess the question is: how is the THIR split?<br>
+Does the <code>LocalDefId</code>represent a HIR owner or a definition?<br>
+HIR owners roughly correspond to Items, while definitions can also encompass closures.<br>
+HIR is split by HIR owner, MIR is split by definition.</p>
+
+
+
+<a name="230401174"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230401174" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230401174">(Mar 15 2021 at 19:06)</a>:</h4>
+<p>Why do you think the THIR should not be hashed, <span class="user-mention" data-user-id="255061">@Léo Lanteri Thauvin</span> ?</p>
+
+
+
+<a name="230401212"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230401212" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230401212">(Mar 15 2021 at 19:06)</a>:</h4>
+<p>Hashing would have the advantage of working well with the incremental computation system</p>
+
+
+
+<a name="230401245"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230401245" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230401245">(Mar 15 2021 at 19:07)</a>:</h4>
+<p>But perhaps the belief is that if the HIR is different, the THIR will also be different. I guess i'd say 'maybe'</p>
+
+
+
+<a name="230402234"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230402234" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230402234">(Mar 15 2021 at 19:15)</a>:</h4>
+<p>I'm not saying that the THIR should never be hashed, I just don't think we should hash it <em>as a key</em> to some query</p>
+
+
+
+<a name="230434590"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230434590" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230434590">(Mar 15 2021 at 22:58)</a>:</h4>
+<p>I wouldn't expect it to be the key to any query</p>
+
+
+
+<a name="230434603"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230434603" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230434603">(Mar 15 2021 at 22:59)</a>:</h4>
+<p>i would expect te steal strategy, as <span class="user-mention" data-user-id="248906">@cjgillot</span> suggested</p>
+
+
+
+<a name="230434620"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230434620" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230434620">(Mar 15 2021 at 22:59)</a>:</h4>
+<p>we will have to hash it then as the <strong>result</strong> of a query</p>
+
+
+
+<a name="230434628"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/230434628" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#230434628">(Mar 15 2021 at 22:59)</a>:</h4>
+<p><span class="user-mention" data-user-id="255061">@Léo Lanteri Thauvin</span> <span aria-label="point up" class="emoji emoji-1f446" role="img" title="point up">:point_up:</span></p>
+
+
+
+<a name="233115778"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233115778" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233115778">(Apr 04 2021 at 22:00)</a>:</h4>
+<p>After a suggestion from <span class="user-mention silent" data-user-id="248906">cjgillot</span> I tried storing the THIR in <code>IndexVec</code>s instead of in an <code>Arena</code>, to be able to fit it in a stealable query. Implementation is in <a href="https://github.com/rust-lang/rust/issues/83842">#83842</a></p>
+
+
+
+<a name="233115899"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233115899" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233115899">(Apr 04 2021 at 22:02)</a>:</h4>
+<p>A first perf run reported mild regressions in instruction counts on many tests, and mas-rss blew up (up to 23.7%) on a few tests</p>
+
+
+
+<a name="233116036"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233116036" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233116036">(Apr 04 2021 at 22:05)</a>:</h4>
+<p>I also have a prototype for the actual query, but I'm getting incremental compilation errors ("found unstable fingerprints"), probably because I slapped <code>#[derive(HashStable)]</code> on any type that needed it without really thinking <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span></p>
+
+
+
+<a name="233179158"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233179158" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233179158">(Apr 05 2021 at 14:32)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> I'd like to have your thoughts on this</p>
+
+
+
+<a name="233184830"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233184830" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233184830">(Apr 05 2021 at 15:09)</a>:</h4>
+<p><span class="user-mention" data-user-id="255061">@Léo Lanteri Thauvin</span> so we are now arena allocating the THIR for everything? interesting that we saw max-rss blow-up</p>
+
+
+
+<a name="233184864"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233184864" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233184864">(Apr 05 2021 at 15:09)</a>:</h4>
+<p>I would think that we would actually be able to <em>reduce</em> max-rss</p>
+
+
+
+<a name="233184877"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233184877" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233184877">(Apr 05 2021 at 15:09)</a>:</h4>
+<p>via stealable queries</p>
+
+
+
+<a name="233184906"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233184906" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233184906">(Apr 05 2021 at 15:09)</a>:</h4>
+<p>maybe we can set it up to pipeline a bit better</p>
+
+
+
+<a name="233184936"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233184936" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233184936">(Apr 05 2021 at 15:09)</a>:</h4>
+<p>by and large I think <span class="user-mention" data-user-id="248906">@cjgillot</span>'s suggeston is good, but the perf regressions are a drag</p>
+
+
+
+<a name="233185028"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185028" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185028">(Apr 05 2021 at 15:10)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116009">nikomatsakis</span> <a href="#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design/near/233184906">said</a>:</p>
+<blockquote>
+<p>maybe we can set it up to pipeline a bit better</p>
+</blockquote>
+<p>specifically: before I think we never built the THIR for more than one fn at a time</p>
+
+
+
+<a name="233185055"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185055" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185055">(Apr 05 2021 at 15:10)</a>:</h4>
+<p>I suspect we can preserve that property with a bit of tweaking</p>
+
+
+
+<a name="233185065"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185065" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185065">(Apr 05 2021 at 15:10)</a>:</h4>
+<p>Right now we just tested the perf for the change from arena-allocation to "vec-allocation"</p>
+
+
+
+<a name="233185161"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185161" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185161">(Apr 05 2021 at 15:10)</a>:</h4>
+<p>And patterns are still handled separately</p>
+
+
+
+<a name="233185518"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185518" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185518">(Apr 05 2021 at 15:13)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116009">nikomatsakis</span> <a href="#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design/near/233184864">said</a>:</p>
+<blockquote>
+<p>I would think that we would actually be able to <em>reduce</em> max-rss</p>
+</blockquote>
+<p>It only blew up on a few tests, for the rest of the tests it's not a clear regression</p>
+
+
+
+<a name="233185837"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185837" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185837">(Apr 05 2021 at 15:15)</a>:</h4>
+<p>ok</p>
+
+
+
+<a name="233185855"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185855" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185855">(Apr 05 2021 at 15:15)</a>:</h4>
+<p>do you see what I mean about being able to reduce total memory usage?</p>
+
+
+
+<a name="233185878"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185878" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185878">(Apr 05 2021 at 15:15)</a>:</h4>
+<p>specifically, I think that when constructing MIR, we should steal the THIR, and then drop it</p>
+
+
+
+<a name="233185908"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185908" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185908">(Apr 05 2021 at 15:16)</a>:</h4>
+<p>and we should make the "unsafe checking" be per function</p>
+
+
+
+<a name="233185966"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233185966" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233185966">(Apr 05 2021 at 15:16)</a>:</h4>
+<p>so that we don't build the THIR for all functions ever, but instead work all the way through for one function</p>
+
+
+
+<a name="233186047"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233186047" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233186047">(Apr 05 2021 at 15:17)</a>:</h4>
+<p>Yes, I have tried to implement that on top of this change, but I hit incremental compilation errors</p>
+
+
+
+<a name="233186107"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233186107" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233186107">(Apr 05 2021 at 15:17)</a>:</h4>
+<p>Let me push the branch</p>
+
+
+
+<a name="233186126"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233186126" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233186126">(Apr 05 2021 at 15:17)</a>:</h4>
+<p>This PR does not implement the stealing part yet, does it?</p>
+
+
+
+<a name="233186147"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233186147" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233186147">(Apr 05 2021 at 15:17)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="248906">cjgillot</span> <a href="#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design/near/233186126">said</a>:</p>
+<blockquote>
+<p>This PR does not implement the stealing part yet, does it?</p>
+</blockquote>
+<p>Correct</p>
+
+
+
+<a name="233186243"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233186243" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233186243">(Apr 05 2021 at 15:18)</a>:</h4>
+<p>I am quite puzzled that the size of <code>Expr</code> increases. Any idea why?</p>
+
+
+
+<a name="233186474"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233186474" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233186474">(Apr 05 2021 at 15:19)</a>:</h4>
+<p>Are <code>newtype_index!</code> types always <code>u32</code>?</p>
+
+
+
+<a name="233186854"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233186854" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233186854">(Apr 05 2021 at 15:21)</a>:</h4>
+<p>Yes, and the compiler reserves part of the range for layout optimizations.</p>
+
+
+
+<a name="233186931"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233186931" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> cjgillot <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233186931">(Apr 05 2021 at 15:21)</a>:</h4>
+<p>So its actually more like 31 bits.</p>
+
+
+
+<a name="233186971"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233186971" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233186971">(Apr 05 2021 at 15:22)</a>:</h4>
+<p>Ah, interesting, I thought it could be because we removed the niche in e.g. <code>Option&lt;ExprId&gt;</code></p>
+
+
+
+<a name="233187383"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233187383" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233187383">(Apr 05 2021 at 15:24)</a>:</h4>
+<p>Could it be changing <code>FruInfo::field_types</code> from a slice to a <code>Vec</code>?</p>
+
+
+
+<a name="233187691"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233187691" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233187691">(Apr 05 2021 at 15:26)</a>:</h4>
+<p>It's used in <code>ExprKind::Adt</code> and I wouldn't be surprised if it was the biggest variant in the enum</p>
+
+
+
+<a name="233188379"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233188379" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233188379">(Apr 05 2021 at 15:32)</a>:</h4>
+<p><span class="user-mention" data-user-id="248906">@cjgillot</span> Do you want to try a perf run with <code>Box&lt;[Ty]&gt;</code> instead of <code>Vec&lt;Ty&gt;</code>?</p>
+
+
+
+<a name="233189140"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233189140" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233189140">(Apr 05 2021 at 15:37)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="255061">Léo Lanteri Thauvin</span> <a href="#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design/near/233186047">said</a>:</p>
+<blockquote>
+<p>Yes, I have tried to implement that on top of this change, but I hit incremental compilation errors</p>
+</blockquote>
+<p>Current state of implementation: <a href="https://github.com/LeSeulArtichaut/rust/tree/thir-query">https://github.com/LeSeulArtichaut/rust/tree/thir-query</a></p>
+
+
+
+<a name="233855814"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/233855814" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#233855814">(Apr 09 2021 at 16:51)</a>:</h4>
+<p>So what do we want to do with <a href="https://github.com/rust-lang/rust/issues/83842">#83842</a>?</p>
+
+
+
+<a name="234173705"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/234173705" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#234173705">(Apr 12 2021 at 14:58)</a>:</h4>
+<p>looking</p>
+
+
+
+<a name="234173767"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/234173767" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#234173767">(Apr 12 2021 at 14:58)</a>:</h4>
+<p><span class="user-mention" data-user-id="255061">@Léo Lanteri Thauvin</span> the memory usage etc is still significantly worse, right?</p>
+
+
+
+<a name="234173798"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/234173798" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#234173798">(Apr 12 2021 at 14:58)</a>:</h4>
+<p>maybe we can schedule a time to dig into this? I've had a hard time finding time to talk or think about it :)</p>
+
+
+
+<a name="234173838"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/234173838" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#234173838">(Apr 12 2021 at 14:59)</a>:</h4>
+<p>There hasn't been a perf run since last time</p>
+
+
+
+<a name="234173920"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/234173920" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#234173920">(Apr 12 2021 at 14:59)</a>:</h4>
+<p>So we haven't tested the perf impact of replacing the Vec with a boxed slice</p>
+
+
+
+<a name="234174558"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/234174558" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#234174558">(Apr 12 2021 at 15:01)</a>:</h4>
+<blockquote>
+<p>maybe we can schedule a time to dig into this? I've had a hard time finding time to talk or think about it :)</p>
+</blockquote>
+<p>No problem, I just can't make progress without guidance here. Also I have no computer currently (hard drive problem <span aria-label="neutral" class="emoji emoji-1f610" role="img" title="neutral">:neutral:</span>) so I wouldn't be able to do anything right now anyway</p>
+
+
+
+<a name="234175251"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/234175251" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#234175251">(Apr 12 2021 at 15:03)</a>:</h4>
+<p>Having a scheduled time to talk would be great though</p>
+
+
+
+<a name="237739543"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/237739543" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#237739543">(May 06 2021 at 22:20)</a>:</h4>
+<p>Alright, I'm back with a working computer now :)</p>
+
+
+
+<a name="237890671"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/237890671" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#237890671">(May 07 2021 at 21:10)</a>:</h4>
+<p><span class="user-mention" data-user-id="248906">@cjgillot</span> So fixing my dumb mistake of using a <code>Vec</code> instead of a boxed slice helped reducing the perf impact of <a href="https://github.com/rust-lang/rust/issues/83842">#83842</a> approximately by half: the worst max-rss regression goes from 23.7% to 11.5%, and the worst instructions count regression goes from 1.3% to 0.7%.</p>
+
+
+
+<a name="238338261"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238338261" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238338261">(May 11 2021 at 16:30)</a>:</h4>
+<p>oh, nice!</p>
+
+
+
+<a name="238778854"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238778854" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238778854">(May 14 2021 at 14:49)</a>:</h4>
+<p>I'm running into an issue in <a href="https://github.com/rust-lang/rust/issues/85273">#85273</a> where rustc doesn't run the THIR unsafeck for all bodies in the crate, leading to some tests failing because I don't emit all the errors that are expected</p>
+
+
+
+<a name="238779123"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238779123" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238779123">(May 14 2021 at 14:51)</a>:</h4>
+<p>I'm going to debug it, but if someone has an idea (even vague) of why this happens, I'll take it :)</p>
+
+
+
+<a name="238791549"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238791549" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238791549">(May 14 2021 at 16:18)</a>:</h4>
+<p>Ok, a few builds later I have found the issue</p>
+
+
+
+<a name="238792002"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238792002" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238792002">(May 14 2021 at 16:22)</a>:</h4>
+<p>looking briefly</p>
+
+
+
+<a name="238792222"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238792222" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238792222">(May 14 2021 at 16:23)</a>:</h4>
+<p>oh, you found it</p>
+
+
+
+<a name="238792224"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238792224" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238792224">(May 14 2021 at 16:23)</a>:</h4>
+<p>ok!</p>
+
+
+
+<a name="238792389"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238792389" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238792389">(May 14 2021 at 16:24)</a>:</h4>
+<p>Sometimes (looks like constants and async fns are concerned) typeck needs to run borrowck</p>
+
+
+
+<a name="238792436"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238792436" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238792436">(May 14 2021 at 16:25)</a>:</h4>
+<p>Which needs mir_build, which triggers thir-unsafeck</p>
+
+
+
+<a name="238792777"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238792777" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238792777">(May 14 2021 at 16:26)</a>:</h4>
+<p>And since an error in typeck short-circuits the rest of the compilation process we don't get to check the rest of the crate</p>
+
+
+
+<a name="238792987"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238792987" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238792987">(May 14 2021 at 16:27)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> How would I fix this? Do I just accept that I get only a part of the errors or would you prefer another solution?</p>
+
+
+
+<a name="238819244"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238819244" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238819244">(May 14 2021 at 19:43)</a>:</h4>
+<p><span class="user-mention" data-user-id="255061">@Léo Lanteri Thauvin</span> Ah, hmm, so the problem is that we are now running thir-unsafeck eralier in the pipeline?</p>
+
+
+
+<a name="238819255"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238819255" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238819255">(May 14 2021 at 19:43)</a>:</h4>
+<p>can you point me at the test?</p>
+
+
+
+<a name="238819274"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238819274" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238819274">(May 14 2021 at 19:43)</a>:</h4>
+<p>I'm grmpy about typeck running borrowck, I dont like that :)</p>
+
+
+
+<a name="238821660"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238821660" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238821660">(May 14 2021 at 20:00)</a>:</h4>
+<p>Well, we're not running thir-unsafeck earlier, it's being run by mir_build which is required by typeck in specific cases</p>
+
+
+
+<a name="238827125"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238827125" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Léo Lanteri Thauvin <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238827125">(May 14 2021 at 20:44)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116009">nikomatsakis</span> <a href="#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design/near/238819255">said</a>:</p>
+<blockquote>
+<p>can you point me at the test?</p>
+</blockquote>
+<p>See the failures in <a href="https://github.com/rust-lang/rust/runs/2587180748">https://github.com/rust-lang/rust/runs/2587180748</a></p>
+
+
+
+<a name="238876579"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238876579" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238876579">(May 15 2021 at 07:21)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="255061">Léo Lanteri Thauvin</span> <a href="#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design/near/238821660">said</a>:</p>
+<blockquote>
+<p>Well, we're not running thir-unsafeck earlier, it's being run by mir_build which is required by typeck in specific cases</p>
+</blockquote>
+<p>this is what  meant by earlier-- earlier in the "pipeline"</p>
+
+
+
+<a name="238876627"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238876627" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238876627">(May 15 2021 at 07:21)</a>:</h4>
+<p>that said, this seems potentially just "ok" to me</p>
+
+
+
+<a name="238876631"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/278509-project-thir-unsafeck/topic/THIR-dependent%20queries%20design/near/238876631" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/278509-project-thir-unsafeck/topic/THIR-dependent.20queries.20design.html#238876631">(May 15 2021 at 07:21)</a>:</h4>
+<p>we may want to adjust the tests though</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

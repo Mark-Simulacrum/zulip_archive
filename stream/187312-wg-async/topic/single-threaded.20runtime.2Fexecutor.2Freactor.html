@@ -1,0 +1,85 @@
+<html>
+<head><meta charset="utf-8"><title>single-threaded runtime/executor/reactor · wg-async · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/index.html">wg-async</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html">single-threaded runtime/executor/reactor</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="210130785"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/210130785" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ahmed Charles <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#210130785">(Sep 15 2020 at 13:43)</a>:</h4>
+<p>I'm curious how possible it is to create a single-threaded runtime and what the options are there. <code>Waker</code> requires being <code>Send</code> and <code>Sync</code> which seems to have some knock-on effects on what a task has to look like in terms of synchronization. I'm interested in using Rust where I want the safety of ownership and the ergonomics of async/await but without the cost of sync primitives. Any ideas/experiences?</p>
+
+
+
+<a name="213347222"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/213347222" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Didrik Nordstrom <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#213347222">(Oct 14 2020 at 20:41)</a>:</h4>
+<p>Sorry for late reply. I've been thinking about this problem too. You are correct that Waker is Send and Sync and thus must use sync primitives and a notification mechanism if it is to be woken up by another thread. You can still write a true single-threaded executor without it, but then the waker can't be safely transferred to another thread.</p>
+<p>Theoretically you could make a hybrid model where you use a thread id to invoke a fast path, and the more expensive path when on a different thread. However, you still have to pay the price of atomics in Arc::clone when the waker is cloned.</p>
+
+
+
+<a name="213347687"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/213347687" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Didrik Nordstrom <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#213347687">(Oct 14 2020 at 20:42)</a>:</h4>
+<p>Another option is to panic if called from a different thread, if you want to build confidence that none of the futures on your path are leaking the waker to another thread.</p>
+
+
+
+<a name="213347926"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/213347926" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Didrik Nordstrom <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#213347926">(Oct 14 2020 at 20:45)</a>:</h4>
+<p>A third option that I've considered is to write a single-threaded version of <code>std</code> where you replace atomic::* with regular non-atomic operations, as well as panic in <code>thread::spawn</code>. That way you could reuse a lot of the eco-system without rewriting all the !Send types (there are a lot of them and many don't have !Send equivalents).</p>
+
+
+
+<a name="213349888"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/213349888" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lucio Franco <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#213349888">(Oct 14 2020 at 20:59)</a>:</h4>
+<p>There was a workaround provided in the waker RFC, and it uses a thread_local with slots. Not sure what the performance is at with that.</p>
+
+
+
+<a name="213378345"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/213378345" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#213378345">(Oct 15 2020 at 04:00)</a>:</h4>
+<p>raw thread locals are generally pretty fast, you calculate their address using an offset from a register whose value is different in each thread.</p>
+
+
+
+<a name="213378357"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/213378357" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#213378357">(Oct 15 2020 at 04:00)</a>:</h4>
+<p>(this is probably quite architecture specific, but that's how it works on x64 and I think arm64)</p>
+
+
+
+<a name="214012425"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/214012425" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Matthias247 <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#214012425">(Oct 21 2020 at 06:33)</a>:</h4>
+<p>I think I commented back on the original RFC about this topic, and about lots of the possibilities that <span class="user-mention" data-user-id="137147">@Didrik Nordstrom</span> mentions here.<br>
+I'm too lazy to look it up right now. But afaik there were some issues with those fast-path, and the "workaround" didn't really work.</p>
+<p>A rough remembering I have is that something didn't work because we really required 2 pointers (1 for the task ID and one for something else - maybe the pointer to the executor or a thread ID?), while the <code>Waker</code> only allows to store a single one. Plus something else.<br>
+I would have to think about it again, but right now I deprioritized it and live with the what we have.</p>
+<blockquote>
+<p>A third option that I've considered is to write a single-threaded version of std where you replace atomic::* with regular non-atomic operations, as well as panic in thread::spawn.</p>
+</blockquote>
+<p>Sounds like Webassembly :) But now even that is getting threads.<br>
+Anyway, going that route will be rather painful because you will lose most of the ecosystem. And not only the async one, but also the general Rust one which typically assumes <code>std</code> and threads are available.</p>
+
+
+
+<a name="214012946"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/214012946" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Matthias247 <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#214012946">(Oct 21 2020 at 06:43)</a>:</h4>
+<p>Ok, that as the RFC: <a href="https://github.com/rust-lang/rfcs/blob/master/text/2592-futures.md#rationale-drawbacks-and-alternatives-to-the-wakeup-design-waker">https://github.com/rust-lang/rfcs/blob/master/text/2592-futures.md#rationale-drawbacks-and-alternatives-to-the-wakeup-design-waker</a></p>
+<p>Something on top of my head: This will work, but require a global executor. If you want more than one instance (e.g. just for testing), you run into some additional challenges. Now you need to identify the executor instance. You could try to use the pointer in the <code>Waker</code> for that, but that means the access of that information needs to be thread-safe. E.g. if the <code>Waker</code> holds a reference count to the executor, then this one again needs to be atomic, since the <code>Waker</code> could be sent at any time to a different thread. This is something we wanted to avoid.</p>
+<p>I think another idea that as in the room was to store a mixture of a task ID and a global executor ID in the <code>Waker</code>. <br>
+But now generating those IDs without conflicts is a new challenge.</p>
+
+
+
+<a name="214675756"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/single-threaded%20runtime/executor/reactor/near/214675756" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ahmed Charles <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/single-threaded.20runtime.2Fexecutor.2Freactor.html#214675756">(Oct 27 2020 at 09:19)</a>:</h4>
+<p>Is there a library that actually implements this sort of runtime?</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

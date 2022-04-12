@@ -1,0 +1,818 @@
+[
+    {
+        "content": "<p>I'm profiling a really long compile with <code>perf record -F99 --call-graph dwarf</code>, like it says in the <a href=\"https://rust-lang.github.io/rustc-guide/profiling/with_perf.html#gathering-a-perf-profile\" target=\"_blank\" title=\"https://rust-lang.github.io/rustc-guide/profiling/with_perf.html#gathering-a-perf-profile\">guide</a></p>",
+        "id": 177573271,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570493665
+    },
+    {
+        "content": "<p>the top entry from <code>perf report</code> is <code>&lt;smallvec::SmallVec&lt;A&gt; as core::iter::traits::collect::FromIterator&lt;&lt;A as smallvec::Array&gt;::Item&gt;&gt;::from_iter</code></p>",
+        "id": 177573287,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570493705
+    },
+    {
+        "content": "<p>it seems we spend a ton of time building SmallVecs, but I can't figure out <em>why</em></p>",
+        "id": 177573292,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570493727
+    },
+    {
+        "content": "<p>there are no callers listed in the call graph for some reason</p>",
+        "id": 177573295,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570493745
+    },
+    {
+        "content": "<p>I tried using <code>perf focus --tree-callers</code> (cc <span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span>) and it showed the same thing</p>",
+        "id": 177573366,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570493831
+    },
+    {
+        "content": "<p>also, <code>main</code> isn't listed anywhere, and almost no query-related frames seem to be showing up, even though <code>-Z self-profile</code> says we spend almost all our time inside one kind of query</p>",
+        "id": 177573382,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570493870
+    },
+    {
+        "content": "<p>(this is in order to debug <a href=\"https://github.com/rust-lang/rust/issues/65147\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/65147\">#65147</a> since so far I haven't been able to minimize an example.. it seems the compile time correlates with the complexity of the underlying call graph of async fns)</p>",
+        "id": 177573461,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570493967
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116883\">@tmandry</span> hm, so there's no parent information (i.e., callchain) in the perf output?</p>",
+        "id": 177574227,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570494999
+    },
+    {
+        "content": "<p>I can see what that function is calling, but not what's calling it</p>",
+        "id": 177574326,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495106
+    },
+    {
+        "content": "<p>hm, that's odd -- one thing to try might be <code>--call-graph dwarf,16000</code> or some higher number to increase the stack depth</p>",
+        "id": 177574337,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495132
+    },
+    {
+        "content": "<p>yes, I tried that, all the way up to the max, no change :(</p>",
+        "id": 177574349,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495162
+    },
+    {
+        "content": "<p>it's possible I'm misreading something ofc</p>",
+        "id": 177574357,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495174
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span># Children      Self  Command  Shared Object                               Symbol\n#\n    43.60%    43.60%  rustc    librustc_driver-fd1d337d61819709.so         [.] &lt;smallvec::SmallVec&lt;A&gt; as core::iter::traits::collect::FromIterator&lt;&lt;A as smallvec::Array&gt;::Item&gt;&gt;::from_iter\n            |\n            ---&lt;smallvec::SmallVec&lt;A&gt; as core::iter::traits::collect::FromIterator&lt;&lt;A as smallvec::Array&gt;::Item&gt;&gt;::from_iter\n               |\n                --26.36%--&lt;smallvec::SmallVec&lt;A&gt; as core::iter::traits::collect::Extend&lt;&lt;A as smallvec::Array&gt;::Item&gt;&gt;::extend (inlined)\n                          |\n                          |--3.49%--smallvec::SmallVec&lt;A&gt;::triple_mut (inlined)\n                          |          |\n                          |           --0.92%--smallvec::SmallVec&lt;A&gt;::spilled (inlined)\n                          |\n                          |--2.86%--&lt;core::iter::adapters::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::size_hint (inlined)\n                          |          &lt;core::slice::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::size_hint (inlined)\n                          |\n                          |--2.18%--&lt;core::iter::adapters::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::next (inlined)\n                          |          |\n                          |          |--1.60%--&lt;core::slice::Iter&lt;T&gt; as core::iter::traits::iterator::Iterator&gt;::next (inlined)\n                          |          |\n                          |           --0.57%--core::option::Option&lt;T&gt;::map (inlined)\n                          |\n                          |--1.95%--smallvec::SmallVec&lt;A&gt;::reserve (inlined)\n                          |\n                           --0.75%--core::ptr::write (inlined)\n</pre></div>",
+        "id": 177574364,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495187
+    },
+    {
+        "content": "<p>that's the very top entry in <code>perf report</code></p>",
+        "id": 177574370,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495197
+    },
+    {
+        "content": "<p>yeah, so we're clearly spending a lot of time in collecting SmallVecs from iterators</p>",
+        "id": 177574431,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495229
+    },
+    {
+        "content": "<p>I would try maybe looking at flamegraph output via e.g. inferno <a href=\"https://github.com/jonhoo/inferno\" target=\"_blank\" title=\"https://github.com/jonhoo/inferno\">https://github.com/jonhoo/inferno</a> if you don't have a pre-existing setup with the perl scripts, and as a starter maybe just <code>perf script</code> output</p>",
+        "id": 177574454,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495298
+    },
+    {
+        "content": "<p>I would kind of expect the top entry to be something like <code>main</code>, though</p>",
+        "id": 177574461,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495306
+    },
+    {
+        "content": "<p>well, perf can't get the whole callchain usually</p>",
+        "id": 177574522,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495359
+    },
+    {
+        "content": "<p>at some point dwarf is not good enough to go up through the stack frames afaik, though I've never tried to find out why that is</p>",
+        "id": 177574544,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495392
+    },
+    {
+        "content": "<p>is this output from a local compiler?</p>",
+        "id": 177574567,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495441
+    },
+    {
+        "content": "<p>yes</p>",
+        "id": 177574632,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495489
+    },
+    {
+        "content": "<p>here's a flamegraph... <a href=\"/user_uploads/4715/68Ukpek5yxdtsYmE1A5aHVdq/flamegraph.svg\" target=\"_blank\" title=\"flamegraph.svg\">flamegraph.svg</a></p>",
+        "id": 177574878,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495822
+    },
+    {
+        "content": "<p>that looks.. very odd</p>",
+        "id": 177574910,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495888
+    },
+    {
+        "content": "<p>maybe try removing -F99 from collection?</p>",
+        "id": 177574911,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495897
+    },
+    {
+        "content": "<p>it might be that you happen to only be hitting inside the smallvec code I guess...</p>",
+        "id": 177574916,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495910
+    },
+    {
+        "content": "<p>(the default is way higher, I believe)</p>",
+        "id": 177574919,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570495921
+    },
+    {
+        "content": "<p>there's substantial time spent in <code>TypeFoldable::fold_with</code>, which makes sense because all time is being spent in <code>check_mod_item_types</code> according to <code>-Z self-profile</code></p>",
+        "id": 177574959,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495924
+    },
+    {
+        "content": "<p>I've done at least several profiles at this point, but I'll try</p>",
+        "id": 177574973,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570495954
+    },
+    {
+        "content": "<p>It might be the InternalSubsts::identity_for_item call because that's AFAICT recollecting all the generic parameters each time it's called</p>",
+        "id": 177575100,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496118
+    },
+    {
+        "content": "<p>not sure why _two_ awaits would cause a problem whereas one doesn't, but perhaps it has something to do with the temporaries we're forcing to live longer?</p>",
+        "id": 177575113,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496147
+    },
+    {
+        "content": "<p>it's gotten more complicated since I wrote that description</p>",
+        "id": 177575179,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570496216
+    },
+    {
+        "content": "<p>as it turns out, both of those awaits are in a single \"critical chain\" of awaits that causes the slowdown</p>",
+        "id": 177575192,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570496256
+    },
+    {
+        "content": "<p>if you take one of them out, you break the chain</p>",
+        "id": 177575194,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570496267
+    },
+    {
+        "content": "<p>the chain leads to one function in particular that awaits many other async fns in a match</p>",
+        "id": 177575241,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570496291
+    },
+    {
+        "content": "<p>removing awaits from that function speeds up compiles, and the more you remove the faster the compile is</p>",
+        "id": 177575259,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570496347
+    },
+    {
+        "content": "<p>yeah, so my experience with await has been that you create a ton of generics (lifetimes, mostly, but that doesn't matter here)</p>",
+        "id": 177575267,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496382
+    },
+    {
+        "content": "<p>since ~every temporary gets uplifted to be a lifetime param</p>",
+        "id": 177575273,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496399
+    },
+    {
+        "content": "<p>and I believe this code is creating a fresh SmallVec from the list whenever it encounters an opaque ty (e.g. impl trait) which is again common in async land</p>",
+        "id": 177575359,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496472
+    },
+    {
+        "content": "<p>though how you'd be able to confirm this theory I'm not sure</p>",
+        "id": 177575376,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496508
+    },
+    {
+        "content": "<p>I guess you can try with a compiler that does not have <a href=\"https://github.com/rust-lang/rust/blob/f3c9cece7b6829e6fd7854a1aee6a1619a81a38c/src/librustc_typeck/check/mod.rs#L1570-L1573\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/f3c9cece7b6829e6fd7854a1aee6a1619a81a38c/src/librustc_typeck/check/mod.rs#L1570-L1573\">these three lines</a> by just commenting them out</p>",
+        "id": 177575427,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496538
+    },
+    {
+        "content": "<p>okay, I can try that</p>",
+        "id": 177575449,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570496595
+    },
+    {
+        "content": "<p>one unfortunate bit is that it might be that this is just \"bad defaults\"</p>",
+        "id": 177575515,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496664
+    },
+    {
+        "content": "<p>previously, before async/await, we sort of always expected lists of generics etc in the compiler to be short, so all queries assume 8 elements as the default length before switching from a SmallVec to a Vec</p>",
+        "id": 177575525,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496703
+    },
+    {
+        "content": "<p>if we're going over that frequently that can be a performance cliff I imagine</p>",
+        "id": 177575531,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496713
+    },
+    {
+        "content": "<p>yeah, but this slowdown didn't happen in a compiler from a month ago</p>",
+        "id": 177575676,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570496930
+    },
+    {
+        "content": "<p>true, yeah</p>",
+        "id": 177575700,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570496976
+    },
+    {
+        "content": "<p>I think something went from <code>O(N)</code> to <code>O(N^2)</code> or similar</p>",
+        "id": 177575710,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570496987
+    },
+    {
+        "content": "<p>possibly -- this is a pretty weird query to be seeing the slow down in, since it's not really responsible for much</p>",
+        "id": 177575768,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497039
+    },
+    {
+        "content": "<p>flamegraph with many more samples: <a href=\"/user_uploads/4715/7LMFsUpTUfZAVz1BQSW430kY/flamegraph.1.svg\" target=\"_blank\" title=\"flamegraph.1.svg\">flamegraph.1.svg</a></p>",
+        "id": 177576025,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570497435
+    },
+    {
+        "content": "<p>hm that's really weird</p>",
+        "id": 177576039,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497461
+    },
+    {
+        "content": "<p><code>perf script</code> doesn't show anything either I presume? i.e., if you look for the smallvec bits</p>",
+        "id": 177576085,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497491
+    },
+    {
+        "content": "<p>I guess technically one thing you could try beyond just commenting the 3 lines is just sticking a <code>return;</code> at the top of the function - I believe this is strictly checking not inference etc so it should be a working (if buggy, in the sense that errors are no longer caught) compiler</p>",
+        "id": 177576113,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497554
+    },
+    {
+        "content": "<p>I am surprised at the lack of callchains though</p>",
+        "id": 177576176,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497638
+    },
+    {
+        "content": "<p>maybe incremental is to blame? that's the only thing I can think of</p>",
+        "id": 177576179,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497650
+    },
+    {
+        "content": "<p>one thing from <code>perf script</code> that looks interesting:</p>\n<div class=\"codehilite\"><pre><span></span>&lt;rustc::ty::util::&lt;impl rustc::ty::context::TyCtxt&gt;::try_expand_impl_trait_type::OpaqueTypeExpander as rustc::ty::fold::TypeFolder&gt;::fold_ty+0x113 (inlined)\n</pre></div>",
+        "id": 177576190,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570497677
+    },
+    {
+        "content": "<p>that's <a href=\"https://github.com/rust-lang/rust/blob/f3c9cece7b6829e6fd7854a1aee6a1619a81a38c/src/librustc/ty/util.rs#L694\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/f3c9cece7b6829e6fd7854a1aee6a1619a81a38c/src/librustc/ty/util.rs#L694\">https://github.com/rust-lang/rust/blob/f3c9cece7b6829e6fd7854a1aee6a1619a81a38c/src/librustc/ty/util.rs#L694</a></p>",
+        "id": 177576202,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497720
+    },
+    {
+        "content": "<p>which could be slow, I guess</p>",
+        "id": 177576252,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497771
+    },
+    {
+        "content": "<p>I mean I'm just cherry picking</p>",
+        "id": 177576262,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570497789
+    },
+    {
+        "content": "<p>that's from the 3 lines I suggested to comment out though</p>",
+        "id": 177576271,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497820
+    },
+    {
+        "content": "<p>(did you try that yet?)</p>",
+        "id": 177576274,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497826
+    },
+    {
+        "content": "<p>yeah, I'm building it now</p>",
+        "id": 177576276,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570497833
+    },
+    {
+        "content": "<p>ah okay :)</p>",
+        "id": 177576279,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497839
+    },
+    {
+        "content": "<p>it's slow because I have to build a stage2 compiler (cross compiling)</p>",
+        "id": 177576322,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570497860
+    },
+    {
+        "content": "<p>not sure how hard it would be to build this for my linux machine</p>",
+        "id": 177576334,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570497892
+    },
+    {
+        "content": "<p>this crate that is</p>",
+        "id": 177576337,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570497901
+    },
+    {
+        "content": "<p>I do have to head out though.. I'll check back later and post anything I learn in here and on the issue</p>",
+        "id": 177576351,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570497934
+    },
+    {
+        "content": "<p>unless there's e.g. <a href=\"http://build.rs\" target=\"_blank\" title=\"http://build.rs\">build.rs</a> involved a cargo check --target would likely work w/o stage 2 build, I imagine?</p>",
+        "id": 177576352,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497935
+    },
+    {
+        "content": "<p>mm maybe, but we don't use cargo :P</p>",
+        "id": 177576359,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570497956
+    },
+    {
+        "content": "<p>e.g. <code>x.py build --stage 1 --target &lt;target&gt; src/libtest</code> and then <code>cargo +stage1 check --target &lt;target&gt;</code></p>",
+        "id": 177576362,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497962
+    },
+    {
+        "content": "<p>well, the rustc binary would just work for that target if you did the x.py build first</p>",
+        "id": 177576411,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497979
+    },
+    {
+        "content": "<p>in theory</p>",
+        "id": 177576412,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570497981
+    },
+    {
+        "content": "<p>good to know. I don't think we have the ability to do <code>check</code> in our build system but I could hack it in</p>",
+        "id": 177576418,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570498012
+    },
+    {
+        "content": "<p>to be clear you could plausibly even do build, but that has a linker dependency and you might not be able to satisfy that for said target</p>",
+        "id": 177576426,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570498043
+    },
+    {
+        "content": "<p>I guess you'd need the linker to get a std for said target in stage 2, so it should \"just work\" I would think</p>",
+        "id": 177576434,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570498079
+    },
+    {
+        "content": "<p>if not feel free to bug me :)</p>",
+        "id": 177576475,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570498084
+    },
+    {
+        "content": "<p>okay, I'll start building it that way, this should save me some time :)</p>",
+        "id": 177576589,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570498260
+    },
+    {
+        "content": "<p>I have to go now though</p>",
+        "id": 177576597,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570498265
+    },
+    {
+        "content": "<p>thanks for all your help!!</p>",
+        "id": 177576600,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570498273
+    },
+    {
+        "content": "<p>There was a PR somewhere around related to collecting into SmallVec</p>",
+        "id": 177576905,
+        "sender_full_name": "nagisa",
+        "timestamp": 1570498587
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/pull/64949\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/64949\">https://github.com/rust-lang/rust/pull/64949</a></p>",
+        "id": 177576917,
+        "sender_full_name": "nagisa",
+        "timestamp": 1570498608
+    },
+    {
+        "content": "<p>(<code>from_iter</code> == <code>collect</code> pretty much)</p>",
+        "id": 177576946,
+        "sender_full_name": "nagisa",
+        "timestamp": 1570498655
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116883\">@tmandry</span> ^ pinging just so you notice before you spend too much time on it</p>",
+        "id": 177577008,
+        "sender_full_name": "nagisa",
+        "timestamp": 1570498691
+    },
+    {
+        "content": "<p>thanks. unfortunately I lost access to my workstation so I'll have to wait until tomorrow to make more progress.</p>",
+        "id": 177584160,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570510226
+    },
+    {
+        "content": "<p>there are some problems with perf and deep stacks</p>",
+        "id": 177619693,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1570544468
+    },
+    {
+        "content": "<p>there's a hard coded limit of 2^16 bytes of stack data being collected or something</p>",
+        "id": 177619725,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1570544487
+    },
+    {
+        "content": "<p>which is rather hard to circumvent</p>",
+        "id": 177619735,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1570544491
+    },
+    {
+        "content": "<p>that leads to the \"bottom\" of a stack trace being cut off</p>",
+        "id": 177619746,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1570544497
+    },
+    {
+        "content": "<p>in general, I've found perf has become quite unuseful lately</p>",
+        "id": 177619769,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1570544510
+    },
+    {
+        "content": "<p>I just confirmed that the slowdown is indeed inside <code>check_item_type</code> for opaque types</p>",
+        "id": 177639365,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570556132
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116883\">@tmandry</span> I guess digging in by just commenting and rebuilding would be the next step unfortunately -- maybe you could try eprintln!(...) at some random places since the number of queries executed is low</p>",
+        "id": 177647425,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570561136
+    },
+    {
+        "content": "<p>ah, so the PR that <span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> linked does indeed seem to fix this issue</p>",
+        "id": 177664672,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570573109
+    },
+    {
+        "content": "<p>that's.. a crazy speedup</p>",
+        "id": 177664847,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570573286
+    },
+    {
+        "content": "<p>glad my wikipedia could save you some effort!</p>",
+        "id": 177669144,
+        "sender_full_name": "nagisa",
+        "timestamp": 1570577313
+    },
+    {
+        "content": "<p>ah, nevermind.. I may have been confused</p>",
+        "id": 177674382,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570584275
+    },
+    {
+        "content": "<p>Welp. I was worried that it would not help, as the stack trace you have is in an entirely different place.</p>",
+        "id": 177674395,
+        "sender_full_name": "nagisa",
+        "timestamp": 1570584334
+    },
+    {
+        "content": "<p>but perhaps something similar in the location you are seeing issues would be beneficial</p>",
+        "id": 177674402,
+        "sender_full_name": "nagisa",
+        "timestamp": 1570584358
+    },
+    {
+        "content": "<p>yeah, maybe</p>",
+        "id": 177674523,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570584518
+    },
+    {
+        "content": "<p>it happens when checking for cycles inside opaque types</p>",
+        "id": 177674528,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570584533
+    },
+    {
+        "content": "<p>which is one of the backtraces I posted yesterday, but I wasn't sure then</p>",
+        "id": 177674540,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570584573
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/blob/f3c9cece7b6829e6fd7854a1aee6a1619a81a38c/src/librustc/ty/util.rs#L694\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/f3c9cece7b6829e6fd7854a1aee6a1619a81a38c/src/librustc/ty/util.rs#L694\">https://github.com/rust-lang/rust/blob/f3c9cece7b6829e6fd7854a1aee6a1619a81a38c/src/librustc/ty/util.rs#L694</a></p>",
+        "id": 177674541,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570584574
+    },
+    {
+        "content": "<p>which I think actually delegates to some of the code changed in that PR (the <code>substs.fold_with(self)</code>)</p>",
+        "id": 177674692,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570584772
+    },
+    {
+        "content": "<p>It would be good to be sure that that expander is responsible (easiest way is probably to comment it out)</p>",
+        "id": 177674712,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570584807
+    },
+    {
+        "content": "<p>though I suspect you are right that it is</p>",
+        "id": 177674765,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1570584854
+    },
+    {
+        "content": "<p>working on double checking that..</p>",
+        "id": 177675777,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570586365
+    },
+    {
+        "content": "<p>in the meantime, I tried building with the stage 1 compiler and it complains about not finding std</p>",
+        "id": 177675780,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570586371
+    },
+    {
+        "content": "<p>cargo also doesn't get put in <code>stage1/bin</code>, so I symlinked it (we use cargo for third-party crates right now)</p>",
+        "id": 177676044,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570586759
+    },
+    {
+        "content": "<p>but when it comes to rustbuild hackery I mostly have no idea what I'm doing <span aria-label=\"smiley\" class=\"emoji emoji-1f603\" role=\"img\" title=\"smiley\">:smiley:</span></p>",
+        "id": 177676089,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570586791
+    },
+    {
+        "content": "<p>double checked and the slowdown is definitely happening inside <code>check_opaque_for_cycles</code>, btw</p>",
+        "id": 177676839,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570587816
+    },
+    {
+        "content": "<p>I added a log to see all the types it folds.. this may have been a mistake :D</p>",
+        "id": 177676909,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570587884
+    },
+    {
+        "content": "<p><a href=\"https://gist.githubusercontent.com/tmandry/f172f0ac2f2bfc21d0e3fc1b89eeb9d6/raw/acdeeceda8145a650f081e30eba86fd4a8e5501d/rustc.log\" target=\"_blank\" title=\"https://gist.githubusercontent.com/tmandry/f172f0ac2f2bfc21d0e3fc1b89eeb9d6/raw/acdeeceda8145a650f081e30eba86fd4a8e5501d/rustc.log\">https://gist.githubusercontent.com/tmandry/f172f0ac2f2bfc21d0e3fc1b89eeb9d6/raw/acdeeceda8145a650f081e30eba86fd4a8e5501d/rustc.log</a></p>",
+        "id": 177677137,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570588320
+    },
+    {
+        "content": "<p>there's the type that kills rustc</p>",
+        "id": 177677185,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570588370
+    },
+    {
+        "content": "<p>(actually nevermind what I said about the stage1 compiler.. I'm able to build the target I care about with it)</p>",
+        "id": 177682950,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570597297
+    },
+    {
+        "content": "<p>So I'm thinking that when one OpaqueTypeExpander visits &gt;3 billion types, something's gone wrong?</p>",
+        "id": 177685521,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570601374
+    },
+    {
+        "content": "<p>here's a <a href=\"https://gist.githubusercontent.com/tmandry/8db91623488977f038b8e75e8b9902d6/raw/248b864707715561cce6464f72175f05140ac132/debug.log\" target=\"_blank\" title=\"https://gist.githubusercontent.com/tmandry/8db91623488977f038b8e75e8b9902d6/raw/248b864707715561cce6464f72175f05140ac132/debug.log\">log of try_expand_impl_trait_type</a>, search for <code>seen=</code></p>",
+        "id": 177685749,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570601660
+    },
+    {
+        "content": "<p>produced by <a href=\"https://github.com/tmandry/rust/commit/ca8b798d96b2dcd0d17c787116416f46e733232b\" target=\"_blank\" title=\"https://github.com/tmandry/rust/commit/ca8b798d96b2dcd0d17c787116416f46e733232b\">these debug logs</a></p>",
+        "id": 177685755,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570601681
+    },
+    {
+        "content": "<p>some very gnarly types in there..</p>",
+        "id": 177685785,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570601750
+    },
+    {
+        "content": "<p>cc <span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span></p>",
+        "id": 177686288,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570602592
+    },
+    {
+        "content": "<p>to summarize, <code>try_expand_impl_trait_type</code> takes a long time on some nasty types produced by deep async fn call stacks; see the two links I pasted above, as well as <a href=\"https://github.com/rust-lang/rust/issues/65147\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/65147\">#65147</a></p>",
+        "id": 177686427,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570602803
+    },
+    {
+        "content": "<p>that type has 386 regions...</p>",
+        "id": 177744886,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570647425
+    },
+    {
+        "content": "<p>A couple of things to try:</p>\n<ol>\n<li>Change this to <code>else if t.has_projections() { ... } else { t }</code>https://github.com/rust-lang/rust/blob/9b91bef78b15dfecc5144b0575f40a2d84ea795a/src/librustc/ty/util.rs#L738</li>\n<li>Store a cache of opaque types and what they expand to in the visitor.</li>\n</ol>",
+        "id": 177746966,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1570648939
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span> thank you. your first suggestion helped a lot!</p>",
+        "id": 177761701,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570660067
+    },
+    {
+        "content": "<p>it brought the number of types visited down from 3 billion to a modest 21 million <span aria-label=\"smile\" class=\"emoji emoji-263a\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 177761759,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570660094
+    },
+    {
+        "content": "<p>more importantly, the compile time is sane again</p>",
+        "id": 177761766,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570660110
+    },
+    {
+        "content": "<p>it's still a significant regression from a month ago, so I'm working on tracking down what changed.</p>",
+        "id": 177762792,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570661157
+    },
+    {
+        "content": "<p>oh wow, adding a cache brought it down to around a thousand, and the compile time is better than it ever was before <span aria-label=\"smiley\" class=\"emoji emoji-1f603\" role=\"img\" title=\"smiley\">:smiley:</span></p>",
+        "id": 177774172,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570674925
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span> can you explain why (1) is correct? like, what if I had <code>Vec&lt;Foo::Item&gt;</code>, or <code>Vec&lt;Bar&gt;</code> where <code>Bar</code> is an existential type?</p>",
+        "id": 177775697,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570677411
+    },
+    {
+        "content": "<p>(I'm assuming having generic params is not considering having projections.. but maybe I'm wrong)</p>",
+        "id": 177775836,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570677657
+    },
+    {
+        "content": "<p><code>has_projections</code> will return true for both of those type: it recurses on the generic arguments of a type. So <code>Vec&lt;impl X&gt;</code> <code>has_projections</code> because <code>impl X</code> <code>has_projections</code>.</p>",
+        "id": 177800622,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1570707234
+    },
+    {
+        "content": "<p>Type flags are cached so calling <code>has_projections</code> doesn't have to do the recursion here.</p>",
+        "id": 177800778,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1570707386
+    },
+    {
+        "content": "<p>ohh, makes sense, thanks!</p>",
+        "id": 177858502,
+        "sender_full_name": "tmandry",
+        "timestamp": 1570745421
+    },
+    {
+        "content": "<p>Well done!</p>",
+        "id": 177860356,
+        "sender_full_name": "nagisa",
+        "timestamp": 1570747038
+    },
+    {
+        "content": "<p>Nothing beats the feeling making O(unreasonable) a N(effectively 1) :D</p>",
+        "id": 177860383,
+        "sender_full_name": "nagisa",
+        "timestamp": 1570747074
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span> Can you take another look at <a href=\"https://github.com/rust-lang/rust/issues/65293\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/issues/65293\">#65293</a> today? I think it's ready to go</p>",
+        "id": 178220888,
+        "sender_full_name": "tmandry",
+        "timestamp": 1571164167
+    },
+    {
+        "content": "<p>Have you forgotten to push? I can't see any changes since I reviewed.</p>",
+        "id": 178221070,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1571164280
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span> sigh.. yes, sorry about that. my tracking branch was misconfigured somehow.</p>",
+        "id": 178225299,
+        "sender_full_name": "tmandry",
+        "timestamp": 1571167074
+    },
+    {
+        "content": "<p>it's pushed now.</p>",
+        "id": 178225433,
+        "sender_full_name": "tmandry",
+        "timestamp": 1571167140
+    }
+]

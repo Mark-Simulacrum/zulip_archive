@@ -1,0 +1,38 @@
+<html>
+<head><meta charset="utf-8"><title>Making register_dtor_fallback for thread locals not allocate · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Making.20register_dtor_fallback.20for.20thread.20locals.20not.20allocate.html">Making register_dtor_fallback for thread locals not allocate</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="278235488"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Making%20register_dtor_fallback%20for%20thread%20locals%20not%20allocate/near/278235488" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Making.20register_dtor_fallback.20for.20thread.20locals.20not.20allocate.html#278235488">(Apr 07 2022 at 22:37)</a>:</h4>
+<p>There are multiple implementations of thread locals for different platforms, but I'm going to trace through the "fast" implementation when <code>#[cfg(target_thread_local)]</code>. For thread locals with drop implementations,  <a href="https://github.com/rust-lang/rust/blob/dd38eea722c1f6f970a314435533e91cc2c14ffb/library/std/src/thread/local.rs#L906"><code>crate::sys::thread_local_dtor::register_dtor</code></a> is used to ensure the drop code is run when the thread exits.</p>
+<p>For Linux, I believe the implementation is in <a href="https://github.com/rust-lang/rust/blob/dd38eea722c1f6f970a314435533e91cc2c14ffb/library/std/src/sys/unix/thread_local_dtor.rs#L20-L44"><code>std/src/sys/unix/thread_local_dtor.rs</code></a>. It calls <code>__cxa_thread_atexit_impl</code> if the weak symbol is present, and otherwise calls <a href="https://github.com/rust-lang/rust/blob/dd38eea722c1f6f970a314435533e91cc2c14ffb/library/std/src/sys_common/thread_local_dtor.rs#L19-L49"><code>register_dtor_fallback</code></a> which is what I'm concerned with.</p>
+<p>The fallback is also relevant because it's what gets called when running under Miri, as far as I can tell.</p>
+<p><code>register_dtor_fallback</code> allocates a <code>Box&lt;Vec&lt;_&gt;&gt;</code> the first time a thread local destructor is registered (for each thread). Subsequent calls to <code>register_dtor_fallback</code> push the destructor function pointer and argument (a pointer to the actual thread local) on to the vector. In particular, creating the box, and pushing to the vector, allocates with the global allocator set by <code>#[global_allocator]</code>.</p>
+<p>I believe it's possible to implement <code>register_dtor_fallback</code> without needing allocations, given that thread locals with destructors must be declared with the <code>thread_local!</code> macro. Roughly speaking, instead of a <code>Box&lt;Vec&lt;_&gt;&gt;</code> of destructors per thread local with drop glue, each thread can maintain a linked list of its destructors, where there is one node per <code>thread_local!</code> declaration with drop glue. This node can be declared by the <code>thread_local!</code> implementation; something like <code>#[thread_local] static mut DTOR_LIST: DtorList</code> where <code>DtorList</code> is defined something like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">DtorList</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">t</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="c1">// matching the parameter name in register_dtor</span>
+<span class="w">    </span><span class="n">dtor</span>: <span class="nc">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">"C"</span><span class="w"> </span><span class="k">fn</span><span class="p">(</span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">next</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="bp">Self</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>If <code>register_dtor</code> and <code>register_dtor_fallback</code> are modified to additionally take a pointer to this struct (it currently takes <code>t</code> and <code>dtor</code>), <code>register_dtor_fallback</code> can use this space as a node/the new head of a linked list, replacing the vector.</p>
+<p>There is already precedent for extra storage per thread local declared with <code>thread_local!</code>; <code>const</code> initialized thread locals have a <code>#[thread_local] static mut STATE: u8</code> to keep track of whether the destructor has been registered (and if it is running or has run), and lazily initialized thread locals, which are wrapped in the <a href="https://github.com/rust-lang/rust/blob/dd38eea722c1f6f970a314435533e91cc2c14ffb/library/std/src/thread/local.rs#L908-L934"><code>fast::Key</code></a> type, have a similar <code>dtor_state</code> field.</p>
+<p>What do people think of this idea? I slept on it and haven't thought of any drawbacks, but am open to feedback. My motivation is in the spoiler below.</p>
+<div class="spoiler-block"><div class="spoiler-header">
+<p>Motivation</p>
+</div><div class="spoiler-content" aria-hidden="true">
+<p>I'm trying to implement a global allocator that uses thread local data structures to avoid locking a global heap in the common/fast path. My thread local data needs a drop implementation so that it can avoid leaks when a thread exits (by (locking the global heap and) returning memory to the global heap).</p>
+<p>So I set my implementation as the <code>#[global_allocator]</code>. On allocation, my implementation tries to access the thread local data, which requires registering the destructor on the first access. But registering the destructor calls the global allocator, so it infinitely recurses.</p>
+</div></div>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

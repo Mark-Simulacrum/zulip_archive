@@ -1,0 +1,212 @@
+[
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/blob/master/compiler/rustc_span/src/symbol.rs#L1737-L1756\"><code>Symbol::intern</code></a> is sub-optimal in the \"not already interned case\", because it does two hash table lookups, one to check for existence, and then another to insert.</p>\n<p>I tried fixing this. It's a bit fiddly because of the lifetimes, I came up with this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"cp\">#[inline]</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">intern</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"bp\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">string</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">Symbol</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">inner</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"mf\">0.</span><span class=\"n\">lock</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">inner</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">InternerInner</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">deref_mut</span><span class=\"p\">();</span><span class=\"w\"></span>\n\n<span class=\"w\">        </span><span class=\"c1\">// SAFETY: This ties in with the similar `string` cast below.</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">static_string1</span>: <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"nb\">static</span> <span class=\"kt\">str</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">&amp;*</span><span class=\"p\">(</span><span class=\"n\">string</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"w\">        </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">names</span><span class=\"p\">.</span><span class=\"n\">entry</span><span class=\"p\">(</span><span class=\"n\">static_string1</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">Entry</span>::<span class=\"n\">Occupied</span><span class=\"p\">(</span><span class=\"n\">entry</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">entry</span><span class=\"p\">.</span><span class=\"n\">get</span><span class=\"p\">(),</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">Entry</span>::<span class=\"n\">Vacant</span><span class=\"p\">(</span><span class=\"n\">entry</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">name</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Symbol</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">strings</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">);</span><span class=\"w\"></span>\n\n<span class=\"w\">                </span><span class=\"c1\">// SAFETY: `from_utf8_unchecked` is safe since we just allocated a</span>\n<span class=\"w\">                </span><span class=\"c1\">// `&amp;str` which is known to be UTF-8.</span>\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">arena_string</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">str</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"kt\">str</span>::<span class=\"n\">from_utf8_unchecked</span><span class=\"p\">(</span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">arena</span><span class=\"p\">.</span><span class=\"n\">alloc_slice</span><span class=\"p\">(</span><span class=\"n\">static_string1</span><span class=\"p\">.</span><span class=\"n\">as_bytes</span><span class=\"p\">()))</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"w\">                </span><span class=\"c1\">// SAFETY: It is safe to extend the arena allocation to `'static`</span>\n<span class=\"w\">                </span><span class=\"c1\">// because we only access these while the arena is still alive.</span>\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">static_string2</span>: <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"nb\">static</span> <span class=\"kt\">str</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">&amp;*</span><span class=\"p\">(</span><span class=\"n\">arena_string</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"w\">                </span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">strings</span><span class=\"p\">.</span><span class=\"n\">push</span><span class=\"p\">(</span><span class=\"n\">static_string2</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"c1\">//inner.names.insert(static_string2, name);  // njn: works!</span>\n<span class=\"w\">                </span><span class=\"n\">entry</span><span class=\"p\">.</span><span class=\"n\">insert</span><span class=\"p\">(</span><span class=\"n\">name</span><span class=\"p\">);</span><span class=\"w\"> </span><span class=\"c1\">// njn: doesn't work!</span>\n\n<span class=\"w\">                </span><span class=\"n\">name</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>But something is wrong, because I get lots of weird errors compiling <code>std</code>, things like this:</p>\n<div class=\"codehilite\"><pre><span></span><code>error[E0432]: unresolved import `self::platform`\n    --&gt; library/core/src/num/wrapping.rs:1042:19\n     |\n1042 |     pub use self::platform::usize;\n     |                   ^^^^^^^^ could not find `platform` in `self`\n\nerror: cannot find macro `bt` in this scope\n  --&gt; library/core/src/../../stdarch/crates/core_arch/src/x86/bt.rs:27:9\n   |\n27 |         bt!(&quot;btl&quot;),\n   |         ^^\n</code></pre></div>\n<p>But small programs compile successfully, so it's only slightly broken, not totally broken. And as the comments say, if I use <code>inner.names.insert</code> instead of <code>entry.insert</code>, it works.</p>\n<p>So I'm puzzled. I don't know if the unsafe lifetime stuff is a problem, or the <code>deref_mut</code> is somehow a problem. Any suggestions would be welcome, thanks!</p>",
+        "id": 263370986,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638400237
+    },
+    {
+        "content": "<p>(I used a different name for each string variable, unlike the original, because I had a bunch of assertions ensuring that they were all equal, and they were.)</p>",
+        "id": 263371062,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638400289
+    },
+    {
+        "content": "<p>This is what <code>raw_entry</code> is for - you shouldn't need unsafe</p>",
+        "id": 263373814,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1638402168
+    },
+    {
+        "content": "<p><a href=\"https://docs.rs/hashbrown/0.11.2/hashbrown/struct.HashMap.html#method.raw_entry_mut\">https://docs.rs/hashbrown/0.11.2/hashbrown/struct.HashMap.html#method.raw_entry_mut</a></p>",
+        "id": 263373877,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1638402221
+    },
+    {
+        "content": "<p>Are you sure? IMO, this is exactly what vanilla <code>entry</code> is for, to avoid a lookup+insertion combination</p>",
+        "id": 263374839,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638402856
+    },
+    {
+        "content": "<p>Oh wait hold on I misread</p>",
+        "id": 263375087,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1638403065
+    },
+    {
+        "content": "<p>I think the issue is that <code>static_string1</code> and <code>static_string2</code> have different hashes somehow? Which seems odd, I'd expect it to hash the string contents and not the pointer</p>",
+        "id": 263375185,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1638403113
+    },
+    {
+        "content": "<p>Right, I double-checked that <code>str</code> is hashed by contents.</p>",
+        "id": 263375245,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403155
+    },
+    {
+        "content": "<p>And that's why I had assertions that all the strings were equal</p>",
+        "id": 263375264,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403168
+    },
+    {
+        "content": "<p>The fact that it mostly works indicates something subtle/infrequent is happening</p>",
+        "id": 263375292,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403192
+    },
+    {
+        "content": "<p>Most likely related to the <code>unsafe</code> blocks somehow</p>",
+        "id": 263375402,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403216
+    },
+    {
+        "content": "<p>I don't much like the use of fake <code>static</code> for these arena-allocated strings, but I can't see how it's a problem</p>",
+        "id": 263375501,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403258
+    },
+    {
+        "content": "<p>Could <code>arena.alloc</code> slice be reallocating <code>names</code> somehow? It seems weird since they're different fields but I'm not sure why else the entry would be different from a normal insert ...</p>",
+        "id": 263375512,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1638403262
+    },
+    {
+        "content": "<p>Aren't you inserting the entry behind the argument to the function as the key right now?</p>",
+        "id": 263375557,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1638403284
+    },
+    {
+        "content": "<p>The previous code used the arena string as the key</p>",
+        "id": 263375573,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1638403292
+    },
+    {
+        "content": "<p>The function argument doesn't necessarily live long enough so if I see this right you are invoking UB here</p>",
+        "id": 263375624,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1638403320
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"300586\">@Lukas Wirth</span> right but that would allocate even if there's already an entry in the map</p>",
+        "id": 263375687,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1638403335
+    },
+    {
+        "content": "<p>Yes but the key of the entry is a static string ref, what is actually being put there is only static due to the unsafe reborrow though</p>",
+        "id": 263375755,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1638403375
+    },
+    {
+        "content": "<p>Or am I missing something here?</p>",
+        "id": 263375765,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1638403380
+    },
+    {
+        "content": "<p>Oh, I think I understand what you're saying</p>",
+        "id": 263375881,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403445
+    },
+    {
+        "content": "<p><code>entry.insert(name)</code> is equivalent to <code>inner.names.insert(string, name)</code></p>",
+        "id": 263376046,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403526
+    },
+    {
+        "content": "<p>Ye, and <code>string</code> doesn't live for <code>'static</code></p>",
+        "id": 263376071,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1638403543
+    },
+    {
+        "content": "<p>Surprising that this doesn't blow up more quickly</p>",
+        "id": 263376079,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403547
+    },
+    {
+        "content": "<p>Certainly surprising <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 263376103,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1638403561
+    },
+    {
+        "content": "<p>Maybe a lot of the strings being hashed are long-lived in practice</p>",
+        "id": 263376175,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403583
+    },
+    {
+        "content": "<p>Sort of static-ish <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 263376183,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403592
+    },
+    {
+        "content": "<p>Thanks for the help!</p>",
+        "id": 263376185,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403595
+    },
+    {
+        "content": "<p>So my mistake here was overlooking that <code>entry.insert(name)</code> sets key as well, not just the value</p>",
+        "id": 263376260,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403654
+    },
+    {
+        "content": "<p>I probably can use <code>raw_entry_mut</code> to avoid hashing twice, I'll look at that</p>",
+        "id": 263376339,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403700
+    },
+    {
+        "content": "<p>This is the \"Deferring the creation of an owned key until it is known to be required\" use case</p>",
+        "id": 263376588,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638403902
+    },
+    {
+        "content": "<p>All this is a classic case of \"the bug is in the <code>unsafe</code> code you added\" <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 263377356,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638404517
+    },
+    {
+        "content": "<p>Here's the <code>raw_entry_mut</code> version:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"cp\">#[inline]</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">intern</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"bp\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">string</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">Symbol</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">inner</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"mf\">0.</span><span class=\"n\">lock</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">inner</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"n\">InternerInner</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">deref_mut</span><span class=\"p\">();</span><span class=\"w\"></span>\n\n<span class=\"w\">        </span><span class=\"c1\">// One reason to use `raw_entry_mut`, according to its docs, is</span>\n<span class=\"w\">        </span><span class=\"c1\">// \"Deferring the creation of an owned key until it is known to be</span>\n<span class=\"w\">        </span><span class=\"c1\">// required\". That's exactly what we do here; the arena allocation</span>\n<span class=\"w\">        </span><span class=\"c1\">// below creates an owned version of the `string` argument if</span>\n<span class=\"w\">        </span><span class=\"c1\">// necessary.</span>\n<span class=\"w\">        </span><span class=\"c1\">//</span>\n<span class=\"w\">        </span><span class=\"c1\">// If we didn't use `raw_entry_mut`, we'd need a lookup followed by a</span>\n<span class=\"w\">        </span><span class=\"c1\">// separate insert.</span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">state</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">FxHasher</span>::<span class=\"n\">default</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">string</span><span class=\"p\">.</span><span class=\"n\">hash</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">state</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">hash</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">state</span><span class=\"p\">.</span><span class=\"n\">finish</span><span class=\"p\">();</span><span class=\"w\"></span>\n\n<span class=\"w\">        </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">names</span><span class=\"p\">.</span><span class=\"n\">raw_entry_mut</span><span class=\"p\">().</span><span class=\"n\">from_key_hashed_nocheck</span><span class=\"p\">(</span><span class=\"n\">hash</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">string</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">RawEntryMut</span>::<span class=\"n\">Occupied</span><span class=\"p\">(</span><span class=\"n\">entry</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">entry</span><span class=\"p\">.</span><span class=\"n\">get</span><span class=\"p\">(),</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">RawEntryMut</span>::<span class=\"n\">Vacant</span><span class=\"p\">(</span><span class=\"n\">entry</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">name</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Symbol</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">strings</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">);</span><span class=\"w\"></span>\n\n<span class=\"w\">                </span><span class=\"c1\">// SAFETY: `from_utf8_unchecked` is safe since we just</span>\n<span class=\"w\">                </span><span class=\"c1\">// allocated a `&amp;str` which is known to be UTF-8.</span>\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">string</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">str</span> <span class=\"o\">=</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"kt\">str</span>::<span class=\"n\">from_utf8_unchecked</span><span class=\"p\">(</span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">arena</span><span class=\"p\">.</span><span class=\"n\">alloc_slice</span><span class=\"p\">(</span><span class=\"n\">string</span><span class=\"p\">.</span><span class=\"n\">as_bytes</span><span class=\"p\">()))</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"w\">                </span><span class=\"c1\">// SAFETY: It is safe to extend the arena allocation to</span>\n<span class=\"w\">                </span><span class=\"c1\">// `'static` because we only access these while the arena is</span>\n<span class=\"w\">                </span><span class=\"c1\">// still alive.</span>\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">string</span>: <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"nb\">static</span> <span class=\"kt\">str</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">&amp;*</span><span class=\"p\">(</span><span class=\"n\">string</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"w\">                </span><span class=\"n\">inner</span><span class=\"p\">.</span><span class=\"n\">strings</span><span class=\"p\">.</span><span class=\"n\">push</span><span class=\"p\">(</span><span class=\"n\">string</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"n\">entry</span><span class=\"p\">.</span><span class=\"n\">insert_hashed_nocheck</span><span class=\"p\">(</span><span class=\"n\">hash</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">string</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">name</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"n\">name</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 263379109,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638405865
+    },
+    {
+        "content": "<p>Now to see if it actually improves performance</p>",
+        "id": 263379135,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638405892
+    },
+    {
+        "content": "<p>tangentially: I've seen the Predicate and Ty interner hash table resizing show up in profiles. But naive optimization attempts (<a href=\"https://github.com/rust-lang/rust/issues/90743\">#90743</a>; setting higher initial sizes or more aggressive growth) lead to max-rss regressions larger than the instruction count gains.<br>\nI don't know enough about compiler internals to do it in a smarter way. Maybe there are some bulk operations filling the interners that could provide a better size hint.</p>",
+        "id": 263437498,
+        "sender_full_name": "The 8472",
+        "timestamp": 1638452187
+    },
+    {
+        "content": "<p>The <code>Symbol::intern</code> change wasn't worth it in the end: <a href=\"https://github.com/rust-lang/rust/pull/91445/\">https://github.com/rust-lang/rust/pull/91445/</a></p>",
+        "id": 263514087,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638487383
+    }
+]

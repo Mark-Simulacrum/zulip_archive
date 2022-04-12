@@ -1,0 +1,211 @@
+<html>
+<head><meta charset="utf-8"><title>core::ptr::addr_of_mut! macro and race conditions · t-lang/wg-unsafe-code-guidelines · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/index.html">t-lang/wg-unsafe-code-guidelines</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html">core::ptr::addr_of_mut! macro and race conditions</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="237226700"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237226700" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237226700">(May 03 2021 at 20:50)</a>:</h4>
+<p>Hi everyone. I have ventured into a novel <code>unsafe</code> section of Rust and would like to ask for your advice <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>  Since Rust 1.51 there exist the <code>core::ptr::addr_of(_mut)!</code> macros, which lets you obtain a pointer to a place without creating an intermediate reference. Consider the following example (<a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=99403cf2da7d972d37b83748ae9918ca">playground</a>):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">sync</span>::<span class="n">atomic</span>::<span class="p">{</span><span class="n">AtomicUsize</span><span class="p">,</span><span class="w"> </span><span class="n">Ordering</span><span class="p">};</span><span class="w"></span>
+<span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">sync</span>::<span class="n">Arc</span><span class="p">;</span><span class="w"></span>
+<span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">cell</span>::<span class="n">UnsafeCell</span><span class="p">;</span><span class="w"></span>
+
+<span class="sd">/// A basic struct, which can't be shared amongst threads with safe interior mutability</span>
+<span class="cp">#[derive(Default)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">BasicStruct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">field1</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">field2</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="sd">/// A wrapper struct, which offers thread-safe interior mutability around BasicStruct</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">ThreadSafeStruct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">basic_struct</span>: <span class="nc">UnsafeCell</span><span class="o">&lt;</span><span class="n">BasicStruct</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">impl</span><span class="w"> </span><span class="n">ThreadSafeStruct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">new</span><span class="p">(</span><span class="n">basic_struct</span>: <span class="nc">BasicStruct</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="bp">Self</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">basic_struct</span>: <span class="nc">UnsafeCell</span>::<span class="n">new</span><span class="p">(</span><span class="n">basic_struct</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">get_field1</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kp">&amp;</span><span class="nc">AtomicUsize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">basic_struct_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">basic_struct</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// SAFETY: `basic_struct_ptr` is aligned and non-dangling</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">field1_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">std</span>::<span class="n">ptr</span>::<span class="n">addr_of_mut</span><span class="o">!</span><span class="p">((</span><span class="o">*</span><span class="n">basic_struct_ptr</span><span class="p">).</span><span class="n">field1</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">atomic_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">field1_ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">AtomicUsize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// SAFETY: `atomic_ptr` is properly aligned, non-dangling and points to initialized memory</span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;*</span><span class="n">atomic_ptr</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">get_field2</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kp">&amp;</span><span class="nc">AtomicUsize</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">basic_struct_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">basic_struct</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// SAFETY: `basic_struct_ptr` is aligned and non-dangling</span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">field2_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">std</span>::<span class="n">ptr</span>::<span class="n">addr_of_mut</span><span class="o">!</span><span class="p">((</span><span class="o">*</span><span class="n">basic_struct_ptr</span><span class="p">).</span><span class="n">field2</span><span class="p">)</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">atomic_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">field2_ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">AtomicUsize</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// SAFETY: `atomic_ptr` is properly aligned, non-dangling and points to initialized memory</span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&amp;*</span><span class="n">atomic_ptr</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// SAFETY: the ThreadSafeStruct struct only exposes atomics, which are thread-safe</span>
+<span class="k">unsafe</span><span class="w"> </span><span class="k">impl</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">ThreadSafeStruct</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">basic_struct</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BasicStruct</span>::<span class="n">default</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">thread_safe_struct0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Arc</span>::<span class="n">new</span><span class="p">(</span><span class="n">ThreadSafeStruct</span>::<span class="n">new</span><span class="p">(</span><span class="n">basic_struct</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">thread_safe_struct1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">thread_safe_struct0</span><span class="p">.</span><span class="n">clone</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">thread_safe_struct2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">thread_safe_struct0</span><span class="p">.</span><span class="n">clone</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">thread1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span>::<span class="n">thread</span>::<span class="n">spawn</span><span class="p">(</span><span class="k">move</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">thread_safe_struct1</span><span class="p">.</span><span class="n">get_field1</span><span class="p">().</span><span class="n">store</span><span class="p">(</span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">Ordering</span>::<span class="n">SeqCst</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">thread2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span>::<span class="n">thread</span>::<span class="n">spawn</span><span class="p">(</span><span class="k">move</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="fm">assert_ne!</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">thread_safe_struct2</span><span class="p">.</span><span class="n">get_field1</span><span class="p">().</span><span class="n">load</span><span class="p">(</span><span class="n">Ordering</span>::<span class="n">Relaxed</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="p">});</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">thread1</span><span class="p">.</span><span class="n">join</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">thread2</span><span class="p">.</span><span class="n">join</span><span class="p">().</span><span class="n">unwrap</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">  </span><span class="fm">assert_eq!</span><span class="p">(</span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="n">thread_safe_struct0</span><span class="p">.</span><span class="n">get_field1</span><span class="p">().</span><span class="n">load</span><span class="p">(</span><span class="n">Ordering</span>::<span class="n">SeqCst</span><span class="p">));</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>TLDR: it attempts to make a struct without interior mutability, have thread-safe interior mutability, by wrapping it into another struct.</p>
+<p>Even though <code>addr_of_mut!((*basic_struct_ptr).field1)</code> does not create a reference, it does have some constraints according to the <a href="https://doc.rust-lang.org/nightly/core/ptr/macro.addr_of_mut.html">rustdocs</a> (which it satisfies in the above example):</p>
+<ol>
+<li><code>basic_struct_ptr</code> must be aligned</li>
+<li><code>basic_struct_ptr</code> must be non-dangling (this also implies non-null).</li>
+</ol>
+<p>Now my question is: is calling <code>addr_of_mut!((*basic_struct_ptr).field1)</code> safe when there might be a race condition? (Note:  a race condition is two accesses to the same memory at the same time, at least one of which is a write; a data race is a race condition where at least one access is non-atomic. Data races are undefined behavior.)</p>
+<p>My first investigation suggests that this is not UB, based on the fact that calling <code>addr_of_mut!</code> on memory that is uninitialized is not UB (found a reference to that <a href="#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/raw.20ref.20semantics/near/232562132">here</a> by <span class="user-mention" data-user-id="120791">@RalfJ</span> ), which suggests that it does not access the memory location in any way, which would steer clear of a data race. However, I could not find any hard statements that would confirm this. Would anyone know the definite answer to this question? <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>  Thanks!</p>
+
+
+
+<a name="237227424"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237227424" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237227424">(May 03 2021 at 20:55)</a>:</h4>
+<blockquote>
+<p>Now my question is: is calling addr_of_mut!((*basic_struct_ptr).field1) safe when there might be a race condition? </p>
+</blockquote>
+<p>It doesn't access memory, but <code>basic_struct_ptr</code> must point to an actual allocation of a <code>BasicStruct</code></p>
+
+
+
+<a name="237227661"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237227661" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237227661">(May 03 2021 at 20:57)</a>:</h4>
+<p>LLVM will use the <code>addr_of_mut</code> operation as an indication that the memory is dereferenceable and optimize accordingly (alias analysis in particular relies heavily on operations like this). But it is specified to not access memory in any way</p>
+
+
+
+<a name="237230192"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237230192" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237230192">(May 03 2021 at 21:07)</a>:</h4>
+<p>Thanks <span class="user-mention" data-user-id="271719">@Mario Carneiro</span> , that is pretty cool <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span> Just to double check I'm understanding what you said properly, in the above example <code>basic_struct_ptr</code> correctly points to an actual allocation of <code>BasicStruct</code> and <code>addr_of_mut</code> neither accesses the <code>BasicStruct</code> nor its fields, right?</p>
+
+
+
+<a name="237230894"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237230894" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237230894">(May 03 2021 at 21:11)</a>:</h4>
+<p>yes, <code>get_field1()</code> is just doing pointer arithmetic</p>
+
+
+
+<a name="237231451"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237231451" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237231451">(May 03 2021 at 21:13)</a>:</h4>
+<p>Thanks! What if <code>BasicStruct</code> holds an array internally instead of fields? (<a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f095252c401042fe039da16b5ed03beb">playground</a>) Would this create any references due to de-sugaring <code>addr_of_mut!((*basic_struct_ptr).inner[1])</code> to <code>addr_of_mut!(*(*basic_struct_ptr).index(1))</code>?</p>
+
+
+
+<a name="237231875"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237231875" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237231875">(May 03 2021 at 21:15)</a>:</h4>
+<p>No, for arrays that operation is built in</p>
+
+
+
+<a name="237231969"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237231969" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237231969">(May 03 2021 at 21:15)</a>:</h4>
+<p>(it's a different matter for vectors)</p>
+
+
+
+<a name="237232157"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237232157" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237232157">(May 03 2021 at 21:16)</a>:</h4>
+<p>Amazing <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span> Thank you very much for clearing that up! This made my day <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="237232324"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237232324" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237232324">(May 03 2021 at 21:17)</a>:</h4>
+<p>Does <code>addr_of_mut</code> do any array bounds checking in this case? or do the bound checks fall on the caller?</p>
+
+
+
+<a name="237232430"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237232430" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237232430">(May 03 2021 at 21:17)</a>:</h4>
+<p>you can check the MIR to see that it doesn't call <code>index</code></p>
+
+
+
+<a name="237232455"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237232455" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237232455">(May 03 2021 at 21:17)</a>:</h4>
+<p>what bounds check?</p>
+
+
+
+<a name="237232573"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237232573" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237232573">(May 03 2021 at 21:18)</a>:</h4>
+<p>if you access <code>[T; 2]</code> using <code>x[1]</code> there is no bounds check</p>
+
+
+
+<a name="237232707"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237232707" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237232707">(May 03 2021 at 21:18)</a>:</h4>
+<p>ah right, these are inferred at compile time for arrays and index literals</p>
+
+
+
+<a name="237232878"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237232878" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237232878">(May 03 2021 at 21:19)</a>:</h4>
+<p>any index out of bounds triggers a compile error <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="237233023"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237233023" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237233023">(May 03 2021 at 21:20)</a>:</h4>
+<p>and that's a nice tip about the MIR, thanks!</p>
+
+
+
+<a name="237233045"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237233045" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237233045">(May 03 2021 at 21:20)</a>:</h4>
+<p>if you use a variable, there is a bounds check that is performed before the <code>addr_of_mut!</code> returns; this bounds check does not access memory</p>
+
+
+
+<a name="237233181"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237233181" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237233181">(May 03 2021 at 21:20)</a>:</h4>
+<p>well it accesses the index, i.e. if you have <code>x[i]</code> it has to check <code>i &lt; 2</code> but it doesn't matter what is stored in <code>x</code></p>
+
+
+
+<a name="237233583"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237233583" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237233583">(May 03 2021 at 21:22)</a>:</h4>
+<p>sweet <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="237780781"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237780781" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237780781">(May 07 2021 at 07:41)</a>:</h4>
+<blockquote>
+<p>My first investigation suggests that this is not UB, based on the fact that calling addr_of_mut! on memory that is uninitialized is not UB (found a reference to that here by @RalfJ ), which suggests that it does not access the memory location in any way, which would steer clear of a data race.</p>
+</blockquote>
+<p>As <span class="user-mention" data-user-id="271719">@Mario Carneiro</span> said, this is accurate. :)</p>
+
+
+
+<a name="237786139"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core%3A%3Aptr%3A%3Aaddr_of_mut%21%20macro%20and%20race%20conditions/near/237786139" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/136281-t-lang/wg-unsafe-code-guidelines/topic/core.3A.3Aptr.3A.3Aaddr_of_mut!.20macro.20and.20race.20conditions.html#237786139">(May 07 2021 at 08:32)</a>:</h4>
+<p>Thanks <span class="user-mention" data-user-id="120791">@RalfJ</span> ! <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

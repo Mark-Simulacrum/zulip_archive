@@ -1,0 +1,188 @@
+[
+    {
+        "content": "<p>I'm working on a <a href=\"https://github.com/willcrichton/flowistry\">rustc_private</a> plugin. My specific goal is that the user provides a file in a Cargo workspace, and I can run the compiler to analyze the function / crate corresponding to that file.</p>\n<p>I'm having issues with the Cargo integration, and I'm hoping the Clippy folks have the best perspective on this. My initial strategy was, like Clippy, the following:</p>\n<ol>\n<li>User calls <code>cargo flowistry /path/to/file.rs</code></li>\n<li>\n<p><code>cargo-flowistry</code> invokes <code>RUSTC_WORKSPACE_WRAPPER=flowistry-driver FILE_PATH=/path/to/file.rs cargo check</code><br>\n  (note: if there's a way to turn a file path into a compile filter like <code>-p whatever</code>, that would be ideal!!)</p>\n</li>\n<li>\n<p><code>flowistry-driver</code> then uses a custom <code>Callbacks</code> to search for the file in the crate, if it exists.</p>\n</li>\n</ol>\n<p>The issue I'm running into is when <code>flowistry-driver</code> should be generating <code>rmeta</code> files. For example, let's say I have a crate <code>foo</code> with a file <code>src/lib.rs</code> and a binary <code>src/bin/bar.rs</code>. There's two scenarios:</p>\n<ul>\n<li>The path is <code>src/lib.rs</code>: if <code>flowistry-driver</code> _doesn't_ generate an <code>rmeta</code> for <code>foo</code>, then I get a compilation failure when cargo tries to run <code>flowistry-driver</code> on <code>bar</code>.</li>\n<li>The path is <code>src/bin/bar.rs</code>: if flowistry-driver _does_ generate an <code>rmeta</code> for <code>foo</code>, then my driver only gets executed on the first time I run it. Every subsequent call is ignored due to caching.</li>\n</ul>\n<p>Does this problem make sense? Do y'all have any recommendations for how to run rustc on specific crates in a workspace given only the filepath?</p>\n<p>I'm assuming clippy has a workaround for this, because I can repeatedly run <code>cargo clippy</code> and get the warnings every time even when <code>cargo</code> doesn't report <code>rustc</code> actually running. But I have no idea how that works, and couldn't figure it out from the source.</p>",
+        "id": 254588988,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632424496
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"265377\">@Will Crichton</span> cargo isn't actually rerunning clippy, it's just saving the warnings and replaying them</p>",
+        "id": 254590449,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632425120
+    },
+    {
+        "content": "<p>I didn't read your whole post <span aria-label=\"upside down\" class=\"emoji emoji-1f643\" role=\"img\" title=\"upside down\">:upside_down:</span> but what problem exactly are you trying to solve? you said \"Every subsequent call is ignored due to caching.\" which presumably is what you're trying to change, but why is the caching wrong?</p>",
+        "id": 254590673,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632425212
+    },
+    {
+        "content": "<p>The problem is that Cargo doesn't actually run my driver on a file if the <code>rmeta</code> file for that file has been generated. And so I can't actually run the analysis. It's an artifact of piggybacking on <code>cargo check</code> to get the necessary <code>extern</code> flags to make <code>rustc</code> work.</p>",
+        "id": 254591016,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632425361
+    },
+    {
+        "content": "<p>but the rmeta file is generated for the first time by running your driver, right?</p>",
+        "id": 254591650,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632425600
+    },
+    {
+        "content": "<p>That's right. So subsequently calls to the driver don't work.</p>",
+        "id": 254592300,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632425832
+    },
+    {
+        "content": "<p>but why do you need to rerun the driver if the file hasn't changed? that's the bit I don't understand</p>",
+        "id": 254592758,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426013
+    },
+    {
+        "content": "<p>The driver takes as input a function and outputs some metadata about it. For example, a slice (see <a href=\"https://github.com/willcrichton/flowistry\">examples here</a>). The suer should be able to compute any slice without changing the file.</p>",
+        "id": 254593142,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632426183
+    },
+    {
+        "content": "<p>is the idea that you're not trying to analyze the whole file ahead of time, only the segment that the user is interested in?</p>",
+        "id": 254593760,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426450
+    },
+    {
+        "content": "<p>That's right.</p>",
+        "id": 254593772,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632426457
+    },
+    {
+        "content": "<p>in that case I'm not sure RUSTC_WORKSPACE_WRAPPER is the right abstraction</p>",
+        "id": 254593783,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426462
+    },
+    {
+        "content": "<p>I'm definitely open to alternatives!</p>",
+        "id": 254593814,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632426480
+    },
+    {
+        "content": "<p>can you have a binary that reads .rmeta files and just depend on cargo to generate those ahead of time?</p>",
+        "id": 254593877,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426495
+    },
+    {
+        "content": "<p>All my tool really needs is the set of arguments one would otherwise pass to <code>cargo check</code> the given file. So externs in particular. The challenge is extracting that information from Cargo. AFAIK there's no good way to ask \"generate / give me the dependencies needed to run rustc on this file\".</p>",
+        "id": 254594039,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632426580
+    },
+    {
+        "content": "<blockquote>\n<p>cargo-flowistry invokes RUSTC_WORKSPACE_WRAPPER=flowistry-driver FILE_PATH=/path/to/file.rs cargo check<br>\n(note: if there's a way to turn a file path into a compile filter like -p whatever, that would be ideal!!)</p>\n</blockquote>\n<p>ok I think I see - because it's an env variable and not a CLI arg, cargo doesn't know that it needs to rerun the driver when it changes</p>",
+        "id": 254594263,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426683
+    },
+    {
+        "content": "<p>can you have cargo-flowistry run <code>cargo rustc -p whatever --file-path /path/to/file.rs</code> instead? and add a custom <code>--file-path</code> arg to your driver?</p>",
+        "id": 254594373,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426730
+    },
+    {
+        "content": "<p>you do have to be able to figure out the package from the filename though</p>",
+        "id": 254594392,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426742
+    },
+    {
+        "content": "<p>(you don't want <code>RUSTFLAGS</code> because that will build dependencies too; and <code>rustc</code> only works for a single package)</p>",
+        "id": 254594432,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426763
+    },
+    {
+        "content": "<p>I think I can figure out the package from <code>cargo metadata</code> based on some initial experiments. </p>\n<p>What would be the difference in using <code>cargo rustc</code> vs <code>cargo check</code>?</p>",
+        "id": 254594579,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632426835
+    },
+    {
+        "content": "<p><code>check</code> won't forward the arguments to the driver</p>",
+        "id": 254594653,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426851
+    },
+    {
+        "content": "<p>it will just error that <code>--file-path</code> isn't recognized</p>",
+        "id": 254594674,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426860
+    },
+    {
+        "content": "<p>Oh I see what you're saying. <code>cargo rustc</code> will rerun everything if CLI args are different. Ok I'll have to check that out.</p>",
+        "id": 254594821,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632426943
+    },
+    {
+        "content": "<blockquote>\n<p>because it's an env variable and not a CLI arg, cargo doesn't know that it needs to rerun the driver when it changes</p>\n</blockquote>\n<p>(ideally this would be configurable in cargo; but I don't know if that's possible today)</p>",
+        "id": 254594842,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426955
+    },
+    {
+        "content": "<blockquote>\n<p>cargo rustc will rerun everything if CLI args are different</p>\n</blockquote>\n<p>it will rerun the last package, yeah</p>",
+        "id": 254594966,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632426993
+    },
+    {
+        "content": "<p>it won't rebuild dependencies (including path dependencies)</p>",
+        "id": 254594991,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632427003
+    },
+    {
+        "content": "<p>could a zulip admin move this thread to <a class=\"stream\" data-stream-id=\"246057\" href=\"/#narrow/stream/246057-t-cargo\">#t-cargo</a> ?</p>",
+        "id": 254595198,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632427095
+    },
+    {
+        "content": "<p>cargo rustc seems to have fixed my issues, thanks <span class=\"user-mention\" data-user-id=\"232545\">@Joshua Nelson</span> !! The only sad part is running <code>cargo metadata</code> is like 80% of my plugin execution time...</p>",
+        "id": 254607293,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632431948
+    },
+    {
+        "content": "<p>I also had to do a bit of a gross hack where I pass <code>--custom-arg={random_number}</code> to avoid caching. Not sure if there's a better way than that.</p>",
+        "id": 254607377,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632431998
+    },
+    {
+        "content": "<p><code>cargo metadata --no-deps</code> should speed it up quite a bit</p>",
+        "id": 254607380,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632432000
+    },
+    {
+        "content": "<p>and maybe throw in <code>--offline</code> if you think it's trying to update the index</p>",
+        "id": 254607445,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1632432015
+    },
+    {
+        "content": "<p>:O good point</p>",
+        "id": 254607448,
+        "sender_full_name": "Will Crichton",
+        "timestamp": 1632432015
+    }
+]

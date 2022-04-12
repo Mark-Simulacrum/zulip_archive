@@ -1,0 +1,170 @@
+[
+    {
+        "content": "<p>Hello!<br>\nI'm working for Arm on Morello (and now Rust), and have been trying to plan how we might go about deploying CHERI and Morello capabilities in Rust. I'm aware that there have been discussions in the past. This is the most recent one I'm aware of: <a href=\"https://github.com/rust-lang/rust/issues/65473\">https://github.com/rust-lang/rust/issues/65473</a><br>\nThe biggest issue that previous work has hit is the one described in that issue; we have only <code>usize</code>, but use it like C's <code>size_t</code> or <code>uintptr_t</code>. The author described this further in their dissertation: <a href=\"https://nw0.github.io/cheri-rust.pdf\">https://nw0.github.io/cheri-rust.pdf</a><br>\nDoes that issue represent the most recent discussion and thinking on this subject? Is there anything else I should look at?<br>\nThanks!</p>",
+        "id": 232406271,
+        "sender_full_name": "Jacob Bramley",
+        "timestamp": 1617101692
+    },
+    {
+        "content": "<p>I think that the best chance of getting this to work is to make <code>usize</code> 128-bit since that allows all existing code to continue working, especially considering the existing assumption that pointers can be losslessly cast to/from <code>usize</code>.</p>",
+        "id": 232411594,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1617104821
+    },
+    {
+        "content": "<p>However once that base is implemented, it is possible to add optimizations by using <code>u64</code> in some places instead of <code>usize</code> via a <code>real_usize</code> typedef. For example <code>Vec</code> could be <code>(*mut T, real_usize, real_usize)</code> instead of the current <code>(*mut T, usize, usize)</code> to reduce memory usage and potentially allow better codegen from LLVM.</p>",
+        "id": 232411821,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1617104984
+    },
+    {
+        "content": "<p>In a way this is similar to 64-bit programs storing sizes in a <code>u32</code> instead of <code>usize</code> to reduce memory footprint.</p>",
+        "id": 232414335,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1617106339
+    },
+    {
+        "content": "<p>One possible issue with that approach is that using a capability-aware <code>usize</code> for basic arithmetic can be problematic. For example, it's not clear to do in situations like this (when either or both of <code>a</code> and <code>b</code> could be capabilities):</p>\n<div class=\"codehilite\"><pre><span></span><code>fn add(a: usize, b: usize) -&gt; usize { a + b }\n</code></pre></div>\n<p>The <a href=\"https://github.com/CTSRD-CHERI/cheri-c-programming\">CHERI C programming guide</a> goes into a bit more detail (but is obviously C-focussed).</p>",
+        "id": 232439367,
+        "sender_full_name": "Jacob Bramley",
+        "timestamp": 1617116073
+    },
+    {
+        "content": "<p>The architecture provides cap + u64 arithmetic, but not cap + cap.</p>",
+        "id": 232439543,
+        "sender_full_name": "Jacob Bramley",
+        "timestamp": 1617116130
+    },
+    {
+        "content": "<p>I have to admit, I have almost taken for granted that capabilities require separate <code>usize</code> and (e.g.) <code>uptr</code> types eventually, and most of my thinking has been about how to get there. The <code>real_usize</code> example is an alternative to that, though one that leaves <code>usize</code> in a somewhat awkward position. A lot of library methods (e.g. <code>len()</code>) return a <code>usize</code> and are rarely used as pointers.</p>",
+        "id": 232440859,
+        "sender_full_name": "Jacob Bramley",
+        "timestamp": 1617116528
+    },
+    {
+        "content": "<p>[Disclaimer: Jacob and I are working together on a separate non-Rust CHERI project. Though I do a lot of Rust programming in other projects.] Amanieu's suggestion is the least worst one I've been able to think of, even though I have the same concerns as Jacob about correctness and performance. However, one reason why I think the correctness situation isn't <em>quite</em> as bad as C is that Rust's pointers have <code>add</code>/<code>offset</code>/etc methods (<a href=\"https://doc.rust-lang.org/std/primitive.pointer.html\">https://doc.rust-lang.org/std/primitive.pointer.html</a>) that, in my experience, are used extensively in pointer-based code. Although I'm sure someone somewhere has converted a pointer to a usize, added another a usize to it, and converted it back again, I don't think that's a common idiom.</p>",
+        "id": 232454635,
+        "sender_full_name": "Laurence Tratt",
+        "timestamp": 1617121458
+    },
+    {
+        "content": "<p>An interesting question is how much code does ptr -&gt; usize -&gt; ptr in practise. I maintain a library that (sort of indirectly) does this myself (<a href=\"https://github.com/softdevteam/natrob\">https://github.com/softdevteam/natrob</a>) and have used that trick in one other bit of code, but in both cases I knew I was doing something at the edge of what's sensible, and I had very particular performance reasons for doing so.</p>",
+        "id": 232454960,
+        "sender_full_name": "Laurence Tratt",
+        "timestamp": 1617121576
+    },
+    {
+        "content": "<p><code>AtomicPtr</code> used to do it as the atomic intrinsics only accept integers, but now it is changed to let the atomic intrinsic implementations in rustc cast it before passing it to the LLVM atomic intrinsics. ptr -&gt; usize -&gt; ptr round trips are sometimes used for pointer tagging.</p>",
+        "id": 232455313,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617121709
+    },
+    {
+        "content": "<p>The <code>bytes</code> crate widely used in the tokio ecosystem for example uses pointer tagging: <a href=\"https://github.com/tokio-rs/bytes/blob/df20a683567909f3e33512a22862b0de954881f4/src/bytes.rs#L811\">https://github.com/tokio-rs/bytes/blob/df20a683567909f3e33512a22862b0de954881f4/src/bytes.rs#L811</a></p>",
+        "id": 232455465,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617121769
+    },
+    {
+        "content": "<p>Yes, I use pointer tagging in <a href=\"https://github.com/softdevteam/ykbf/\">https://github.com/softdevteam/ykbf/</a> -- I had vaguely thought at the time about breaking that into a library to restrict the ickiness. It looks like other people have started to write such libraries (<a href=\"https://crates.io/search?q=pointer%20tagging\">https://crates.io/search?q=pointer%20tagging</a>) although I don't know how flexible they are and whether they'll get useful levels of uptake.</p>",
+        "id": 232456204,
+        "sender_full_name": "Laurence Tratt",
+        "timestamp": 1617122036
+    },
+    {
+        "content": "<p>i think some discussion in the UCG issues and zulip has been around pointer tagging, and generally pointer-&gt;int being difficult to make fully sound.</p>",
+        "id": 232456749,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1617122241
+    },
+    {
+        "content": "<p>That said, as someone who writes a fair amount of multithreaded code, it's hard to live without in many cases.</p>",
+        "id": 232456794,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1617122260
+    },
+    {
+        "content": "<p>In particular, without AtomicU128, on platform with 64 bit pointers, its very useful to be able to pack an ABA counter into the upper bits of the pointer.</p>",
+        "id": 232456907,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1617122297
+    },
+    {
+        "content": "<p>And that's ignoring stuff tricks like <a href=\"https://github.com/Amanieu/parking_lot/blob/master/core/src/word_lock.rs\">https://github.com/Amanieu/parking_lot/blob/master/core/src/word_lock.rs</a> does, which are fairly ubiquitous</p>",
+        "id": 232457158,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1617122408
+    },
+    {
+        "content": "<p>Aligning a pointer is often done using ptr -&gt; usize -&gt; ptr: <a href=\"https://github.com/rust-lang/rust/blob/16156fb2787f745e57504197bd7fe38b69c6cbea/library/std/src/sys/windows/alloc.rs#L12\">https://github.com/rust-lang/rust/blob/16156fb2787f745e57504197bd7fe38b69c6cbea/library/std/src/sys/windows/alloc.rs#L12</a></p>",
+        "id": 232458282,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1617122865
+    },
+    {
+        "content": "<p>AtomicU128 -- or lack thereof -- is a good point I hadn't thought about. I <em>think</em> this won't be a problem on CHERI where I assume all practical implementations (e.g. Morello) can support atomic u128s, but I might be wrong (Jacob will know this better than I for Morello). [Admittedly I've seen quite a lot of code written with \"all the world is a 64 bit machine\" where people assume usize == u64 (or even i64), but there's not much one can do about code like that.]</p>",
+        "id": 232458430,
+        "sender_full_name": "Laurence Tratt",
+        "timestamp": 1617122909
+    },
+    {
+        "content": "<p>Generally any arithmetic on the <code>usize</code> will only involve offsetting the pointer. So if the capabilities are in the upper bits there should be no issue.</p>",
+        "id": 232458435,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1617122913
+    },
+    {
+        "content": "<p>Yes, all AArch64 CPUs support <code>AtomicU128</code>.</p>",
+        "id": 232458497,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1617122938
+    },
+    {
+        "content": "<p>There are also non-AArch CHERI implementations (the original CHERI implementation was MIPS-based; and there's a RISC-V implementation too), but I'd be reasonably confident/hopeful that they also support AtomicU128.</p>",
+        "id": 232459008,
+        "sender_full_name": "Laurence Tratt",
+        "timestamp": 1617123124
+    },
+    {
+        "content": "<p>AtomicU128 and AtomicI128 are not yet stable.</p>",
+        "id": 232459432,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1617123277
+    },
+    {
+        "content": "<p>AFAIK x86_64 and aarch64 are the only 2 architectures that support 128-bit atomics.</p>",
+        "id": 232459884,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1617123426
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"252006\">Laurence Tratt</span> <a href=\"#narrow/stream/242906-t-compiler.2Farm/topic/CHERI.2FMorello.20capability.20support/near/232458430\">said</a>:</p>\n<blockquote>\n<p>AtomicU128 -- or lack thereof -- is a good point I hadn't thought about.</p>\n</blockquote>\n<p>If your pointers are actually 128 bits (and can't support pointer tagging), AtomicU128 won't be enough to use for an ABA counter.</p>\n<p>That said, you'd still need AtomicPtr/AtomicUsize support and 128 would be enough for that for the non-ABA case.</p>",
+        "id": 232460710,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1617123673
+    },
+    {
+        "content": "<p>In either case, I had thought it was already guaranteed that <code>size_of::&lt;usize&gt;() == size_of::&lt;*const ()&gt;()</code>. there's a lot of unsafe code that will break without this, and i don't think breaking it should be done lightly. (having 128 bit usize seems fine though...)</p>",
+        "id": 232475523,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1617129536
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"209168\">Thom Chiovoloni</span> <a href=\"#narrow/stream/242906-t-compiler.2Farm/topic/CHERI.2FMorello.20capability.20support/near/232475523\">said</a>:</p>\n<blockquote>\n<p>In either case, I had thought it was already guaranteed that <code>size_of::&lt;usize&gt;() == size_of::&lt;*const ()&gt;()</code>.</p>\n</blockquote>\n<p>yes, preserving that property motivated <span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span>'s original suggestion</p>",
+        "id": 232485711,
+        "sender_full_name": "Laurence Tratt",
+        "timestamp": 1617133498
+    },
+    {
+        "content": "<p>I think any architecture supporting 128-bit capabilities has to support 128-bit atomics in order to preserve the security properties across threads.</p>",
+        "id": 232558258,
+        "sender_full_name": "Jacob Bramley",
+        "timestamp": 1617181730
+    },
+    {
+        "content": "<p>One issue with <code>u128</code>-based types, in general, is that capabilities cannot hold 128-bit arithmetic values; they aren't simply interchangeable with <code>u128</code>, and have additional restrictions (such as alignment). It doesn't mean that they aren't a useful underlying tool, but they'll probably need some kind of abstraction to prevent users from expecting overflow behaviour, etc.</p>",
+        "id": 232563017,
+        "sender_full_name": "Jacob Bramley",
+        "timestamp": 1617184082
+    }
+]

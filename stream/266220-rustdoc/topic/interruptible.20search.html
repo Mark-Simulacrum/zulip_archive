@@ -1,0 +1,105 @@
+<html>
+<head><meta charset="utf-8"><title>interruptible search · rustdoc · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/index.html">rustdoc</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html">interruptible search</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="265506869"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265506869" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> jsha <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265506869">(Dec 19 2021 at 23:38)</a>:</h4>
+<p>Right now we have to be somewhat cautious about when we begin a search, because it is moderately expensive (100ms) and all of that time is spent in a JS loop that blocks UI interaction. So we only do a search if typing idles for 500ms. That can feel a little slow - but can also be a little disorienting since the search "acts like" an autocomplete in some ways.</p>
+<p>We can improve things by (a) making the JS cooperatively yield execution, and (b) allowing interruption. The idea is something like this:</p>
+<p>When a search is triggered, it produces a <code>RunningSearch</code> object. The main work is done by <code>RunningSearch.run()</code>, which processes ~1000 items from the search index, updates an internal counter, then yields by calling <code>setTimeout(self.run, 0)</code>. That puts a call to itself on the end of the event queue, to be run when any other events (like user interaction) have finishes. When <code>run</code> has collected all items, it renders them to the page.</p>
+<p>The <code>RunningSearch</code> object would also have a <code>.cancel()</code> function that makes subsequent calls to <code>.run()</code> return immediately.</p>
+<p>If this works the way I expect it to, it would have the added benefit of making search work reasonably well even for very large indexes. That is, it would still be somewhat slow, but user interaction with the page would still work while it's running. And we could even update a progress indicator.</p>
+
+
+
+<a name="265537540"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265537540" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GuillaumeGomez <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265537540">(Dec 20 2021 at 09:12)</a>:</h4>
+<p>I don't think you can have JS run without blocking the UI unfortunately (to be confirmed!).</p>
+
+
+
+<a name="265537952"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265537952" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Urgau <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265537952">(Dec 20 2021 at 09:17)</a>:</h4>
+<p>JavaScript <a href="https://developer.mozilla.org/en-US/docs/Learn/JavaScript/Asynchronous/Promises">Promise</a> ?</p>
+
+
+
+<a name="265546883"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265546883" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GuillaumeGomez <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265546883">(Dec 20 2021 at 10:49)</a>:</h4>
+<p>The code is still blocking the UI with promises when it's being executed.</p>
+
+
+
+<a name="265600444"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265600444" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> jsha <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265600444">(Dec 20 2021 at 18:30)</a>:</h4>
+<p><span class="user-mention" data-user-id="210316">@GuillaumeGomez</span> correct, you can't have a tight loop in JS without blocking the UI. However, you can cooperatively yield control to the UI by making sure you don't spend too long on the event loop: <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/EventLoop">https://developer.mozilla.org/en-US/docs/Web/JavaScript/EventLoop</a>.</p>
+<p>Example:</p>
+<div class="codehilite"><pre><span></span><code>var pi = &quot;3.&quot;;
+
+function calculatePi(begin, end) {
+  var i = begin;
+  for (; i &lt; min(end, begin + 100); i++) {
+    pi += calculateDigit(i);
+  }
+  if (i &lt; end) {
+    setTimeout(function() {
+      calculatePi(i, end);
+    }, 0)
+  }
+}
+</code></pre></div>
+<p>What's going on here is the code says "I've done enough work for now, stick me on the end of the event queue and come back to me when you've handled any other events that need handling."</p>
+
+
+
+<a name="265600600"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265600600" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> jsha <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265600600">(Dec 20 2021 at 18:31)</a>:</h4>
+<p>Note this is very similar to Rust's async model, and indeed JS' async model, which wraps patterns like the above in Promises to make them easier to work with; though Promises can be harder to work with for compute-heavy tasks.</p>
+
+
+
+<a name="265600732"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265600732" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> jsha <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265600732">(Dec 20 2021 at 18:32)</a>:</h4>
+<p>There's also a "true parallelism" approach: We can pass the work off to a ServiceWorker, and it will be done in a different thread. We'll get an event when it's done. However, I think the above approach is easier as a first step. Even with a ServiceWorker approach we'd have to build in some yield points for cancelability.</p>
+
+
+
+<a name="265601613"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265601613" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GuillaumeGomez <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265601613">(Dec 20 2021 at 18:41)</a>:</h4>
+<p>But then it would slow down the search I guess. It's an added complexity for a potential gain but I'm not sure if it'll be big enough to be worth it.</p>
+
+
+
+<a name="265602652"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265602652" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> jsha <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265602652">(Dec 20 2021 at 18:51)</a>:</h4>
+<p>Because this is cooperative interruption, it should only slow things down by the cost of a few branch instructions (on the order of nanoseconds), not like preemptive (threaded) interruption, which costs about 15ms.</p>
+
+
+
+<a name="265602764"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265602764" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265602764">(Dec 20 2021 at 18:52)</a>:</h4>
+<p>And this also makes nicer features possible, like real time search instead of waiting until the user stops typinh</p>
+
+
+
+<a name="265602903"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265602903" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> jsha <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265602903">(Dec 20 2021 at 18:54)</a>:</h4>
+<p>Exactly!</p>
+
+
+
+<a name="265603769"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/266220-rustdoc/topic/interruptible%20search/near/265603769" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> GuillaumeGomez <a href="https://zulip-archive.rust-lang.org/stream/266220-rustdoc/topic/interruptible.20search.html#265603769">(Dec 20 2021 at 19:02)</a>:</h4>
+<p>True. Well, I'm currently updating <a href="https://github.com/rust-lang/rust/pull/90630">https://github.com/rust-lang/rust/pull/90630</a> to implement <span class="user-mention" data-user-id="315412">@jsha</span> comments. With the much smaller loops, it'll be much simpler to implement this</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

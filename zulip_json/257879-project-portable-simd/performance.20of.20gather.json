@@ -1,0 +1,194 @@
+[
+    {
+        "content": "<p>Hi, I am continuing my investigation activities over performance, and I am trying to understand why core_simd is only marginally better:</p>\n<p>The following code <a href=\"https://github.com/DataEngineeringLabs/simd-benches/pull/1/files\">https://github.com/DataEngineeringLabs/simd-benches/pull/1/files</a> using </p>\n<p><code>RUSTFLAGS=\"-C target-cpu=native\" cargo bench --bench take -- \"2\\^20\"</code></p>\n<p>yields</p>\n<div class=\"codehilite\"><pre><span></span><code>core_simd_take 2^20 f32 time:   [1.9402 ms 1.9508 ms 1.9672 ms]\nnaive_take 2^20 f32     time:   [2.2779 ms 2.2856 ms 2.2938 ms]\n</code></pre></div>\n<p>which is a 10% improvement. Any ideas on how I am using the API incorrectly?</p>",
+        "id": 262639719,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637787597
+    },
+    {
+        "content": "<p>on compiler explorer: <a href=\"https://rust.godbolt.org/z/KbTs7ahPz\">https://rust.godbolt.org/z/KbTs7ahPz</a></p>",
+        "id": 262640121,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637787774
+    },
+    {
+        "content": "<p>i'd expect that level of performance, cuz simd gather on x86 is basically not any faster than repeated scalar loads</p>",
+        "id": 262640143,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1637787784
+    },
+    {
+        "content": "<p>so, unless you target the right cpu, llvm won't generate gather instructions cuz they aren't faster</p>",
+        "id": 262640551,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1637788034
+    },
+    {
+        "content": "<p>could you clarify what do you mean with the right cpu? Isn't native aimed at that? (sorry if is a silly question, this whole part is a bit new to me)</p>",
+        "id": 262640745,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637788142
+    },
+    {
+        "content": "<p>pick a cpu where gather instructions are actually faster, so llvm will generate them rather than just a sequence of scalar loads</p>",
+        "id": 262640807,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1637788195
+    },
+    {
+        "content": "<p>example: <a href=\"https://rust.godbolt.org/z/87fvPYdx1\">https://rust.godbolt.org/z/87fvPYdx1</a></p>",
+        "id": 262640871,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1637788218
+    },
+    {
+        "content": "<p>if your running on zen3, gather isn't all that likely to give you extra performance</p>",
+        "id": 262640938,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1637788293
+    },
+    {
+        "content": "<p>native just gives you whatever cpu you ran the compiler on</p>",
+        "id": 262641126,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1637788438
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"399416\">Jorge Leitao</span> <a href=\"#narrow/stream/257879-project-portable-simd/topic/performance.20of.20gather/near/262639719\">said</a>:</p>\n<blockquote>\n<p>Hi, I am continuing my investigation activities over performance, and I am trying to understand why core_simd is only marginally better:</p>\n<p>The following code <a href=\"https://github.com/DataEngineeringLabs/simd-benches/pull/1/files\">https://github.com/DataEngineeringLabs/simd-benches/pull/1/files</a> using </p>\n<p><code>RUSTFLAGS=\"-C target-cpu=native\" cargo bench --bench take -- \"2\\^20\"</code></p>\n<p>yields</p>\n<div class=\"codehilite\"><pre><span></span><code>core_simd_take 2^20 f32 time:   [1.9402 ms 1.9508 ms 1.9672 ms]\nnaive_take 2^20 f32     time:   [2.2779 ms 2.2856 ms 2.2938 ms]\n</code></pre></div>\n<p>which is a 10% improvement. Any ideas on how I am using the API incorrectly?</p>\n</blockquote>\n<p>Gather is in fact that marginal of an improvement on some CPUs.</p>",
+        "id": 262641388,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637788671
+    },
+    {
+        "content": "<p><code>rustc --print target-cpus</code> -&gt; <code>native         - Select the CPU of the current host (currently skylake-avx512).</code> so I am already using skylake-avx512</p>",
+        "id": 262641519,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637788751
+    },
+    {
+        "content": "<p>on zen3, from what I can tell, llvm decides gather instructions are slow enough that itjust generates scalar loads instead</p>",
+        "id": 262641525,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1637788758
+    },
+    {
+        "content": "<p>is there an <code>unsafe</code>-free way of performing the operation without allocating zeros? I.e. something like </p>\n<div class=\"codehilite\"><pre><span></span><code>    let mut result = Vec::&lt;f32&gt;::with_capacity(indices.len());\n    unsafe { result.set_len(indices.len()) }; // not safe; need MaybeUninit\n    let result_chunks = result.chunks_exact_mut(8);\n    chunks.zip(result_chunks).for_each(|(chunk, r_chunk)| {\n        let idxs: [usize; 8] = chunk.try_into().unwrap();\n        let idxs: usizex8 = usizex8::from_array(idxs);\n\n        let r = Simd::gather_or_default(&amp;values, idxs);\n        let r: [f32; 8] = r.to_array();\n\n        let r_chunk: &amp;mut [f32; 8] = r_chunk.try_into().unwrap();\n        *r_chunk = r;\n    });\n</code></pre></div>\n<p>we need to collect multiple lanes to the same vector and we know the op is infallible. (the above saves an extra 10%, but is likely unsound)</p>",
+        "id": 262642359,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637789352
+    },
+    {
+        "content": "<p>I also would note that the specific thing you are doing there seems like something that is very easy for LLVM to optimize already, whereas hardware gather instructions can be microarchitecturally optimized to have decent performance under stranger circumstances.</p>\n<p>It's an instruction which paradoxically works \"against the grain\" of what the CPU \"wants\", by nature (it would rather just load cache lines, you see), so software can be almost as good at it.</p>",
+        "id": 262643234,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637789987
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"399416\">Jorge Leitao</span> <a href=\"#narrow/stream/257879-project-portable-simd/topic/performance.20of.20gather/near/262642359\">said</a>:</p>\n<blockquote>\n<p>is there an <code>unsafe</code>-free way of performing the operation without allocating zeros? I.e. something like <br>\n...<br>\nwe need to collect multiple lanes to the same vector and we know the op is infallible. (the above saves an extra 10%, but is likely unsound)</p>\n</blockquote>\n<p>\"without allocating zeros\"?</p>",
+        "id": 262643341,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637790058
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281757\">Jubilee</span> <a href=\"#narrow/stream/257879-project-portable-simd/topic/performance.20of.20gather/near/262643341\">said</a>:</p>\n<blockquote>\n<p>\"without allocating zeros\"?</p>\n</blockquote>\n<p>the <code>unsafe</code>-free version is <code>vec![0; indices.len()]</code>, which calls <code>alloc::alloc_zeroed</code>. With <code>.collect</code> it calls <code>alloc::alloc</code> and writes to the region. The code I posted calls <code>alloc</code>, but is unsound because it creates a slice of un-initialized.</p>",
+        "id": 262643602,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637790241
+    },
+    {
+        "content": "<p>I see... does it get better if you just call <code>.extend</code> repeatedly, by any chance?</p>",
+        "id": 262643753,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637790338
+    },
+    {
+        "content": "<p>Thanks. The thing is that the op I wrote here is a major bottleneck in virtually every row-base operation in columnar formats (so major bottleneck in both <a href=\"https://github.com/pola-rs/polars\">https://github.com/pola-rs/polars</a> and <a href=\"https://github.com/apache/datafusion\">https://github.com/apache/datafusion</a>); so it is a high-valuable target ^_^</p>",
+        "id": 262643836,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637790379
+    },
+    {
+        "content": "<p><a href=\"https://doc.rust-lang.org/std/iter/trait.Extend.html#tymethod.extend\">https://doc.rust-lang.org/std/iter/trait.Extend.html#tymethod.extend</a> this little method</p>",
+        "id": 262643926,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637790459
+    },
+    {
+        "content": "<p>using extend: +41.539% xD. Which makes sense because <code>extend</code> requires a <code>reserve</code> call.</p>",
+        "id": 262644009,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637790500
+    },
+    {
+        "content": "<p>Oof, I was hoping the reserve would be elided due to the previous <code>with_capacity</code></p>",
+        "id": 262644055,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637790541
+    },
+    {
+        "content": "<p>good point. The compiler does have all the information to elide it, since the iterator is TrustedLen and the extend is of known size, but for some reason it does not.</p>",
+        "id": 262644484,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637790880
+    },
+    {
+        "content": "<p>does <code>array_chunks</code> improve the <code>unsafe</code> version?</p>",
+        "id": 262644536,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637790927
+    },
+    {
+        "content": "<p>I do not understand: I just re-compiled the same code and now there is a -50% improvement over naive take. <span aria-label=\"boom\" class=\"emoji emoji-1f4a5\" role=\"img\" title=\"boom\">:boom:</span></p>",
+        "id": 262644857,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637791162
+    },
+    {
+        "content": "<p>lmao what</p>",
+        "id": 262644873,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637791177
+    },
+    {
+        "content": "<p>\"same\" code?</p>",
+        "id": 262644880,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637791183
+    },
+    {
+        "content": "<p>nvmd, I am being dumb. Time to go to bed and look through this tomorrow again. Good thanksgiving for US.</p>",
+        "id": 262645074,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637791280
+    },
+    {
+        "content": "<p>Enjoy!</p>",
+        "id": 262645312,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637791482
+    },
+    {
+        "content": "<p>Ok, I've went through the benches again and I was doing a mistake. The correct values on my skylake-avx512 are:</p>\n<div class=\"codehilite\"><pre><span></span><code># take with no &quot;null&quot; indices\ncore_simd_take 2^20 f32 time:   [911.13 us 912.21 us 913.33 us]\nnaive_take 2^20 f32     time:   [912.39 us 915.22 us 918.41 us]\n\n# take with 10% of the indices &quot;null&quot; (using a bitmap)\ncore_simd_take_nulls 2^20 f32   time:   [950.40 us 954.08 us 958.88 us]\nnaive_take_nulls 2^20 f32       time:   [2.3714 ms 2.3968 ms 2.4296 ms]\n</code></pre></div>\n<p>i.e. there is a factor of 2 on the latter :)</p>",
+        "id": 262669206,
+        "sender_full_name": "Jorge Leitao",
+        "timestamp": 1637818921
+    },
+    {
+        "content": "<p>aha.</p>",
+        "id": 262693918,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637839282
+    },
+    {
+        "content": "<p>And that's with <code>Simd::gather_or_default</code>? Nice.</p>\n<p>In a way, this kind of demonstrates the point I was making about how it's not necessarily about having much faster performance than naive sequential loading but about retaining that performance in adverse circumstances.</p>",
+        "id": 262694060,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637839357
+    },
+    {
+        "content": "<p>( I should also note that my understanding is AVX512 perf is <strong>much</strong> better on Ice Lake in general... Skylake is one where it's still kinda marginal on in general. This is of course to be expected since Ice Lake is what was made to replace Skylake and all its revisions. )</p>",
+        "id": 262740056,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1637873375
+    }
+]

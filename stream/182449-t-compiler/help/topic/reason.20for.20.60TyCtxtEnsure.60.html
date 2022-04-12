@@ -1,0 +1,156 @@
+<html>
+<head><meta charset="utf-8"><title>reason for `TyCtxtEnsure` · t-compiler/help · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/index.html">t-compiler/help</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html">reason for `TyCtxtEnsure`</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="195277356"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195277356" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195277356">(Apr 25 2020 at 09:47)</a>:</h4>
+<p>We use <code>tcx.ensure().query_name(...)</code> in a few places in the compiler.<br>
+Looking at <a href="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.ensure" title="https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.ensure">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.ensure</a></p>
+<blockquote>
+<p>Returns a transparent wrapper for TyCtxt, which ensures queries are executed instead of just returning their results.</p>
+</blockquote>
+<p>I do not quite understand where this is desired (afaict it might reemit some warnings between incremental builds, which might be useful <span aria-label="shrug" class="emoji emoji-1f937" role="img" title="shrug">:shrug:</span> ).</p>
+<p>E.g. in <code>optimized_mir</code> we ensure <code>mir_borrowck</code> <a href="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/mod.rs#L338" title="https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/mod.rs#L338">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/mod.rs#L338</a></p>
+<p>With the comment </p>
+<div class="codehilite"><pre><span></span><span class="c1">// (Mir-)Borrowck uses `mir_validated`, so we have to force it to</span>
+<span class="c1">// execute before we can steal.</span>
+<span class="n">tcx</span><span class="p">.</span><span class="n">ensure</span><span class="p">().</span><span class="n">mir_borrowck</span><span class="p">(</span><span class="n">def_id</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+
+
+<p>I don't see why <code>ensure</code> is actually needed here. <code>ensure</code> only changes the behavior in case <code>mir_borrowck</code> is already cached. In this case it recomputes it and stores the same result in the cache, changing no observable behavior afaict. Why would we want to rerun <code>mir_borrowck</code> if we already did so before?</p>
+<p>What am I missing here <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span></p>
+
+
+
+<a name="195282227"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282227" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282227">(Apr 25 2020 at 12:11)</a>:</h4>
+<p>If <code>optimized_mir</code> for a function were to run before <code>mir_borrowck</code>, the steal of the mir at <a href="https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L341" title="https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L341">https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L341</a> would mean that <code>mir_borrowck</code> can no longer access the <code>mir_validated</code> output.</p>
+
+
+
+<a name="195282330"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282330" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282330">(Apr 25 2020 at 12:12)</a>:</h4>
+<p><code>mir_validated</code> returns <code>Steal&lt;mir::Body&gt;</code>, not <code>mir::Body</code>. This makes it possible to steal the inner <code>mir::Body</code>, after which any attempt to access it will panic. This is an optimization to prevent a clone of <code>mir::Body</code>, which is very costly.</p>
+
+
+
+<a name="195282409"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282409" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282409">(Apr 25 2020 at 12:15)</a>:</h4>
+<p>jup, what I don't understand is why we need <code>ensure</code> there.</p>
+
+
+
+<a name="195282415"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282415" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282415">(Apr 25 2020 at 12:15)</a>:</h4>
+<p>before stealing, you want to <em>ensure</em> that <code>mir_borrowck</code> has already been run</p>
+
+
+
+<a name="195282416"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282416" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282416">(Apr 25 2020 at 12:16)</a>:</h4>
+<p>because then the query is cached</p>
+
+
+
+<a name="195282456"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282456" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282456">(Apr 25 2020 at 12:16)</a>:</h4>
+<p>and future invocations of it will just yield the cached result instead of running the body which would try to access <code>mir_validated</code></p>
+
+
+
+<a name="195282459"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282459" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282459">(Apr 25 2020 at 12:16)</a>:</h4>
+<p>But isn't this also a given if we call <code>mir_borrowck</code> without ensure</p>
+
+
+
+<a name="195282463"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282463" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282463">(Apr 25 2020 at 12:16)</a>:</h4>
+<p>yes</p>
+
+
+
+<a name="195282471"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282471" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282471">(Apr 25 2020 at 12:17)</a>:</h4>
+<p>Afaik <code>ensure</code> actually reruns <code>mir_borrowck</code> there even if it was already called</p>
+
+
+
+<a name="195282478"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282478" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282478">(Apr 25 2020 at 12:17)</a>:</h4>
+<p>which seems like it's unnecessary</p>
+
+
+
+<a name="195282480"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282480" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282480">(Apr 25 2020 at 12:17)</a>:</h4>
+<p><code>ensure</code> is just a scheme for calling a query without using its result afaik, but that's just from superficial knowledge</p>
+
+
+
+<a name="195282548"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282548" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282548">(Apr 25 2020 at 12:19)</a>:</h4>
+<blockquote>
+<p>Afaik ensure actually reruns mir_borrowck there even if it was already called</p>
+</blockquote>
+<p>Aaah, so this was where I was wrong. TyCtxtEnsure is pretty much</p>
+<div class="codehilite"><pre><span></span><span class="k">fn</span> <span class="nf">query_name</span><span class="p">(..)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">tcx</span><span class="p">.</span><span class="n">query_name</span><span class="p">(...);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+
+<a name="195282729"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282729" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282729">(Apr 25 2020 at 12:22)</a>:</h4>
+<p>Thank you</p>
+
+
+
+<a name="195282785"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195282785" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195282785">(Apr 25 2020 at 12:24)</a>:</h4>
+<p>The documentation on <code>fn ensure</code> is somewhat misleading there</p>
+
+
+
+<a name="195284627"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195284627" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195284627">(Apr 25 2020 at 13:18)</a>:</h4>
+<p>Looking somewhat more into this, we sometimes use <code>let _ = tcx.query_name(...); </code> instead of ensure. <a href="https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L240" title="https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L240">https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L240</a></p>
+<p>As I can fully get what this does without having to read and understand the docs of <code>ensure</code> I am kind of in favor of just removing <code>ensure</code> entirely <span aria-label="laughing" class="emoji emoji-1f606" role="img" title="laughing">:laughing:</span> I still don't know too much about the query system yet, so there might be some advantage to using <code>ensure</code> I don't know of</p>
+
+
+
+<a name="195284696"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195284696" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195284696">(Apr 25 2020 at 13:22)</a>:</h4>
+<p>When the query is already cached,  <code>tcx.ensure()</code> doesn't create a clone of the query result, which saves time for big values.</p>
+
+
+
+<a name="195284815"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195284815" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195284815">(Apr 25 2020 at 13:24)</a>:</h4>
+<p>true <span aria-label="sparkles" class="emoji emoji-2728" role="img" title="sparkles">:sparkles:</span> do we have any queries which return a big struct directly instead of a reference?</p>
+
+
+
+<a name="195377836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195377836" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195377836">(Apr 27 2020 at 06:40)</a>:</h4>
+<p>maybe we should require that the result is <code>Copy</code> :P</p>
+
+
+
+<a name="195377844"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/reason%20for%20%60TyCtxtEnsure%60/near/195377844" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/reason.20for.20.60TyCtxtEnsure.60.html#195377844">(Apr 27 2020 at 06:40)</a>:</h4>
+<p>and aggressively intern everything</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

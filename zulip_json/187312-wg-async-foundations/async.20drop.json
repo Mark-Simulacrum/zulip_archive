@@ -1,0 +1,602 @@
+[
+    {
+        "content": "<p>Has there been discussion about some kind of async drop? For example, if you have a database connection that does a <code>COMMIT</code> on drop, that might take time. <code>Drop</code> is sync by nature, which might tie up the future.</p>\n<p>My guess is that the answer is \"create a bespoke method that does the IO work and you can call <code>.await</code> on it\"</p>",
+        "id": 176007755,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1568815411
+    },
+    {
+        "content": "<p>Hm, so I feel like I've seen some discussion about this on internals</p>",
+        "id": 176008143,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1568815698
+    },
+    {
+        "content": "<p>But it does seem like you could do something like <code>rt::spawn(commit())</code> and then just exit, though that does mean that you will only find out later that the commit didn't go through</p>",
+        "id": 176008194,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1568815735
+    },
+    {
+        "content": "<p>but that seems similar to e.g. File's Drop not panicking on errors and such</p>",
+        "id": 176008228,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1568815761
+    },
+    {
+        "content": "<p>I agree with the similarity, which is solved by using an explicit call as well (e.g. <code>sync_all</code>)</p>",
+        "id": 176008538,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1568815944
+    },
+    {
+        "content": "<blockquote>\n<p>like you could do something like <code>rt::spawn(commit())</code></p>\n</blockquote>\n<p>Do you mean in the <code>Drop::drop</code> implementation?</p>",
+        "id": 176008586,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1568815972
+    },
+    {
+        "content": "<p>yeah</p>",
+        "id": 176010647,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1568817219
+    },
+    {
+        "content": "<p>We've thought about this a fair bit!</p>",
+        "id": 176039755,
+        "sender_full_name": "boats",
+        "timestamp": 1568836475
+    },
+    {
+        "content": "<p>I've sketched threw the design a few weeks ago and made an interesting realization, which I will record here: the problem with something like <code>async fn drop</code> is that the future it returns can contain additional state beyond <code>&amp;mut Self</code>.</p>",
+        "id": 176039847,
+        "sender_full_name": "boats",
+        "timestamp": 1568836527
+    },
+    {
+        "content": "<p>This means that the futures which call the destructor may, for example, not be <code>Send</code> if you introduce <code>!Send</code> state.</p>",
+        "id": 176039912,
+        "sender_full_name": "boats",
+        "timestamp": 1568836563
+    },
+    {
+        "content": "<p>There's absolutely no way to write the bound for \"the future returned by T's async destructor, if it has one, is <code>Send</code>\"</p>",
+        "id": 176039978,
+        "sender_full_name": "boats",
+        "timestamp": 1568836596
+    },
+    {
+        "content": "<p><code>T: AsyncDrop implies OutputOf(&lt;T as AsyncDrop&gt;::drop_async): Send</code>, combining several features we don't have, and not pretty</p>",
+        "id": 176040051,
+        "sender_full_name": "boats",
+        "timestamp": 1568836651
+    },
+    {
+        "content": "<p>In the near term, we should probably pursue a poll-based approach: <code>fn poll_drop(self: Pin&lt;&amp;mut Self&gt;) -&gt; Poll&lt;()&gt;</code>. In the long term we could also introduce an async fn version if we feel its needed.</p>",
+        "id": 176040131,
+        "sender_full_name": "boats",
+        "timestamp": 1568836688
+    },
+    {
+        "content": "<p>The poll based approach guarantees that all of the state for the async destructor is contained in the type being destroyed.</p>",
+        "id": 176040237,
+        "sender_full_name": "boats",
+        "timestamp": 1568836761
+    },
+    {
+        "content": "<p>I wrote a blog post about this, and theres now an internals thread: <a href=\"https://internals.rust-lang.org/t/asynchronous-destructors/11127/16\" target=\"_blank\" title=\"https://internals.rust-lang.org/t/asynchronous-destructors/11127/16\">https://internals.rust-lang.org/t/asynchronous-destructors/11127/16</a></p>",
+        "id": 178369811,
+        "sender_full_name": "boats",
+        "timestamp": 1571309717
+    },
+    {
+        "content": "<p>The desugaring proposed in internals thread is synchronous:</p>\n<div class=\"codehilite\"><pre><span></span>while let Poll::Pending = self.poll_drop_ready(cx) {}\nself.drop()\n</pre></div>\n\n\n<p>Shouldn't it be something more along the lines of:</p>\n<div class=\"codehilite\"><pre><span></span>poll_fn(self.poll_drop_ready).await;\nself.drop()\n</pre></div>",
+        "id": 178374521,
+        "sender_full_name": "stko",
+        "timestamp": 1571314218
+    },
+    {
+        "content": "<p>Is there a good place to look for the status of async drop?</p>",
+        "id": 230931463,
+        "sender_full_name": "Patrick Walton",
+        "timestamp": 1616098956
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"384014\">@Patrick Walton</span> I think that the most recent proposal was <a href=\"https://github.com/rust-lang/rfcs/pull/2958\">https://github.com/rust-lang/rfcs/pull/2958</a>, and that it is basically 'state of the art', but that there are some concerns. Why do you ask?</p>",
+        "id": 230936890,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1616101276
+    },
+    {
+        "content": "<p>I would encourage you to open an issue or a PR describing what problems you are encountering that motivated this question</p>",
+        "id": 230936929,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1616101294
+    },
+    {
+        "content": "<p>There's no particular problem that motivates it, it's more just curiosity, wanting to understand the history of the async design in Rust better</p>",
+        "id": 230937102,
+        "sender_full_name": "Patrick Walton",
+        "timestamp": 1616101358
+    },
+    {
+        "content": "<p>Thanks for the pointer :)</p>",
+        "id": 230937331,
+        "sender_full_name": "Patrick Walton",
+        "timestamp": 1616101452
+    },
+    {
+        "content": "<p>Oh, I have an example of a motivation on this tho ^^</p>",
+        "id": 230937347,
+        "sender_full_name": "nagisa",
+        "timestamp": 1616101458
+    },
+    {
+        "content": "<p>Fooey. Well, then I encourage you to get folks in FB to participate regardless</p>",
+        "id": 230937355,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1616101464
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"123586\">nagisa</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Async.20drop/near/230937347\">said</a>:</p>\n<blockquote>\n<p>Oh, I have an example of a motivation on this tho ^^</p>\n</blockquote>\n<p>now we're talking!</p>",
+        "id": 230937361,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1616101467
+    },
+    {
+        "content": "<p>Where do I write it?</p>",
+        "id": 230937383,
+        "sender_full_name": "nagisa",
+        "timestamp": 1616101482
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> <a href=\"https://nikomatsakis.github.io/wg-async-foundations/vision/how_to_vision/status_quo.html#tldr\">https://nikomatsakis.github.io/wg-async-foundations/vision/how_to_vision/status_quo.html#tldr</a></p>",
+        "id": 230937423,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1616101501
+    },
+    {
+        "content": "<p>probably open an issue is the easiest way to start :)</p>",
+        "id": 230937448,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1616101509
+    },
+    {
+        "content": "<p>the idea would be to describe the problem you are facing now</p>",
+        "id": 230937472,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1616101517
+    },
+    {
+        "content": "<p>(not the <em>solution</em>, that comes later)</p>",
+        "id": 230937495,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1616101531
+    },
+    {
+        "content": "<p>So this grew out of a question of trying to make C++ senders/receivers work well with Rust futures</p>",
+        "id": 230939203,
+        "sender_full_name": "Patrick Walton",
+        "timestamp": 1616102233
+    },
+    {
+        "content": "<p>Now I know the issue: we want to call APIs that use the C++ equivalent of futures from Rust programs, but C++ futures must be polled to completion (it's undefined behavior to drop them), while Rust futures can be dropped at any time.</p>",
+        "id": 230973239,
+        "sender_full_name": "Patrick Walton",
+        "timestamp": 1616126868
+    },
+    {
+        "content": "<p>I'm confused why we talk so much about <code>AsyncDrop</code> before figuring out what problem it actually solves?</p>",
+        "id": 240377958,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622057292
+    },
+    {
+        "content": "<p>We know some pretty concrete problems that it solves</p>",
+        "id": 240378038,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057336
+    },
+    {
+        "content": "<p>I'm still of the strong opinion that it its a useless endeavour if it doesn't provide any guarantees, and provide just more questions</p>",
+        "id": 240378074,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622057351
+    },
+    {
+        "content": "<p>that's one opinion</p>",
+        "id": 240378126,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057378
+    },
+    {
+        "content": "<p>there are some clear stories about the problems that arise in the absence of async-drop;</p>",
+        "id": 240378145,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057393
+    },
+    {
+        "content": "<p>I see a few ways to approach solving them</p>",
+        "id": 240378160,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057397
+    },
+    {
+        "content": "<p>Should I then add to any code review I'm doing \"well, you can solve this with AsyncDrop, but you have to account for it not being called, so you also have to implement XYZ\"</p>",
+        "id": 240378162,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622057399
+    },
+    {
+        "content": "<p>one of them is to have an async drop method</p>",
+        "id": 240378165,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057402
+    },
+    {
+        "content": "<p>I don't want to do that</p>",
+        "id": 240378217,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622057406
+    },
+    {
+        "content": "<p>another is have some way to designate a \"close\" method</p>",
+        "id": 240378229,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057411
+    },
+    {
+        "content": "<p>I dont' think they're incompatible, either</p>",
+        "id": 240378239,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057415
+    },
+    {
+        "content": "<p>either way, you also have to ask yourself about sync drop-- you can lint a lot of cases, but not all</p>",
+        "id": 240378267,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057430
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"204219\">Matthias247</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/.22inline.22.20async.20fn.20in.20traits/near/240378162\">said</a>:</p>\n<blockquote>\n<p>Should I then add to any code review I'm doing \"well, you can solve this with AsyncDrop, but you have to account for it not being called, so you also have to implement XYZ\"</p>\n</blockquote>\n<p>this is true regardless</p>",
+        "id": 240378300,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057448
+    },
+    {
+        "content": "<p>it seems like an orthogonal problem to me</p>",
+        "id": 240378309,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057456
+    },
+    {
+        "content": "<p>but this is not a useful way to have the debate</p>",
+        "id": 240378351,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057479
+    },
+    {
+        "content": "<p>a useful one is to write up the stories that tell me how you make the status quo better</p>",
+        "id": 240378369,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057488
+    },
+    {
+        "content": "<p>and/or help critique the stories by shwing some of their flaws</p>",
+        "id": 240378415,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057512
+    },
+    {
+        "content": "<p>(once they exist to be critiqued)</p>",
+        "id": 240378450,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622057523
+    },
+    {
+        "content": "<p>sync drop is very different. It will work unless something is leaked (and that is rather hard to do with rust). async drop will not work if someone uses functions that are described as best practices by the working group and ecosystem</p>",
+        "id": 240378518,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622057548
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> I'm still confused by this, I've written up thousands of lines of text around this - in my free time. A lot of this coming out of real experience building async applications, and doing code reviews for multiple teams using this.  What is the issue here? Discoverability? The fact that its not in the newly endorsed \"async wg format\"?</p>",
+        "id": 240378727,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622057649
+    },
+    {
+        "content": "<p>just two very primitive examples:</p>\n<ul>\n<li>You can't use <code>AsyncDrop</code> to abort any kind of transaction (e.g. a database transaction) in an async fashion if if someone uses <code>select!</code> with a timeout on the database. It will not run. </li>\n<li>You can't use <code>AsyncDrop</code> to flush a buffered writer (e.g. around a file) if whatever is using the writer is inside a <code>select!</code> block. It will not run.</li>\n</ul>",
+        "id": 240379272,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622057910
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"204219\">Matthias247</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/.22inline.22.20async.20fn.20in.20traits/near/240378518\">said</a>:</p>\n<blockquote>\n<p>sync drop is very different. It will work unless something is leaked (and that is rather hard to do with rust). async drop will not work if someone uses functions that are described as best practices by the working group and ecosystem</p>\n</blockquote>\n<p>you're making a lot of strong statements here :)</p>",
+        "id": 240380224,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058317
+    },
+    {
+        "content": "<p>I'm interested in working through those examples in detail to understand where they go wrong and if there aren't things we can change to fix it.</p>",
+        "id": 240380500,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058418
+    },
+    {
+        "content": "<p>Mostly I'm trying to work backwards from the problems that have been described to me -- for example <a href=\"https://rust-lang.github.io/wg-async-foundations/vision/status_quo/alan_finds_database_drops_hard.html\">this story about dropping database handles</a>. Some reliably way to close async handles has been raised in virtually every conversation about async that I have had.</p>",
+        "id": 240380623,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058476
+    },
+    {
+        "content": "<p>In any case, those are helpful examples, thanks!</p>",
+        "id": 240380725,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058511
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/async.20drop/near/240380224\">said</a>:</p>\n<blockquote>\n<p>you're making a lot of strong statements here :)</p>\n</blockquote>\n<p>In particular, it feels like you're assuming specific aspects of the design. I'd like to understand that better.</p>",
+        "id": 240380996,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058617
+    },
+    {
+        "content": "<p>Maybe these are fundamental constraints, or maybe they're specific to aspects of how select and cancellation work-- I can't quite tell.</p>",
+        "id": 240381038,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058635
+    },
+    {
+        "content": "<p>It <em>sounds</em> like you're saying -- select drops the future synchronously -- therefore async drop can't work. But is it more than that?</p>",
+        "id": 240381068,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058651
+    },
+    {
+        "content": "<p>yes, it's that</p>",
+        "id": 240381125,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622058673
+    },
+    {
+        "content": "<p>The fact that select cancels futures aggressively is itself a source of bugs independently of async drop</p>",
+        "id": 240381151,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058686
+    },
+    {
+        "content": "<p>unless you change <code>select!</code> and all future combinators regarding not doing that, it won't work</p>",
+        "id": 240381172,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622058699
+    },
+    {
+        "content": "<p>but as a library author, you don#t know. You can't assume anything on how it is used</p>",
+        "id": 240381206,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622058719
+    },
+    {
+        "content": "<p>e.g., <a href=\"https://rust-lang.github.io/wg-async-foundations/vision/status_quo/alan_builds_a_cache.html\">Alan tries to cache requests</a>, or <a href=\"https://rust-lang.github.io/wg-async-foundations/vision/status_quo/barbara_gets_burned_by_select.html\">Barbara gets burned by select</a></p>",
+        "id": 240381253,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058725
+    },
+    {
+        "content": "<p>so if you use <code>AsyncDrop</code> and someone uses your library function with <code>select!</code> - it's presumably still the libraries fault, not the users one</p>",
+        "id": 240381283,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622058748
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"204219\">Matthias247</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/async.20drop/near/240381172\">said</a>:</p>\n<blockquote>\n<p>unless you change <code>select!</code> and all future combinators regarding not doing that, it won't work</p>\n</blockquote>\n<p>this seems correct-- synchronous drop will remain a possibility, unless we try to rule it out</p>",
+        "id": 240381332,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058770
+    },
+    {
+        "content": "<p>these seem like orthogonal problems to me in some sense</p>",
+        "id": 240381376,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058786
+    },
+    {
+        "content": "<ul>\n<li>some things get dropped synchronously which shouldn't</li>\n</ul>",
+        "id": 240381398,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058792
+    },
+    {
+        "content": "<ul>\n<li>we don't have an async equivalent of \"drop\"-- i.e., a way to cleanup resources conveniently and silently -- which introduces a disparity between sync and async code</li>\n</ul>",
+        "id": 240381446,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058814
+    },
+    {
+        "content": "<p>and that's the same I tried to tell above: I can't recommend anyone in the future to use <code>AsyncDrop</code> without understanding those scenarios. And I really really really would like not to talk about it. async rust is already complicated enough</p>",
+        "id": 240381448,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622058814
+    },
+    {
+        "content": "<p>I'd probably add third one:</p>",
+        "id": 240381457,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058819
+    },
+    {
+        "content": "<ul>\n<li>for both sync and async code, there is sometimes a problem that <code>Drop</code> doesn't fit, e.g. because there's more than one way to drop, or because you really want parameters to do cleanup (consider freeing a box and knowing how big its contents are)</li>\n</ul>",
+        "id": 240381561,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058845
+    },
+    {
+        "content": "<p>Sure. It's just that you're running really fast to a conclusion.</p>",
+        "id": 240381598,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058861
+    },
+    {
+        "content": "<p>I'm not saying you're wrong, I'm just saying I want to take some time and explore and document the space.</p>",
+        "id": 240381639,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058879
+    },
+    {
+        "content": "<p>sure, this is true - not everything can and should be solved with <code>Drop</code></p>",
+        "id": 240381641,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622058879
+    },
+    {
+        "content": "<p>I'm also not afraid to make big changes if we have to</p>",
+        "id": 240381687,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058898
+    },
+    {
+        "content": "<p>Though of course we have to be very careful in how we manage that</p>",
+        "id": 240381712,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058911
+    },
+    {
+        "content": "<p>But for solutions which can be  solved by it, offering a solution which only works depending on how others use your code does not seem a feasible way forward for me</p>",
+        "id": 240381724,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622058916
+    },
+    {
+        "content": "<p>I think there's a chance there are combinations you've not considered, or that there are things you considered immutable which are not.</p>",
+        "id": 240381771,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058935
+    },
+    {
+        "content": "<p>As it happens It hink you're willing to consider big changes too :)</p>",
+        "id": 240381784,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058940
+    },
+    {
+        "content": "<p>(I've seen you're our RFC on \"must poll\" futures, for example, and I'm thinking about that as a direction to consider)</p>",
+        "id": 240381848,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622058963
+    },
+    {
+        "content": "<p>I've considered a lot. I've written about this topic for 3 years now! And I've offered solutions for it</p>",
+        "id": 240381881,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622058971
+    },
+    {
+        "content": "<p>yes, that doc</p>",
+        "id": 240381889,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622058975
+    },
+    {
+        "content": "<p>And I'm at this point mainly a bit said why the discussion always goes back to the base points and I feel like I'm kind of writing into a void</p>",
+        "id": 240381965,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622059005
+    },
+    {
+        "content": "<p>It'd be interesting if async drop _could_ make <code>select!</code> and friends work. Like, if dropping that future means it recursively calls async drop, then maybe the resources inside the future could clean up correctly...</p>",
+        "id": 240381983,
+        "sender_full_name": "Sean McArthur",
+        "timestamp": 1622059010
+    },
+    {
+        "content": "<p>it seems clear that if we added async drop, we'd have to rewrite our combinators to work with it</p>",
+        "id": 240382020,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622059030
+    },
+    {
+        "content": "<p>how we manage the sync drop case is an interesting question, yes, but it really does seem orthogonal-- like, those bugs are there</p>",
+        "id": 240382062,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622059051
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"243965\">@Sean McArthur</span> Sure, we can rewrite selected combinators to call async drop. But there's no guarantee you will catch all of them</p>",
+        "id": 240382085,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622059060
+    },
+    {
+        "content": "<p>I don't mean manually.</p>",
+        "id": 240382127,
+        "sender_full_name": "Sean McArthur",
+        "timestamp": 1622059081
+    },
+    {
+        "content": "<p>but the combinators are all manual state machines :)  Look through <code>futurs-rs</code> and the bazillions of those</p>",
+        "id": 240382220,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622059107
+    },
+    {
+        "content": "<p>yes of course</p>",
+        "id": 240382299,
+        "sender_full_name": "Sean McArthur",
+        "timestamp": 1622059153
+    },
+    {
+        "content": "<p>I'm just tossing out there that'd be interesting if async-drop could be automatically applied to them all, the same way sync drop can be.</p>",
+        "id": 240382352,
+        "sender_full_name": "Sean McArthur",
+        "timestamp": 1622059178
+    },
+    {
+        "content": "<p>I am pretty sure all of those combinators are going to get rewritten many times over the next few years :)</p>",
+        "id": 240382453,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622059204
+    },
+    {
+        "content": "<p>That thought doesn't bother me nearly as much as not building a foundation for async rust that feels \"just as nice\" as sync rust</p>",
+        "id": 240382539,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622059235
+    },
+    {
+        "content": "<p>But I agree that if library authors have to defend against sync drop <em>in practice</em> -- e.g., because we are not able to effectively deploy lints or other mechanisms that mean that sync drop doesn't occur -- then this goal will not be achieved.</p>",
+        "id": 240382692,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622059303
+    },
+    {
+        "content": "<p>I think that's true regardless of whether we add async drop, however</p>",
+        "id": 240382711,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622059311
+    },
+    {
+        "content": "<p>well maybe, maybe not. Realisitically they should have been dropped with <code>async fn</code>, because 95% of them can be replaced with either those or just <code>select!/join!</code>. But since the APIs where compatible, they have been kept arround. And I thinkt the same would happen in the future, unless APIs would fail to compile. You still have APIs around which have futures 0.1 assumptions and people stumble on them and use them</p>",
+        "id": 240382719,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622059313
+    },
+    {
+        "content": "<p>So the real question is: how can we help make that transition</p>",
+        "id": 240382746,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1622059320
+    },
+    {
+        "content": "<p>The \"must run to completion\" doc has a story for transitioning. I agree it's not the prettiest one, but I still couldn't find a better one unless people are ok without strong guarantees.</p>",
+        "id": 240383841,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622059741
+    },
+    {
+        "content": "<p>But I feel like we shouldn't be ok without it, Rust in general is all about strong guarantees, and so this seems like a weak spot to me.</p>",
+        "id": 240383939,
+        "sender_full_name": "Matthias247",
+        "timestamp": 1622059789
+    }
+]

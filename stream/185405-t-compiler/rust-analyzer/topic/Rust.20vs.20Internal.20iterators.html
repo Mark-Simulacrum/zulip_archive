@@ -1,0 +1,76 @@
+<html>
+<head><meta charset="utf-8"><title>Rust vs Internal iterators · t-compiler/rust-analyzer · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/index.html">t-compiler/rust-analyzer</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Rust.20vs.20Internal.20iterators.html">Rust vs Internal iterators</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="168938926"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rust%20vs%20Internal%20iterators/near/168938926" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Rust.20vs.20Internal.20iterators.html#168938926">(Jun 25 2019 at 13:38)</a>:</h4>
+<p>I've been looking into simiplifing <a href="https://github.com/rust-analyzer/rust-analyzer/blob/4b0c37bd6e4cb3d47614ec6b42fb1deef9bc9324/crates/ra_hir/src/ty/method_resolution.rs#L255-L275" target="_blank" title="https://github.com/rust-analyzer/rust-analyzer/blob/4b0c37bd6e4cb3d47614ec6b42fb1deef9bc9324/crates/ra_hir/src/ty/method_resolution.rs#L255-L275">https://github.com/rust-analyzer/rust-analyzer/blob/4b0c37bd6e4cb3d47614ec6b42fb1deef9bc9324/crates/ra_hir/src/ty/method_resolution.rs#L255-L275</a>.</p>
+<p>It was mostly a failure, but let me dump here my thoughts in case anyone has a better idea!</p>
+<p>The fundamental problem here is that we want an <strong>internal iterator abstraction</strong>, to avoid returning references to local variables.</p>
+<p>I went as far as </p>
+<div class="codehilite"><pre><span></span>    pub fn iterate_impl_items&lt;T&gt;(
+        self,
+        db: &amp;impl HirDatabase,
+        krate: Crate,
+        mut callback: impl FnMut(ImplItem) -&gt; Option&lt;T&gt;,
+    ) -&gt; Option&lt;T&gt; {
+        self.collect_impl_items(db, krate)(FindMap(callback)).some()
+    }
+
+    pub fn collect_impl_items&lt;E: Extend&lt;ImplItem&gt;&gt;(
+        self,
+        db: &amp;impl HirDatabase,
+        krate: Crate,
+    ) -&gt; impl FnOnce(E) -&gt; E  + &#39;_ {
+        move |mut sink| {
+            sink.extend(
+                def_crate(db, krate, &amp;self)
+                    .map(|krate| db.impls_in_crate(krate))
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|impls| impls.lookup_impl_blocks(&amp;self))
+                    .flat_map(|it| it.items(db)),
+            );
+            sink
+        }
+    }
+</pre></div>
+
+
+<p>Using <code>std::iter::Extend</code> as an Internal Iterator trait is nice! However, I failed to further abstract this, due to the lack of generic lambdas</p>
+
+
+
+<a name="168938968"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rust%20vs%20Internal%20iterators/near/168938968" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Rust.20vs.20Internal.20iterators.html#168938968">(Jun 25 2019 at 13:38)</a>:</h4>
+<p>This, unfortunatelly, is not valid Rust yet: <a href="https://gist.github.com/matklad/8c3a413f5e2cc144eeb0da2dc761abd7" target="_blank" title="https://gist.github.com/matklad/8c3a413f5e2cc144eeb0da2dc761abd7">https://gist.github.com/matklad/8c3a413f5e2cc144eeb0da2dc761abd7</a> :-(</p>
+
+
+
+<a name="168941849"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rust%20vs%20Internal%20iterators/near/168941849" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Rust.20vs.20Internal.20iterators.html#168941849">(Jun 25 2019 at 14:09)</a>:</h4>
+<p>I'm still holding out for generators to make this easy ;)</p>
+
+
+
+<a name="168941990"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rust%20vs%20Internal%20iterators/near/168941990" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Rust.20vs.20Internal.20iterators.html#168941990">(Jun 25 2019 at 14:11)</a>:</h4>
+<p>Not sure that generators help in this case: the problem is, we have two nested loops, where the inner loop borrows from the outer.  This can't be represented as an <code>std::iter::Iterator</code>, because, once you turned the outer loop, inner references from the previous iteration become invalid</p>
+
+
+
+<a name="168942014"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Rust%20vs%20Internal%20iterators/near/168942014" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Rust.20vs.20Internal.20iterators.html#168942014">(Jun 25 2019 at 14:11)</a>:</h4>
+<p>Hm, OTOH, we are <em>not</em> returning those references and use them only internally...</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

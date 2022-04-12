@@ -1,0 +1,182 @@
+[
+    {
+        "content": "<p>Hi all,</p>\n<p>There was a discussion at <a href=\"https://bugs.llvm.org/show_bug.cgi?id=42435\" target=\"_blank\" title=\"https://bugs.llvm.org/show_bug.cgi?id=42435\">https://bugs.llvm.org/show_bug.cgi?id=42435</a> with <span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> about introducing an operation that replaces uninitialized bytes with arbitrary(but defined) bytes, which will be helpful for implementing fast memory initialization in Rust (e.g. <a href=\"https://github.com/rust-lang/rust/pull/58363\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/58363\">https://github.com/rust-lang/rust/pull/58363</a> ).<br>\nHere is a prototype of a patch that adds intrinsic <code>llvm.freeze_mem</code> to LLVM: <a href=\"https://github.com/aqjune/llvm-freeze/tree/freeze_mem\" target=\"_blank\" title=\"https://github.com/aqjune/llvm-freeze/tree/freeze_mem\">https://github.com/aqjune/llvm-freeze/tree/freeze_mem</a> .<br>\nIt is either lowered into no-op assembly, or single round-trip of one-byte load/store assembly to address the case when OS may change bytes of untouched memory.</p>\n<p>Rather than pushing this patch by myself, it will be great if anyone who is working both in LLVM and Rust could take this patch and drive instead, because I and colleagues are already pushing freeze instruction to LLVM (pushing llvm.freeze_mem by us might possibly distract people (e.g. people can assume that we're suggesting an alternative solution to freeze, which is not), which is not desirable).</p>\n<p>Currently this patch works without compiler crash and is tested with SPEC CPU2017 (I tested with Clang that inserts llvm.freeze_mem after alloca). It is tested on x86-64, but not on other architectures.<br>\nAlso, several memory related optimizations should be updated so they’re aware of this intrinsics, which is not included in the patch above.</p>\n<p>Introducing anyone who might be interested in this patch is greatly welcome.<br>\nI’ll gladly be of help if have any inquiry. :)</p>",
+        "id": 176085811,
+        "sender_full_name": "aqjune",
+        "timestamp": 1568888956
+    },
+    {
+        "content": "<blockquote>\n<p>If it is true, this is lowered into assembly that reads a random one byte<br>\nbetween <code>%ptr</code> and <code>%ptr + %size - 1</code> and writes it back to the same<br>\naddress.</p>\n</blockquote>\n<p>Note that this is probably overkill</p>",
+        "id": 176095922,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568897780
+    },
+    {
+        "content": "<p>You only need to touch one byte per memory page.</p>",
+        "id": 176095930,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568897791
+    },
+    {
+        "content": "<blockquote>\n<p>After <code>freeze_mem(ptr, size, touch_mem)</code> is called, it is<br>\nguaranteed that there is no undef or poison bit in bytes from <code>ptr</code> to<br>\n<code>ptr + size - 1</code>. Calculation of <code>ptr + size - 1</code> follows the way how<br>\ngetelementptr is evaluated.</p>\n</blockquote>\n<p>There are no tests checking that this is the case AFAICT</p>",
+        "id": 176096168,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568897979
+    },
+    {
+        "content": "<blockquote>\n<p>Also, several memory related optimizations should be updated so they’re aware of this intrinsics, which is not included in the patch above.</p>\n</blockquote>\n<p>Is there a different patch including these ?</p>",
+        "id": 176096291,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568898023
+    },
+    {
+        "content": "<blockquote>\n<p>If <code>touch_mem</code> is true and <code>size</code> is larger than the size of one page<br>\n(which is determined at runtime),<br>\nonly one of the pages that this <code>freeze_mem</code> spans is touched.</p>\n</blockquote>\n<p>This behavior is incorrect right ?</p>",
+        "id": 176096331,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568898063
+    },
+    {
+        "content": "<p>Each page must be touched</p>",
+        "id": 176096343,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568898069
+    },
+    {
+        "content": "<p>otherwise the content of these other pages has not been frozen</p>",
+        "id": 176096361,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568898080
+    },
+    {
+        "content": "<p>Hi @gnzlbg ! :D</p>\n<blockquote>\n<blockquote>\n<p>If <code>touch_mem</code> is true and <code>size</code> is larger than the size of one page<br>\n(which is determined at runtime),<br>\nonly one of the pages that this <code>freeze_mem</code> spans is touched.</p>\n</blockquote>\n<p>This behavior is incorrect right ?</p>\n</blockquote>\n<p>It depends on how Rust inserts llvm.freeze_mem.<br>\nIn my patch, I was assuming that Rust should insert a loop that looks like this:</p>\n<div class=\"codehilite\"><pre><span></span>while (ptr &lt; ptr_end) {\n  llvm.freeze_mem(ptr, min(PAGE_SIZE, ptr_end - ptr))\n  ptr += PAGE_SIZE\n}\n</pre></div>\n\n\n<p>Another choice would be to let <code>llvm.freeze_mem</code> emit assembly with loops, but guess the result would be the same if LLVM's loop analyzer is taught about what <code>llvm.freeze_mem</code> is.</p>",
+        "id": 176098337,
+        "sender_full_name": "aqjune",
+        "timestamp": 1568899439
+    },
+    {
+        "content": "<blockquote>\n<blockquote>\n<p>Also, several memory related optimizations should be updated so they’re aware of this intrinsics, which is not included in the patch above.</p>\n</blockquote>\n<p>Is there a different patch including these ?</p>\n</blockquote>\n<p>No, this was kind of a very beginning phase, so there was no updates on optimizers yet.</p>",
+        "id": 176098456,
+        "sender_full_name": "aqjune",
+        "timestamp": 1568899503
+    },
+    {
+        "content": "<blockquote>\n<p>You only need to touch one byte per memory page.</p>\n</blockquote>\n<p>This is true - but it is pretty hard to statically determine in a compiler whether two allocations are in the same page, I believe, especially because unused mallocs can be removed.</p>",
+        "id": 176098547,
+        "sender_full_name": "aqjune",
+        "timestamp": 1568899565
+    },
+    {
+        "content": "<blockquote>\n<p>In my patch, I was assuming that Rust should insert a loop that looks like this:</p>\n</blockquote>\n<p>That makes sense</p>",
+        "id": 176098671,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568899640
+    },
+    {
+        "content": "<p>I'm not sure whether it is better to have an intrinsic with the <code>touch</code> option, or two intrinsics, but that probably does not matter</p>",
+        "id": 176098890,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568899776
+    },
+    {
+        "content": "<p>It would be great if there would be an optimization to turn a freeze with touch == true to touch == false</p>",
+        "id": 176098965,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568899803
+    },
+    {
+        "content": "<p>E.g., if the memory is on the stack, then there is no need to touch it, ever, AFAICT</p>",
+        "id": 176099005,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568899822
+    },
+    {
+        "content": "<p>What kind of load does freeze with touch = true currently perform ? In the code it seems that it does a volatile load</p>",
+        "id": 176099226,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568899939
+    },
+    {
+        "content": "<p>But wouldn't this be UB if that load where to race ?</p>",
+        "id": 176099240,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568899951
+    },
+    {
+        "content": "<blockquote>\n<p>It would be great if there would be an optimization to turn a freeze with touch == true to touch == false</p>\n</blockquote>\n<p>Yep, this will be a great optimization. The transformation is valid when any store to a pointer within the range precedes or directly follows the <code>llvm.freeze_mem</code>.</p>",
+        "id": 176099341,
+        "sender_full_name": "aqjune",
+        "timestamp": 1568900015
+    },
+    {
+        "content": "<p>Avoiding the race would need a volatile relaxed load, but I don't know if that is supported on all backends</p>",
+        "id": 176099355,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568900030
+    },
+    {
+        "content": "<blockquote>\n<p>But wouldn't this be UB if that load where to race ?</p>\n</blockquote>\n<p>Yeah, data race should be UB by definition. It can raise UB if the given pointer is not dereferenceable (e.g. dangling pointer) as well<br>\nIf touch_mem is true, It is marked as volatile for convenience but not really needed to be volatile load, because adding a new memory attribute in SelectionDAG seemed to be a pretty hard work (it is just used for convenience).</p>",
+        "id": 176099574,
+        "sender_full_name": "aqjune",
+        "timestamp": 1568900162
+    },
+    {
+        "content": "<p>Not by definition, sorry. It should be added to the definition in LangRef.</p>",
+        "id": 176099650,
+        "sender_full_name": "aqjune",
+        "timestamp": 1568900194
+    },
+    {
+        "content": "<p>I see. So I'd recommend updating the docs to include this information.</p>",
+        "id": 176099967,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1568900392
+    },
+    {
+        "content": "<blockquote>\n<blockquote>\n<p>You only need to touch one byte per memory page.</p>\n</blockquote>\n<p>This is true - but it is pretty hard to statically determine in a compiler whether two allocations are in the same page, I believe, especially because unused mallocs can be removed.</p>\n</blockquote>\n<p>it should be fairly easy though to do a loop that increments by 4096 and touches bytes until leaving the given range? the backend should know the page size</p>",
+        "id": 177710447,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1570625748
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"203193\">@aqjune</span>  I think touching all the pages is needed or else we cannot give this intrinsics a sensible semantics in the LLVM abstract machine</p>",
+        "id": 177710505,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1570625769
+    },
+    {
+        "content": "<p>saying that \"it freezes memory\" is just incorrect with a compilation scheme that does not touch all pages</p>",
+        "id": 177710519,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1570625785
+    },
+    {
+        "content": "<p>also read-write races are not UB in LLVM, so LLVM lowering could easily do a normal non-atomic read here</p>",
+        "id": 177710554,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1570625830
+    },
+    {
+        "content": "<p>I am not sure whether there is an assembly instruction that returns the page size, but in the frontend linux has getpagesize() api. Calling getpagesize() may have a cost, so I believe it is good for programmer to explicitly call this so one can write optimized code.</p>",
+        "id": 177782119,
+        "sender_full_name": "aqjune",
+        "timestamp": 1570687751
+    },
+    {
+        "content": "<p>For the semantics of llvm.freeze_mem(ptr, size), we can say that it freezes one of the pages that [ptr, ptr+size) lies on. We can say that the page is given from the environment, as the pointer size does.</p>",
+        "id": 177782189,
+        "sender_full_name": "aqjune",
+        "timestamp": 1570687864
+    },
+    {
+        "content": "<p>BTW, one thing that I realized about llvm.freeze_mem(ptr, size) was that, if (ptr + size - 1) and ptr are in different pages, the touching *ptr is not enough to freeze the page of *(ptr + size - 1).<br>\nTo support this, llvm.freeze_mem should be lowered into touches to *ptr and *(ptr + size - 1); I hope this would work.</p>",
+        "id": 177782358,
+        "sender_full_name": "aqjune",
+        "timestamp": 1570688100
+    },
+    {
+        "content": "<blockquote>\n<p>For the semantics of llvm.freeze_mem(ptr, size), we can say that it freezes one of the pages that [ptr, ptr+size) lies on. We can say that the page is given from the environment, as the pointer size does.</p>\n</blockquote>\n<p>so pages are part of the LLVM abstract machine now? I think that'd be new</p>",
+        "id": 177788839,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1570695672
+    }
+]

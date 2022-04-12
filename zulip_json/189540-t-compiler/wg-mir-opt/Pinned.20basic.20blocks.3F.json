@@ -1,0 +1,248 @@
+[
+    {
+        "content": "<p>This might be very off the rails, but I wanted to write it up at least: what if we gave every basic block (more precisely, <code>BasicBlockData</code>) a stable memory location and effectively made the CFG an intrusive data structure? The <code>BasicBlock(u32)</code> indices might still exist to enable deterministic iteration order and <code>IndexedVec</code> in each pass, but direct and mutual pointers could potentially be helpful elsewhere:</p>\n<ul>\n<li>When removing blocks, there's no need to walk the whole CFG to update BB numbers and shift <code>BasicBlockData</code>s around in memory (a <code>swap_remove</code> of a newtyped index should suffice).</li>\n<li>Consequently, we could maintain predecessor links all the time and get rid of <code>BodyAndCache</code>.</li>\n<li>Similarly, other side tables such as dominators could become easier to maintain throughout the pipeline, since they would only have to be informed of the structural CFG changes rather than every renumbering.</li>\n<li>If removing dead blocks becomes very cheap, some passes could delete incrementally instead of deferring it to benefit from bulk updates (as long as they don't need a stable block numbering across the deletes).</li>\n<li>More speculatively, if <code>BasicBlockData</code> no longer needs to move in memory, perhaps it becomes economical to store the statements inline for short basic blocks (i.e., <code>SmallVec&lt;[Statement; N]&gt;</code>).</li>\n<li>While we'd now some unsafe code for CFG manipulations, currently the equivalent (safe but still fiddly) data structure manipulations are open-coded in various passes and encapsulating the unsafe bits would give an opportunity to clean this up.</li>\n<li>This is minor and depends on the exact API we end up with, but generally my experience is that direct pointers result in nicer code than always going through newtyped indices.</li>\n</ul>",
+        "id": 194537571,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587205781
+    },
+    {
+        "content": "<p>you don't need actual pointers for this</p>",
+        "id": 194539591,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587209163
+    },
+    {
+        "content": "<p>I think this is how Cranelift works</p>",
+        "id": 194539608,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587209193
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Pinned.20basic.20blocks.3F/near/194539608\" title=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Pinned.20basic.20blocks.3F/near/194539608\">said</a>:</p>\n<blockquote>\n<p>I think this is how Cranelift works</p>\n</blockquote>\n<p>Yes, pretty much. You can append blocks to the <a href=\"https://docs.rs/cranelift-codegen/0.62.0/cranelift_codegen/ir/layout/struct.Layout.html\" title=\"https://docs.rs/cranelift-codegen/0.62.0/cranelift_codegen/ir/layout/struct.Layout.html\">layout</a> in any order.</p>",
+        "id": 194539758,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1587209454
+    },
+    {
+        "content": "<p>Yes, you could also have \"stable IDs\" instead of stable pointers, but why would you? Most ways to implement such IDs lead to more unnecessary indirection and lookups, and all of them result in inconvenient APIs where you always have to combine the ID with various context objects to do anything. The ability to use integers smaller than a pointer does not seem significant for basic blocks, since they are not as frequently referenced and maintaining such IDs required extra data structures on the side. Until recently, the killer argument was the inability to safely encapsulate intrusive object graphs, but that's exactly what pinning enables nowadays.</p>",
+        "id": 194540298,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587210355
+    },
+    {
+        "content": "<p>However, I am worried whether mutation of blocks and their contents can be adequately modeled with lifetimes, <code>Pin&lt;&amp;T&gt;</code> vs <code>Pin&lt;&amp;mut T&gt;</code>, and traversal methods. If some kind of interior mutability with runtime checks is needed for the access patterns needed in rustc, in contrast to the \"no aliasing guarantees about the indices floating around, but actual mutation goes through short-lived <code>&amp;mut</code>s\" style of newtyped indices that would suck.</p>",
+        "id": 194540561,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587210793
+    },
+    {
+        "content": "<p>This is more of an API design problem independent of how you actually implement it under the hood, but it might eat up some of the advantages of stable pointers (either performance or API simplicity).</p>",
+        "id": 194540622,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587210881
+    },
+    {
+        "content": "<blockquote>\n<p>Most ways to implement such IDs lead to more unnecessary indirection and lookups, and all of them result in inconvenient APIs where you always have to combine the ID with various context objects to do anything. </p>\n</blockquote>\n<p>IME it works great :P</p>",
+        "id": 194541528,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587212153
+    },
+    {
+        "content": "<p>and Cranelift is also a success story AFAIK</p>",
+        "id": 194541569,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587212168
+    },
+    {
+        "content": "<p>compared to worrying about pointers and all of the restrictions that imposes</p>",
+        "id": 194541572,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587212180
+    },
+    {
+        "content": "<p>frankly we could get a lot of mileage out of just making the start block a field in the <code>mir::Body</code> instead of a constant</p>",
+        "id": 194541579,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587212212
+    },
+    {
+        "content": "<p>As I said before, I'm not sure there is anything to my idea, especially w.r.t. \"can you make the API nice or does the borrow checker get in the way\". But I'm curious, and I think basic blocks in MIR have different trade-offs than  MIR statements and Cranelift's basic blocks (e.g., in Cranelift, every single instruction has a parent reference, while in current MIR and under my proposal, most blocks are only referenced from a single digit number of places in total).</p>",
+        "id": 194542845,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587214030
+    },
+    {
+        "content": "<blockquote>\n<p>in Cranelift, every single instruction has a parent reference</p>\n</blockquote>\n<p>No, the instruction itself doesn't know where it is in the layout. It is stored in the <code>DataFlowGraph</code>, which doesn't know anything about the location of instructions. The <code>Layout</code> is the things that knows where instructions are located.</p>",
+        "id": 194542921,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1587214195
+    },
+    {
+        "content": "<p>Thinking about it again. The <code>Layout</code> <strong>does</strong> have a map from <code>Inst</code> -&gt; <code>Block</code>.</p>",
+        "id": 194543193,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1587214480
+    },
+    {
+        "content": "<p>Sorry, I was imprecise about where it's stored, but there <em>is</em> one BB reference per instruction, right?</p>",
+        "id": 194543195,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587214487
+    },
+    {
+        "content": "<p>Yes</p>",
+        "id": 194543215,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1587214524
+    },
+    {
+        "content": "<p>Then the point I was trying to make still stands: Cranelift has many more references to blocks, so representing those as smaller integers is more useful than in rustc.</p>",
+        "id": 194543286,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587214577
+    },
+    {
+        "content": "<p>I don't want integers because they're small, I want them because they're <em>simple</em></p>",
+        "id": 194543339,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587214667
+    },
+    {
+        "content": "<p>you can just not renumber BBs if you can specify a non-0 starting basic block</p>",
+        "id": 194543409,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587214750
+    },
+    {
+        "content": "<p>and it's a tradeoff: anything O(BasicBlocks) may get slowed down by the lack of renumbering</p>",
+        "id": 194543416,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587214769
+    },
+    {
+        "content": "<p>(or worse, superlinear in the number of basic blocks)</p>",
+        "id": 194543423,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587214784
+    },
+    {
+        "content": "<p>It's not <em>that</em> simple. Today, the renumbering also happens when removing blocks, to keep a compact <code>Vec&lt;BasicBlockData&gt;</code> and corresponding <code>IndexVec</code>s in various passes. If you don't renumber, then you have to start treating it as something like a pool, maintain a free list, deal with non-consecutive IDs somehow, etc.</p>",
+        "id": 194543657,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587215063
+    },
+    {
+        "content": "<p>or you can just not</p>",
+        "id": 194543772,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587215257
+    },
+    {
+        "content": "<p>like I said, it's a tradeoff and you can choose to keep it simple at the cost of some later perf loss (which could be marginal, depending on the input and what you're doing to it)</p>",
+        "id": 194543840,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587215361
+    },
+    {
+        "content": "<p>There are definitely many trade-offs in this area, but FWIW if not freeing dead basic blocks is an option you're willing to entertain, then most of the implementation complexity relating to pointers goes away too.</p>",
+        "id": 194543995,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587215589
+    },
+    {
+        "content": "<p>the difference is mutation</p>",
+        "id": 194544011,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587215618
+    },
+    {
+        "content": "<p>if you can get away with interning then yes. otherwise, pointers are still a nightmare to mutate behind</p>",
+        "id": 194544018,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587215637
+    },
+    {
+        "content": "<p>We're getting to a point where it's so conceptual that I don't think it makes much sense to continue like this. Maybe I'll noodle around with API design and find something concrete that maybe works and we can talk about its trade-offs, or maybe I won't.</p>",
+        "id": 194544191,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587215879
+    },
+    {
+        "content": "<p>maybe I should make it really clear that I've gone off the deep end on interning entire DAG IRs using integers, and ended up loving it, and neither interning nor integers might be a good fit for MIR</p>",
+        "id": 194544367,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587216120
+    },
+    {
+        "content": "<p>but combining pointers with mutation for a graph also gives me a really unsettling vibe. like a kneejerk I suppose</p>",
+        "id": 194544435,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587216191
+    },
+    {
+        "content": "<p>oh yeah it's sharing + mutation. duh</p>",
+        "id": 194544454,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587216204
+    },
+    {
+        "content": "<p>if you use interior mutability inside each block then it's probably fine</p>",
+        "id": 194544513,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587216257
+    },
+    {
+        "content": "<p>I guess \"intrusive linked list\" could mean you start with a <code>&amp;mut</code> for the entry/start block and can mutate anywhere in the  CFG by following the edges? that seems pretty restricted tbh</p>",
+        "id": 194544594,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587216370
+    },
+    {
+        "content": "<p>there are some things that use <code>Location</code> to index a statement/terminator in O(1)</p>",
+        "id": 194544605,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587216410
+    },
+    {
+        "content": "<p>and mutate it</p>",
+        "id": 194544608,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587216416
+    },
+    {
+        "content": "<p>that seems hard w/ pointers and w/o interior mutability</p>",
+        "id": 194544616,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587216427
+    },
+    {
+        "content": "<p>This kind of \"could touch anything\" mutation seems to require (short-lived) mutable access to the whole <code>Body</code> anyway, no matter whether you use pointers or IDs, so the only question is whether you need to do it while holding references to other things derived from the <code>Body</code>. I think for basic blocks this is more feasible to avoid than for statements, but we'll see.</p>",
+        "id": 194544856,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587216748
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Pinned.20basic.20blocks.3F/near/194543339\" title=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Pinned.20basic.20blocks.3F/near/194543339\">said</a>:</p>\n<blockquote>\n<p>I don't want integers because they're small, I want them because they're <em>simple</em></p>\n</blockquote>\n<p>pointers were simple. then we (as in compiler engineers) made them complicated. now we need to resort to integers and reinvent that wheel. ;)</p>",
+        "id": 194585841,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1587284623
+    },
+    {
+        "content": "<p>For the record: I took a stab at this idea and quickly became very frustrated with how badly interior mutability composes with the collections needed for the successor/predecessor links. For a bunch of things, a <code>Cell&lt;Vec&lt;_&gt;&gt;</code> works (badly) if you <code>take()</code> it temporarily and restore it after the (non-reentrant) modification, but I quit by the time I got to successor/predecessor iterators. I can see a way to make them work (store pointer to block and an index) but given the lack of aliasing guarantees, I expect this would  generally optimize badly (extra loads and bounds check on every iteration).</p>\n<p>And then there's the old issue of iterator invalidation: I can make it safe to modify the CFG structure while iterating, but it likely indicates a bug whenever it happens, and it would be better to rule this out statically. Which is precisely what mutable-xor-shared enables and interior mutability doesn't. I've been thinking about ways to uphold \"need &amp;mut to modify the CFG structure\" but when each block contains some interior-mutable pieces, it's hard to square \"can hold exclusive access to multiple blocks\" with \"mutating one block fiddles with some data in another block\", and even if you only needed mutable access to one block at a time, special care would be needed around self-loops.</p>",
+        "id": 194587888,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587288026
+    },
+    {
+        "content": "<p>From this perspective, I would say the advantage of integers isn't simplicity, it's that they are more dumb and kind of circumvent the borrow checker. By not tracking that they're effectively a shared reference to some data in the CFG outside of when you actually access that data, they enable you to create temporary mutable borrows when you need them because there's no conflicting long-lived shared borrows. Which makes them a little like <code>&amp;RefCell&lt;BasicBlockData&gt;</code>! Except that  dynamic checks are replaced with more coarse-grained static borrows of the whole <code>Body</code>: instead of <code>bb.borrow_mut()</code> preventing concurrent access to the same block, you do <code>&amp;mut body.statements[bb]</code> and statically rule out access to <em>any</em> other basic block.</p>",
+        "id": 194588941,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587289695
+    },
+    {
+        "content": "<p>I believe the same API pattern (untracked handles that can be upgraded to real references via a borrow of the <code>Body</code>) can be ported to direct pointers too, but some extra cleverness  is needed to limit the blast radius of dangling handles (integer IDs easily avoid UB by bounds checking against the underlying <code>Vec</code>) and while there are some ways to use lifetimes for this without conflicting with the mutable borrows needed for the actual data accesses, as far as I can tell this makes the API way too convoluted to be worth it.</p>",
+        "id": 194592101,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1587294700
+    }
+]

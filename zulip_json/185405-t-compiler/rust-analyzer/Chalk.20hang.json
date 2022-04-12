@@ -1,0 +1,140 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> <span class=\"user-mention\" data-user-id=\"133169\">@matklad</span> I've hacked together some code to print the stuff we're passing to Chalk (<a href=\"https://github.com/flodiebold/rust-analyzer/commits/chalk-reproduce\" target=\"_blank\" title=\"https://github.com/flodiebold/rust-analyzer/commits/chalk-reproduce\">here</a>), and here's the beginning of the output for the actix-web hang: <a href=\"https://gist.github.com/flodiebold/529ec845c39b5cb81909aac4b613ba44\" target=\"_blank\" title=\"https://gist.github.com/flodiebold/529ec845c39b5cb81909aac4b613ba44\">gist</a></p>\n<p>you can see it's starting with the goal <code>Implements(?0: ServiceFactory&lt;TcpStream&gt;)</code>, and then enumerating kind of the whole world because the first where clause of the impl never applies (but it starts with the last). Although it seems like this would be problematic even if there was some solution for the first where clause.</p>\n<p>The thing is, we wouldn't even need to solve this: Even if it had a unique solution, rustc wouldn't infer that. So are we missing some short-circuit behavior here? (OTOH it seems that even if RA somehow avoided trying to solve this goal, it could easily happen while solving some other goal...)</p>",
+        "id": 174799507,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1567524526
+    },
+    {
+        "content": "<p>it's true that rustc doesn't solve these sorts of cases, though I would like it to (I think...)</p>",
+        "id": 174830900,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1567545928
+    },
+    {
+        "content": "<p>ok, i'm circling back to this</p>",
+        "id": 174928399,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1567635868
+    },
+    {
+        "content": "<p>it looks like it's trying to solve the <code>T: NewService</code>, I guess this is what you meant?</p>",
+        "id": 174928459,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1567635956
+    },
+    {
+        "content": "<p>yeah</p>",
+        "id": 174949501,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1567666529
+    },
+    {
+        "content": "<p>Someone posted another example <a href=\"https://github.com/rust-analyzer/rust-analyzer/issues/1744#issuecomment-528826370\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/issues/1744#issuecomment-528826370\">here</a>. The <a href=\"https://gist.github.com/flodiebold/3aa625b711ca6984150574f57e7c58c8\" target=\"_blank\" title=\"https://gist.github.com/flodiebold/3aa625b711ca6984150574f57e7c58c8\">output</a> shows it's trying to enumerate <code>Copy</code> and <code>Ord</code> types, which there aren't actually many because we don't handle derives yet and don't manage to expand the macros in the standard library enough to get the impls for the primitive types, but there are enough impls to make it search a long time...</p>",
+        "id": 175100451,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1567801525
+    },
+    {
+        "content": "<p>it seems to me this should be fixable with a smarter selection of the next subgoal, i.e. <a href=\"https://github.com/rust-lang/chalk/issues/80\" target=\"_blank\" title=\"https://github.com/rust-lang/chalk/issues/80\">chalk#80</a>. It would have to be smart enough to select a good clause when it sees <code>I: Bounded, I: Zero, I: DivAssign&lt;Self&gt;, I: Ord, I: Copy</code> though, so maybe it would need to check how many impls there are for each of these... or maybe it could even try another subgoal if it takes too long one the current one? <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 175147088,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1567874397
+    },
+    {
+        "content": "<p>the last thing would be a kind of 'fuel for subgoals', actually <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 175149079,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1567878220
+    },
+    {
+        "content": "<p>I'm now running into another problem with <code>?0: Trait</code> goals: I'm giving types to closures; each closure gets its own type, and that type should implement the <code>Fn</code> traits. But what I then do when Chalk asks for impls for <code>Fn</code>? I would have to iterate all bodies in the whole crate to list all closures, because the solver is shared for the whole crate. (I could maybe make the solver per-def, but that doesn't seem like a good idea...)</p>\n<p>Now Chalk could of course pass a hint about the self type (I tried that), but actually at first it doesn't know the self type (it's trying to solve <code>?0: Fn</code>), and if I don't return the impl in that call I think it caches that and doesn't try again later with a more specific type. So it seems to me I would need some kind of way of saying <code>?0: Fn</code> is always ambiguous, and we should only try to solve it when we have more information...</p>\n<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> what do you think would be the 'correct' approach for this?</p>",
+        "id": 175186517,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1567952685
+    },
+    {
+        "content": "<p>Hey <span class=\"user-mention\" data-user-id=\"129457\">@Florian Diebold</span> -- let me read in detail your posts -- but I was giving this some thought over the weekend. </p>\n<p>Overall, this was the sort of scenario that I had hoped to use the \"non-enumerable\" concept to control.</p>\n<p>To start, we could certainly say that a goal like <code>?T: Foo</code> for <em>any</em> trait <code>Foo</code> is non-enumerable, much as rustc does today.</p>",
+        "id": 175265349,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568051219
+    },
+    {
+        "content": "<p>I'm not wild about it, because it's an arbitrary limitation, but it might be a practical step</p>",
+        "id": 175265367,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568051232
+    },
+    {
+        "content": "<p>The other obvious thing is that yes I had expected us to get smarter about controlling our selection order</p>",
+        "id": 175265383,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568051249
+    },
+    {
+        "content": "<blockquote>\n<p>because it's an arbitrary limitation</p>\n</blockquote>\n<p>I think limitations which clearly delineate the scope of the search can be good :) Like, allowing <code>pub</code> impls in function bodies would be a useful limitation.</p>",
+        "id": 175265540,
+        "sender_full_name": "matklad",
+        "timestamp": 1568051370
+    },
+    {
+        "content": "<p>I agree, I just don't like that one</p>",
+        "id": 175265552,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568051386
+    },
+    {
+        "content": "<p>but I still think it'd be good to impose it for now</p>",
+        "id": 175265557,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568051395
+    },
+    {
+        "content": "<p>(My specific reason not to like that one is that it interferes with the design I would prefer for the <code>Try</code> trait, making some kinds of inference more difficult there)</p>",
+        "id": 175265700,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568051481
+    },
+    {
+        "content": "<p>In any case, I think reproducing rustc's logic for now is fine, and I like that we have the means to talk more carefully about what we want the rules to be</p>",
+        "id": 175265727,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568051502
+    },
+    {
+        "content": "<p>It'd be good to know if there are other problems once we take that step :)</p>",
+        "id": 175265739,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568051511
+    },
+    {
+        "content": "<blockquote>\n<p>To start, we could certainly say that a goal like <code>?T: Foo</code> for <em>any</em> trait <code>Foo</code> is non-enumerable, much as rustc does today.</p>\n</blockquote>\n<p>So I realize that we can do this -- and perhaps <em>should</em> do this -- on the rust-analyzer side. Just opened <a href=\"https://github.com/rust-analyzer/rust-analyzer/issues/1800\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/issues/1800\">rust-analyzer#1800</a>.</p>",
+        "id": 175274442,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568057188
+    },
+    {
+        "content": "<p>Will this mean Chalk will return an ambiguous result if it has to solve such a goal, or just that it'll try those goals last?</p>",
+        "id": 175274752,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1568057439
+    },
+    {
+        "content": "<p>ah, from reading the code, the former :)</p>",
+        "id": 175275210,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1568057815
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"129457\">@Florian Diebold</span> well sort of both</p>",
+        "id": 175276407,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568058658
+    },
+    {
+        "content": "<p>it will re-order such tasks last (dynamically, though, but we can improve that), but if ultimately it <em>has</em> to solve such a thing, it will return ambig</p>",
+        "id": 175276451,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1568058683
+    }
+]

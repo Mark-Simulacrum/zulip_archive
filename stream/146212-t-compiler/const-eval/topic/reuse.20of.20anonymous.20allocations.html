@@ -1,0 +1,346 @@
+<html>
+<head><meta charset="utf-8"><title>reuse of anonymous allocations · t-compiler/const-eval · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/index.html">t-compiler/const-eval</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html">reuse of anonymous allocations</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="218742883"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218742883" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218742883">(Dec 03 2020 at 19:30)</a>:</h4>
+<p>Is it ok to assume that anonymous allocations are not referenced by multiple statics or functions? For reference I want to treat each function and static together with all their anonymous allocations as a single unit that can be replaced in an atomic way when the respective static of function changes due to source changes. This would make implementing hot code swapping for the jit mode of cg_clif much easier.</p>
+
+
+
+<a name="218800007"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218800007" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218800007">(Dec 04 2020 at 07:13)</a>:</h4>
+<p>You can have situations like <code>static A: &amp;i32 = &amp;42; static B: &amp;i32 = A;</code>, where both point to the same memory containing <code>42</code></p>
+
+
+
+<a name="218800023"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218800023" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218800023">(Dec 04 2020 at 07:13)</a>:</h4>
+<p>but I don't think we're guaranteeing this</p>
+
+
+
+<a name="218805097"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218805097" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218805097">(Dec 04 2020 at 08:35)</a>:</h4>
+<p>If both <code>A</code> and <code>B</code> are in a different codegen unit, they the anonymous allocation containing <code>42</code> gets duplicated:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">mod</span> <span class="nn">a</span><span class="w"> </span><span class="p">{</span><span class="w">                                                                                                                   </span><span class="n">bjorn</span><span class="o">@</span><span class="n">laptopbjorn</span><span class="o">-</span><span class="n">lenovo</span><span class="w"></span>
+<span class="w">    </span><span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="n">FOO</span>: <span class="kp">&amp;</span><span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="mi">42</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">mod</span> <span class="nn">b</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="cp">#[no_mangle]</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">static</span><span class="w"> </span><span class="n">BAR</span>: <span class="kp">&amp;</span><span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="k">crate</span>::<span class="n">a</span>::<span class="n">FOO</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<div class="codehilite"><pre><span></span><code>$ ar x librust_out.rlib
+$ objdump -s rust_out.rust_out.3a1fbbbh-cgu.*
+
+rust_out.rust_out.3a1fbbbh-cgu.0.rcgu.o:     file format elf64-x86-64
+
+Contents of section .rodata.cst4:
+ 0000 2a000000                             *...
+Contents of section .data.rel.ro.FOO:
+ 0000 00000000 00000000                    ........
+
+rust_out.rust_out.3a1fbbbh-cgu.1.rcgu.o:     file format elf64-x86-64
+
+Contents of section .rodata.cst4:
+ 0000 2a000000                             *...
+Contents of section .data.rel.ro.BAR:
+ 0000 00000000 00000000                    ........
+</code></pre></div>
+
+
+
+<a name="218805124"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218805124" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218805124">(Dec 04 2020 at 08:35)</a>:</h4>
+<p>So I think there shouldn't be any problems caused by always duplicating them.</p>
+
+
+
+<a name="218805279"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218805279" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218805279">(Dec 04 2020 at 08:37)</a>:</h4>
+<p>oh</p>
+
+
+
+<a name="218805341"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218805341" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218805341">(Dec 04 2020 at 08:38)</a>:</h4>
+<p>since you already got the setup, can you do a quick check and see what happens for mutable statics with mutable references?</p>
+
+
+
+<a name="218805415"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218805415" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218805415">(Dec 04 2020 at 08:39)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>error[E0764]: mutable references are not allowed in statics
+ --&gt; &lt;anon&gt;:3:36
+  |
+3 |     pub static mut FOO: &amp;mut i32 = &amp;mut 42;
+  |                                    ^^^^^^^ `&amp;mut` is only allowed in `const fn`
+</code></pre></div>
+
+
+
+<a name="218805522"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218805522" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218805522">(Dec 04 2020 at 08:40)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>pub mod a {
+    #[no_mangle]
+    pub static mut FOO: &amp;mut [i32] = &amp;mut [42];
+}
+
+pub mod b {
+    #[no_mangle]
+    pub static mut BAR: &amp;[i32] = unsafe { &amp;*crate::a::FOO };
+}
+</code></pre></div>
+<p>compiles, and I'm not sure of the use case for it, but...</p>
+
+
+
+<a name="218805545"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218805545" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218805545">(Dec 04 2020 at 08:40)</a>:</h4>
+<p>technically this should point to the same allocation I think?</p>
+
+
+
+<a name="218805639"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218805639" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218805639">(Dec 04 2020 at 08:41)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>rust_out.rust_out.3a1fbbbh-cgu.0.rcgu.o:     file format elf64-x86-64
+
+Contents of section .data..L__unnamed_1:
+ 0000 2a000000                             *...
+Contents of section .data.FOO:
+ 0000 00000000 00000000 01000000 00000000  ................
+
+rust_out.rust_out.3a1fbbbh-cgu.1.rcgu.o:     file format elf64-x86-64
+
+Contents of section .data..L__unnamed_1:
+ 0000 2a000000                             *...
+Contents of section .data.BAR:
+ 0000 00000000 00000000 01000000 00000000  ................
+</code></pre></div>
+<p>The allocation is duplicated.</p>
+
+
+
+<a name="218805734"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218805734" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218805734">(Dec 04 2020 at 08:42)</a>:</h4>
+<p>Same for <code>BAR: &amp;mut [i32]</code>.</p>
+
+
+
+<a name="218807468"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218807468" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218807468">(Dec 04 2020 at 09:03)</a>:</h4>
+<p>huh... how did you get <code>BAR: &amp;mut [i32]</code> to compile?</p>
+
+
+
+<a name="218807576"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218807576" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218807576">(Dec 04 2020 at 09:04)</a>:</h4>
+<div class="codehilite" data-code-language="Bash"><pre><span></span><code>$ <span class="nb">echo</span> <span class="s2">"#![feature(const_mut_refs)]</span>
+<span class="s2">pub mod a {</span>
+<span class="s2">    #[no_mangle]</span>
+<span class="s2">    pub static mut FOO: &amp;mut [i32] = &amp;mut [42];</span>
+<span class="s2">}</span>
+
+<span class="s2">pub mod b {</span>
+<span class="s2">    #[no_mangle]</span>
+<span class="s2">    pub static mut BAR: &amp;mut [i32] = unsafe { &amp;mut *crate::a::FOO };</span>
+<span class="s2">}"</span> <span class="p">|</span> rustc +nightly --crate-type lib -Cembed-bitcode<span class="o">=</span>no -
+</code></pre></div>
+
+
+
+<a name="218807864"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218807864" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218807864">(Dec 04 2020 at 09:07)</a>:</h4>
+<p>oh haha, I guess another way in which <code>const_mut_refs</code> causes problems!</p>
+
+
+
+<a name="218807866"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218807866" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218807866">(Dec 04 2020 at 09:07)</a>:</h4>
+<p>thanks</p>
+
+
+
+<a name="218807946"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218807946" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218807946">(Dec 04 2020 at 09:08)</a>:</h4>
+<p>anyway, yea, deduplicate at your heart's desire, as long as it's not a pointer into another static's root allocation</p>
+
+
+
+<a name="218823654"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218823654" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218823654">(Dec 04 2020 at 12:00)</a>:</h4>
+<p>How does this behavior make any sense from the user perspective? If you say <code>static B: &amp;i32 = A</code> shouldn't the nonexistent spec say that <code>B</code> will be assigned the value of <code>A</code>?</p>
+
+
+
+<a name="218935300"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218935300" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218935300">(Dec 05 2020 at 13:30)</a>:</h4>
+<p>the original question is written in a confusing way, I first thought you asked if <em>code</em> may assume this. but if this is a backend thing then it's less about <em>assuming</em> allocations are separate and more about <em>making them separate</em>?</p>
+
+
+
+<a name="218935329"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218935329" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218935329">(Dec 05 2020 at 13:31)</a>:</h4>
+<p>this part of Rust is basically entirely undocumented/unspecified right now, unfortunately. <br>
+but to me something seems very wrong when <code>static A: &amp;i32 = &amp;42; static B: &amp;i32 = A;</code> leads to there being multiple <code>42</code> in memory.</p>
+
+
+
+<a name="218935382"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218935382" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218935382">(Dec 05 2020 at 13:32)</a>:</h4>
+<p>and for the mutable case it seems outright <em>wrong</em> since by mutating that data I can directly observe the duplication, which should not happen</p>
+
+
+
+<a name="218936024"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218936024" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218936024">(Dec 05 2020 at 13:50)</a>:</h4>
+<p><span class="user-mention" data-user-id="133247">@bjorn3</span> </p>
+<blockquote>
+<p>If both A and B are in a different codegen unit, they the anonymous allocation containing 42 gets duplicated:</p>
+</blockquote>
+<p>I tried to reproduce this on the playground in the style of <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=baf2a1bbbf7ba1b5a1c9d7015c2d5b2c">this example by Oli</a>, but <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=2c2b31d59b50ae1eae0a42eb30eaec70">my example fails to show duplication</a>. Any idea what is going on?</p>
+
+
+
+<a name="218939201"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218939201" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218939201">(Dec 05 2020 at 15:20)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/146212-t-compiler.2Fconst-eval/topic/reuse.20of.20anonymous.20allocations/near/218935300">said</a>:</p>
+<blockquote>
+<p>but if this is a backend thing then it's less about <em>assuming</em> allocations are separate and more about <em>making them separate</em>?</p>
+</blockquote>
+<p>yeah</p>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/146212-t-compiler.2Fconst-eval/topic/reuse.20of.20anonymous.20allocations/near/218936024">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> </p>
+<blockquote>
+<p>If both A and B are in a different codegen unit, they the anonymous allocation containing 42 gets duplicated:</p>
+</blockquote>
+<p>I tried to reproduce this on the playground in the style of <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=baf2a1bbbf7ba1b5a1c9d7015c2d5b2c">this example by Oli</a>, but <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=2c2b31d59b50ae1eae0a42eb30eaec70">my example fails to show duplication</a>. Any idea what is going on?</p>
+</blockquote>
+<p><code>--emit llvm-ir</code> and <code>--emit asm</code> force a single codegen unit. You have to compile normally and then disassemble the individual object files in an <code>.rlib</code> to see this.</p>
+
+
+
+<a name="218939203"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218939203" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218939203">(Dec 05 2020 at 15:20)</a>:</h4>
+<p><span class="user-mention" data-user-id="120791">@RalfJ</span> ^</p>
+
+
+
+<a name="218939226"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218939226" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218939226">(Dec 05 2020 at 15:21)</a>:</h4>
+<p>Any idea why Oli's <code>mut</code> example shows inequal pointers without such extra steps?</p>
+
+
+
+<a name="218939231"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218939231" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218939231">(Dec 05 2020 at 15:21)</a>:</h4>
+<p>Also I didn't pass any <code>--emit</code>, I just ran the example</p>
+
+
+
+<a name="218939288"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218939288" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218939288">(Dec 05 2020 at 15:22)</a>:</h4>
+<p>the shared ref assertion still passes even when I build it locally with <code>rustc test.rs -Ccodegen-units=16</code></p>
+
+
+
+<a name="218939448"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218939448" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218939448">(Dec 05 2020 at 15:26)</a>:</h4>
+<p>FWIW, my answer to "is it okay to make anonymous allocations per-static" is "definitely not". When one static creates an anon allocation and another static copies its value, <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=2c2b31d59b50ae1eae0a42eb30eaec70">like here</a>, they must point to the same allocation. I see no reasonable spec for Rust that would permit the 2nd static to duplicate the allocation. The code quite explicitly says that <code>BAR</code> points to the same thing that <code>FOO</code> points to.</p>
+<p>The only thing we permit AFAIK is <em>deduplication</em>, where if several immutable anon allocations (this includes <code>const</code>) have the same content, they may be deduplicated.</p>
+
+
+
+<a name="218939852"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218939852" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218939852">(Dec 05 2020 at 15:36)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/146212-t-compiler.2Fconst-eval/topic/reuse.20of.20anonymous.20allocations/near/218939288">said</a>:</p>
+<blockquote>
+<p>the shared ref assertion still passes even when I build it locally with <code>rustc test.rs -Ccodegen-units=16</code></p>
+</blockquote>
+<p>This is probably because of the <code>MERGE</code> flag on <code>.rodata</code> sections. Using <code>-Csave-temps</code> I did see a duplicate <code>.rodata.cst4</code>, but the final <code>.rodata</code> section was only 4 bytes when using <code>-Cprefer-dynamic</code> to keep libstd out of the executable itself.</p>
+
+
+
+<a name="218940284"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218940284" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218940284">(Dec 05 2020 at 15:48)</a>:</h4>
+<p>oh so it first gets duplicated and then deduplicated again? funny</p>
+
+
+
+<a name="218940341"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/218940341" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#218940341">(Dec 05 2020 at 15:50)</a>:</h4>
+<p>Yes. There are likely some linkers which will not deduplicate it.</p>
+
+
+
+<a name="219115243"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/219115243" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#219115243">(Dec 07 2020 at 18:05)</a>:</h4>
+<p>I think I found the bug</p>
+
+
+
+<a name="219115265"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/219115265" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#219115265">(Dec 07 2020 at 18:05)</a>:</h4>
+<p>we tell LLVM that all promoteds are <code>constant</code> instead of <code>global</code></p>
+
+
+
+<a name="219115502"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/219115502" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#219115502">(Dec 07 2020 at 18:07)</a>:</h4>
+<p>ah... nevermind... that is <em>another</em> problem, in this case LLVM duplicates the constant:</p>
+<div class="codehilite" data-code-language="LLVM"><pre><span></span><code><span class="vg">@alloc2</span> <span class="p">=</span> <span class="k">private</span> <span class="k">unnamed_addr</span> <span class="k">global</span> <span class="p">&lt;{</span> <span class="p">[</span><span class="m">4</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="p">}&gt;</span> <span class="p">&lt;{</span> <span class="p">[</span><span class="m">4</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="k">c</span><span class="s">"*\00\00\00"</span> <span class="p">}&gt;,</span> <span class="k">align</span> <span class="m">4</span>
+<span class="vg">@FOO</span> <span class="p">=</span> <span class="k">global</span> <span class="p">&lt;{</span> <span class="kt">i8</span><span class="p">*,</span> <span class="p">[</span><span class="m">8</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="p">}&gt;</span> <span class="p">&lt;{</span> <span class="kt">i8</span><span class="p">*</span> <span class="k">getelementptr</span> <span class="k">inbounds</span> <span class="p">(&lt;{</span> <span class="p">[</span><span class="m">4</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="p">}&gt;,</span> <span class="p">&lt;{</span> <span class="p">[</span><span class="m">4</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="p">}&gt;*</span> <span class="vg">@alloc2</span><span class="p">,</span> <span class="kt">i32</span> <span class="m">0</span><span class="p">,</span> <span class="kt">i32</span> <span class="m">0</span><span class="p">,</span> <span class="kt">i32</span> <span class="m">0</span><span class="p">),</span> <span class="p">[</span><span class="m">8</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="k">c</span><span class="s">"\01\00\00\00\00\00\00\00"</span> <span class="p">}&gt;,</span> <span class="k">align</span> <span class="m">8</span><span class="p">,</span> <span class="nv">!dbg</span> <span class="nv nv-Anonymous">!0</span>
+<span class="vg">@alloc2.1</span> <span class="p">=</span> <span class="k">private</span> <span class="k">unnamed_addr</span> <span class="k">global</span> <span class="p">&lt;{</span> <span class="p">[</span><span class="m">4</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="p">}&gt;</span> <span class="p">&lt;{</span> <span class="p">[</span><span class="m">4</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="k">c</span><span class="s">"*\00\00\00"</span> <span class="p">}&gt;,</span> <span class="k">align</span> <span class="m">4</span>
+<span class="vg">@BAR</span> <span class="p">=</span> <span class="k">global</span> <span class="p">&lt;{</span> <span class="kt">i8</span><span class="p">*,</span> <span class="p">[</span><span class="m">8</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="p">}&gt;</span> <span class="p">&lt;{</span> <span class="kt">i8</span><span class="p">*</span> <span class="k">getelementptr</span> <span class="k">inbounds</span> <span class="p">(&lt;{</span> <span class="p">[</span><span class="m">4</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="p">}&gt;,</span> <span class="p">&lt;{</span> <span class="p">[</span><span class="m">4</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="p">}&gt;*</span> <span class="vg">@alloc2.1</span><span class="p">,</span> <span class="kt">i32</span> <span class="m">0</span><span class="p">,</span> <span class="kt">i32</span> <span class="m">0</span><span class="p">,</span> <span class="kt">i32</span> <span class="m">0</span><span class="p">),</span> <span class="p">[</span><span class="m">8</span> <span class="p">x</span> <span class="kt">i8</span><span class="p">]</span> <span class="k">c</span><span class="s">"\01\00\00\00\00\00\00\00"</span> <span class="p">}&gt;,</span> <span class="k">align</span> <span class="m">8</span><span class="p">,</span> <span class="nv">!dbg</span> <span class="nv nv-Anonymous">!14</span>
+</code></pre></div>
+
+
+
+<a name="219116131"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/219116131" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#219116131">(Dec 07 2020 at 18:12)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/blob/75f1db1102076e416e1154b241b4fc95c01c0d7b/compiler/rustc_codegen_llvm/src/common.rs#L249">https://github.com/rust-lang/rust/blob/75f1db1102076e416e1154b241b4fc95c01c0d7b/compiler/rustc_codegen_llvm/src/common.rs#L249</a></p>
+<p>Every time we find a pointer, if the target is a <code>GlobalAlloc::Memory</code>, we create a brand new allocation. To fix this bug, we would need to somehow assign a name to each anonymous allocation that is stable across source changes (so no <code>format!("{}", alloc_id)</code>. otherwise incr comp breaks)</p>
+
+
+
+<a name="219117096"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/219117096" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#219117096">(Dec 07 2020 at 18:19)</a>:</h4>
+<p>we could serialize the content and base 64 encode it ^^</p>
+
+
+
+<a name="219695355"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/219695355" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#219695355">(Dec 12 2020 at 07:22)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@oli</span> Or blake3 it.</p>
+
+
+
+<a name="219772800"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/219772800" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#219772800">(Dec 13 2020 at 18:17)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/146212-t-compiler.2Fconst-eval/topic/reuse.20of.20anonymous.20allocations/near/219117096">said</a>:</p>
+<blockquote>
+<p>we could serialize the content and base 64 encode it ^^</p>
+</blockquote>
+<p>that could deduplicate identical-but-distinct allocations though which would also be wrong</p>
+
+
+
+<a name="219772802"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/reuse%20of%20anonymous%20allocations/near/219772802" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/reuse.20of.20anonymous.20allocations.html#219772802">(Dec 13 2020 at 18:17)</a>:</h4>
+<p>there needs to be a 1:1 mapping between <code>AllocId</code> and actual allocations</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

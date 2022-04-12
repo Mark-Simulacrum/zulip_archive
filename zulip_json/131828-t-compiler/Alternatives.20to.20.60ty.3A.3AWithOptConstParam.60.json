@@ -1,0 +1,434 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"216206\">@lcnr</span>  I had a hard time understanding the intended usage of this type in <a href=\"https://github.com/rust-lang/rust/issues/77430\">#77430</a>. Mostly this is because I ran into a problem for which the recommended usage, \"call <code>try_upgrade</code> at the start of each query\" was not sufficient. It's not a high priority, but I have a few ideas to reduce the surface area of this type. However, they might be based on some false assumptions about the semantics of <code>WithOptConstParam</code>. Namely:</p>\n<ul>\n<li>Its only purpose is to avoid cyclic queries due to <code>typeof</code>.</li>\n<li><strong>Either</strong> each MIR body will only be associated with exactly one const generic parameter, <strong>or</strong> each MIR body may be associated with multiple const generic parameters, but all parameters have the same type.</li>\n</ul>\n<p>If both of these are true, I don't see why we couldn't use a side-table (a mapping of each MIR body <code>DefId</code> to the <code>DefId</code> of an associated const generic parameter) in the implementation of <code>typeof</code> and hide this complexity everywhere. This seems a bit too easy, so I'm sure I'm missing something here, but maybe we can find a \"middle path\".</p>",
+        "id": 212234795,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601835712
+    },
+    {
+        "content": "<p>cc <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> here</p>\n<p>How do you want to build this side table? We only know the type of the relevant param during typeck and do not exit typeck before we need it, so we would need to somehow break the query abstraction for this to work</p>",
+        "id": 212234877,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601835816
+    },
+    {
+        "content": "<p>I already tried using a sidetable here, there are some annoying interactions I still remember.</p>",
+        "id": 212235059,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836015
+    },
+    {
+        "content": "<p>firstly, what happens if we use <code>a.this_functions_doesnt_exist&lt;13&gt;</code></p>",
+        "id": 212235072,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836052
+    },
+    {
+        "content": "<p>here we end up calling <code>type_of</code> for the anon const without ever finding the correct param (as it doesn't exist)</p>",
+        "id": 212235123,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836108
+    },
+    {
+        "content": "<p>that one is avoidable, more concerning is the following:</p>",
+        "id": 212235145,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836175
+    },
+    {
+        "content": "<p>In my half-baked idea, the mapping would just be the <code>DefId</code> of the const-generic parameter for which a given MIR body is substituted, not its type.</p>",
+        "id": 212235146,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601836179
+    },
+    {
+        "content": "<p>yeah, but we only know that <code>DefId</code> once we are inside of <code>typeck_tables_of</code> for the containing body</p>",
+        "id": 212235199,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836209
+    },
+    {
+        "content": "<p>Is that a fundamental limitation or a derived one?</p>",
+        "id": 212235210,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601836250
+    },
+    {
+        "content": "<p>fundamental</p>",
+        "id": 212235212,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836258
+    },
+    {
+        "content": "<p>let me get an example</p>",
+        "id": 212235226,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836279
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#![feature(const_generics)]</span><span class=\"w\"></span>\n\n<span class=\"k\">struct</span> <span class=\"nc\">A</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"o\">&lt;</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">N</span>: <span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"bp\">self</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">usize</span> <span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">B</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"o\">&lt;</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">M</span>: <span class=\"kt\">isize</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"bp\">self</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">usize</span> <span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">42</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span><span class=\"p\">.</span><span class=\"n\">foo</span>::<span class=\"o\">&lt;</span><span class=\"mi\">7</span><span class=\"o\">&gt;</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 212235282,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836340
+    },
+    {
+        "content": "<p>is the param for <code>7</code> <code>N</code> or <code>M</code> here</p>",
+        "id": 212235293,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836377
+    },
+    {
+        "content": "<p>we don't know this until we know the type of <code>a</code></p>",
+        "id": 212235301,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836390
+    },
+    {
+        "content": "<p>for which we have to typeck <code>main</code></p>",
+        "id": 212235302,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836397
+    },
+    {
+        "content": "<p>Got it. It's highly unlikely I'll be able to offer any new ideas here, so I'll change course. Is it possible to deduplicate the <code>*_mir</code> queries given that, once type-checking is complete, the mapping from MIR body to const parameter won't change?</p>",
+        "id": 212235396,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601836535
+    },
+    {
+        "content": "<p>I haven't thought very hard about this</p>",
+        "id": 212235485,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601836648
+    },
+    {
+        "content": "<p>you mean <code>optimized_mir</code> with <code>optimized_mir_of_const_arg</code>?</p>",
+        "id": 212235660,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601836858
+    },
+    {
+        "content": "<p>Yes, that's the duplication I'm referring to.</p>",
+        "id": 212235723,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601836957
+    },
+    {
+        "content": "<p>this happens because we can only encode things by <code>DefIndex</code> afaik</p>",
+        "id": 212235743,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601837014
+    },
+    {
+        "content": "<p>so we can't encode a query if it uses <code>ty::WithOptConstParam</code> as we would have to encode both the <code>did</code> and the <code>const_param_did</code></p>",
+        "id": 212235767,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601837043
+    },
+    {
+        "content": "<p>and iirc it improved perf to split these queries as some of them are rather hot and it costs slightly more to hash and compare a <code>WithOptConstParam</code> than it does for a <code>DefId</code></p>",
+        "id": 212235820,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601837104
+    },
+    {
+        "content": "<p>Okay, so everything that needs to be encoded cross-crate has to be split, while everything else can take <code>ty::WithOptConstParam</code></p>",
+        "id": 212235898,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601837237
+    },
+    {
+        "content": "<p>I mostly think so, yeah</p>",
+        "id": 212235905,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601837259
+    },
+    {
+        "content": "<p>Hmm, I'll need to look at the code a bit more, but I doubt that I'll be able to do better. Some documentation about why the query split happens would have helped me, as would using a proper <code>struct</code> for the <code>(DefId, LocalDefId)</code> pair. That might just be a personal problem. Maybe we should wait to see if this causes issues for other refactors?</p>",
+        "id": 212236126,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601837537
+    },
+    {
+        "content": "<p><code>WithConstParam</code>? <span aria-label=\"laughing\" class=\"emoji emoji-1f606\" role=\"img\" title=\"laughing\">:laughing:</span></p>",
+        "id": 212236142,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601837571
+    },
+    {
+        "content": "<blockquote>\n<p>That might just be a personal problem. Maybe we should wait to see if this causes issues for other refactors?</p>\n</blockquote>\n<p>It doesn't help to preemptively add more docs, bad enough that you had some issues</p>",
+        "id": 212236209,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601837652
+    },
+    {
+        "content": "<p>I could see having to remember which is the const-param and which is the real thing causing problems in the future.</p>",
+        "id": 212236218,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601837678
+    },
+    {
+        "content": "<p>yeah, so naming stuff won't hurt</p>",
+        "id": 212236241,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601837733
+    },
+    {
+        "content": "<p>When you're calling a cross-crate encoded query on a <code>LocalDefId</code></p>",
+        "id": 212236242,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601837733
+    },
+    {
+        "content": "<p>But that's just a small nitpick, it doesn't make anything simpler.</p>",
+        "id": 212236252,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601837758
+    },
+    {
+        "content": "<p>it also makes it easier to cross-reference with <code>WithOptConstParam</code> in the docs</p>",
+        "id": 212236272,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601837763
+    },
+    {
+        "content": "<p>Once my <code>MirSource</code> PR lands, I'll open one that removes the hack in MIR building and includes some changes to the documentation of <code>WithOptConstParam</code> that I would have found helpful now that I know a bit more.</p>",
+        "id": 212236478,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601838083
+    },
+    {
+        "content": "<p>Anyways, thanks for taking the time to explain stuff to me!</p>",
+        "id": 212236487,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601838103
+    },
+    {
+        "content": "<p>Funnily enough, all of this arose out of a desire to use <code>dump_mir</code> in the dataflow framework (which passes a <code>(DefId, Body)</code> everywhere).</p>",
+        "id": 212236538,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601838173
+    },
+    {
+        "content": "<p>Things really got out of hand.</p>",
+        "id": 212236554,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601838200
+    },
+    {
+        "content": "<p>hi, taking a look now</p>",
+        "id": 212241384,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601844890
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"118594\">@ecstatic-morse</span> there's no way to soundly do this any other way AFAIK</p>",
+        "id": 212241403,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601844941
+    },
+    {
+        "content": "<p>like this approach is the only reason we can support this at all</p>",
+        "id": 212241409,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601844959
+    },
+    {
+        "content": "<p>before <span class=\"user-mention\" data-user-id=\"121053\">@varkor</span> and I debated it I was sure we couldn't support the things that need this trick</p>",
+        "id": 212241452,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601844979
+    },
+    {
+        "content": "<p>so I don't think cross-crate is the performance problem, it's incremental caches, including in-memory</p>",
+        "id": 212241472,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845070
+    },
+    {
+        "content": "<p>^ ah yeah, incremental caches also only work with one <code>DefId</code></p>",
+        "id": 212241520,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601845121
+    },
+    {
+        "content": "<p>I think I had some comments about the names in the source code, but IIRC <span class=\"user-mention\" data-user-id=\"216206\">@lcnr</span> addressed most of them</p>",
+        "id": 212241525,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845137
+    },
+    {
+        "content": "<p>one idea I had was naming it by <em>what it's for</em>, rather than <em>what it is</em></p>",
+        "id": 212241602,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845245
+    },
+    {
+        "content": "<p>so something more like <code>BodyTypeckId</code> or similar</p>",
+        "id": 212241606,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845259
+    },
+    {
+        "content": "<p>Yeah, you can see in the thread that I didn't really understand the requirements here. It'd be nice to remove the duplicate MIR queries, but that also seems difficult, and I have less expertise than either of you. I  would have chosen a slightly different API, but that's more of a personal preference.</p>",
+        "id": 212241608,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601845261
+    },
+    {
+        "content": "<p>would deduplicating the queries help with anything?</p>",
+        "id": 212241620,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845280
+    },
+    {
+        "content": "<p>the <code>_of_const_arg</code> queries are internal helpers, really</p>",
+        "id": 212241622,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845298
+    },
+    {
+        "content": "<p>just because it's a massive pain to get the same effect otherwise</p>",
+        "id": 212241628,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845312
+    },
+    {
+        "content": "<p>No, just conceptual overhead. Once you understand that you have to do <code>try_upgrade</code> at the start, it's pretty straightforward</p>",
+        "id": 212241638,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601845322
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Alternatives.20to.20.60ty.3A.3AWithOptConstParam.60/near/212241622\">said</a>:</p>\n<blockquote>\n<p>the <code>_of_const_arg</code> queries are internal helpers, really</p>\n</blockquote>\n<p>we don't have a method for them because I was lazy</p>",
+        "id": 212241648,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601845323
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"118594\">@ecstatic-morse</span> I see. yeah, there should be comments on everything pointing to the main documentation thing</p>",
+        "id": 212241687,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845354
+    },
+    {
+        "content": "<p>so for some queries we still use </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">((</span><span class=\"n\">did</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">const_param_did</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">,,.,</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// ..</span>\n<span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// ..</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 212241695,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601845368
+    },
+    {
+        "content": "<p>should just clean this up, will do that rn</p>",
+        "id": 212241700,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601845380
+    },
+    {
+        "content": "<p>a name like <code>BodyTypeckId</code> or <code>TypeckBodyId</code> or w/e would also be more instantly recognizable</p>",
+        "id": 212241707,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845398
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"118594\">@ecstatic-morse</span> oh the other thing is we should switch the macros so we can have arbitrary numbers of query inputs :D</p>",
+        "id": 212241844,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845654
+    },
+    {
+        "content": "<p>So there's three states here AFAICT, either we know a body is associated with a const-generic parameter, we know it isn't, or we don't know either way. I think it would have helped me if this were encoded into the type system more explictly, since currently <code>(DefId, LocalDefId)</code> is used to represent the first and <code>WithOptConstParam</code> can represent any of them. Doing this might result in worse ergonomics however. I trust y'all to evaluate the trade-offs better than I can.</p>",
+        "id": 212241892,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601845703
+    },
+    {
+        "content": "<p>for the <code>Key</code> type, we can shove them into <code>($($arg_ty),*)</code> so that a single <code>T</code> becomes <code>(T)</code> i.e. still <code>T</code> but no arguments becomes <code>()</code>, two arguments becomes <code>(T, U)</code> etc.</p>",
+        "id": 212241894,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845709
+    },
+    {
+        "content": "<p>been meaning to do this for almost a year now, I wonder if <span class=\"user-mention\" data-user-id=\"281572\">@marmeladema</span> was looking at this at some point</p>",
+        "id": 212241895,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845728
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"118594\">@ecstatic-morse</span> it's kind of a hack rn, it would probably work better if we slapped more specific names on it</p>",
+        "id": 212241911,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845771
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Alternatives.20to.20.60ty.3A.3AWithOptConstParam.60/near/212241844\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"118594\">ecstatic-morse</span> oh the other thing is we should switch the macros so we can have arbitrary numbers of query inputs <span aria-label=\"grinning\" class=\"emoji emoji-1f600\" role=\"img\" title=\"grinning\">:grinning:</span></p>\n</blockquote>\n<p>My heart starts beating a little faster every time I open <code>plumbing.rs</code>.</p>",
+        "id": 212241912,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601845773
+    },
+    {
+        "content": "<p>also, you know how <code>Option&lt;DefId&gt;</code> / <code>Option&lt;LocalDefId&gt;</code> are the same size as the inner type, right?</p>",
+        "id": 212241942,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845804
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">TypeckBodyIdContext</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">Unknown</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"nb\">None</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">ConstParam</span><span class=\"p\">(</span><span class=\"n\">DefId</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 212241975,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845874
+    },
+    {
+        "content": "<p>this would also be the same size as <code>DefId</code></p>",
+        "id": 212241977,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845882
+    },
+    {
+        "content": "<p>because of how we reserve like 256 invalid values :D</p>",
+        "id": 212241983,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845893
+    },
+    {
+        "content": "<p>so it shouldn't really cost us anything to be more precise here</p>",
+        "id": 212241992,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601845912
+    },
+    {
+        "content": "<p>Big <span aria-label=\"thumbs up\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"thumbs up\">:thumbs_up:</span> for that. I think it would have helped me at least.</p>",
+        "id": 212242032,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601845944
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"118594\">ecstatic-morse</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Alternatives.20to.20.60ty.3A.3AWithOptConstParam.60/near/212241912\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"119009\">eddyb</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Alternatives.20to.20.60ty.3A.3AWithOptConstParam.60/near/212241844\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"118594\">ecstatic-morse</span> oh the other thing is we should switch the macros so we can have arbitrary numbers of query inputs :D</p>\n</blockquote>\n<p>My heart starts beating a little faster every time I open <code>plumbing.rs</code>.</p>\n</blockquote>\n<p>the trick to working on complex things is to ignore anything that is not directly relevant heh</p>",
+        "id": 212242042,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601846002
+    },
+    {
+        "content": "<p>like this is entirely a minor macro change</p>",
+        "id": 212242044,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601846015
+    },
+    {
+        "content": "<p>tempted to go do it myself if nobody else wants to :D</p>",
+        "id": 212242098,
+        "sender_full_name": "eddyb",
+        "timestamp": 1601846058
+    },
+    {
+        "content": "<p>/me doesn't want to <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 212242124,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1601846141
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"216206\">lcnr</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Alternatives.20to.20.60ty.3A.3AWithOptConstParam.60/near/212241700\">said</a>:</p>\n<blockquote>\n<p>should just clean this up, will do that rn</p>\n</blockquote>\n<p>opened <a href=\"https://github.com/rust-lang/rust/issues/77550\">#77550</a> for that</p>",
+        "id": 212242451,
+        "sender_full_name": "lcnr",
+        "timestamp": 1601846736
+    }
+]

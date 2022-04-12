@@ -1,0 +1,134 @@
+[
+    {
+        "content": "<p>Is <a href=\"https://pubs.opengroup.org/onlinepubs/9699919799/functions/munlock.html\"><code>munlock</code></a> unsafe?</p>\n<ul>\n<li>On one hand, it operates on a raw pointer</li>\n<li>But on the other, it never mutates memory or segfaults or does anything else observable within the program, so arguably there's no UB</li>\n<li>But on the first, it bypasses ownership and potentially compromises security invariants.</li>\n</ul>\n<p>I think the answer is yes, it's <code>unsafe</code>, even though there's no UB, but I'm curious what others think.</p>",
+        "id": 251908422,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1630687032
+    },
+    {
+        "content": "<p>I've written a decent ammount of FFI code where the SAFETY comment on the unsafe block is <code>//SAFETY: &lt;relevent standard&gt; prescribes no undefined behaviour for &lt;function&gt;</code>. You could thus write a trivial safe wrapper for such a function (which would just accept the arguments verbaitum, and forward them directly to the FFI function). <br>\nI would <em>assume</em> that (from looking at the POSIX spec for it), <code>munlock</code>would qualify as one of these functions, so you could call it \"safe\" insofar as a safe wrapper for it would be trivial. The question is whether other (unsafe) code may rely on having locked memory, and whether unlocking memory could cause that code to have undefined behaviour.</p>",
+        "id": 251919624,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1630691974
+    },
+    {
+        "content": "<p>Yes, locking/unlocking memory isn't observable from within the process. It never causes UB.</p>",
+        "id": 251929922,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1630696940
+    },
+    {
+        "content": "<p>So it's \"safe\" in the sense of \"no possible UB\". But making a safe wrapper like that would mean that one crate with a dangling pointer could accidentally <code>munlock</code> another crate's memory, violating their external security stance.</p>",
+        "id": 251929988,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1630696982
+    },
+    {
+        "content": "<blockquote>\n<p>violating their external security stance</p>\n</blockquote>\n<p>I think safety in Rust is only related to UB and is not intended to prevent that.</p>",
+        "id": 251943794,
+        "sender_full_name": "hyd-dev",
+        "timestamp": 1630704169
+    },
+    {
+        "content": "<p>Consider a function like <code>pub fn peek(addr: *const u8) -&gt; Result&lt;u8, ()&gt;</code> that can read any byte in memory, using a system call that it always has defined behavior (no segfaults, and no UB on races). Should it be safe to peek at arbitrary addresses?</p>",
+        "id": 251946276,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1630705656
+    },
+    {
+        "content": "<p>That would have rust-level undefined behaviour, from races (as any non-atomicwrites from rust code will assume nothing currently reads them without a <em>happens-before</em> relationship) , or from violating <code>&amp;mut</code> aliasing (or both).</p>",
+        "id": 251946867,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1630705980
+    },
+    {
+        "content": "<p>On the security point, it is noted <em>somewhere</em> (I can't remember where off the top of my head) that <code>unsafe</code> is not intended as a security boundary, though the fact that non-local code can violate other, non-local code's security invariants, may be cause for concern (in which case, <code>unsafe</code> may be useful as a <em>lint</em> against this).</p>",
+        "id": 251947484,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1630706359
+    },
+    {
+        "content": "<p>Another potential argument for an <code>munlock</code> wrapper being unsafe could be that any operation, other than conversion to <code>usize</code>; equality comparision, which would be unspecified; and wrapping arithmetic, on a deallocated pointer is undefined behaviour (even if the underlying operation would not have undefined behaviour - for example, it's valid to read a value of an inhabited 1-ZST from any pointer, except a null pointer or a deallocated pointer).</p>",
+        "id": 251947817,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1630706504
+    },
+    {
+        "content": "<p>I completely agree that <code>unsafe</code> is not a security boundary. My observation is that, in both examples above, there's a hazard related to memory pointed to by raw pointers, and Rust already has this great system for protecting memory pointed to by raw pointers.</p>",
+        "id": 251948158,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1630706731
+    },
+    {
+        "content": "<p>So I'm not thinking attackers reading secrets from elsewhere in the process; my main concern here is just accidental misuse of dangling pointers&mdash;one of the very things that Rust is already designed to help with.</p>",
+        "id": 251949307,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1630707581
+    },
+    {
+        "content": "<p>if I were writing a safe API, I don't think I'd expose <code>munlock</code> at all. More like <code>fn lock(...) -&gt; Guard</code> which unlocks itself on <code>Drop</code>.</p>",
+        "id": 251950045,
+        "sender_full_name": "cuviper",
+        "timestamp": 1630708108
+    },
+    {
+        "content": "<p>I agree, that's a nicer API than bare <code>munlock</code>. That also suggests that requiring <code>munlock</code>-like functions to be unsafe shouldn't be a significant burden, because the higher-level API is what most people will want anyway.</p>",
+        "id": 251950630,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1630708496
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"257758\">@Connor Horman</span> Ooh, your observation about <code>peek</code> being unsafe gives me an idea. On a practical level, OS's can always read arbitrary program bytes without \"UB\" if they want to, because OS's are outside the reach of userspace compilers, and OS's can Do Magic. But if we say that any userspace function that specifically requests that the OS read certain bytes, or even make certain bytes readable in ways they weren't readable before, we'll treat that like a userspace read, and that function needs to be <code>unsafe</code>, I think that solves my problem.</p>",
+        "id": 251952618,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1630710022
+    },
+    {
+        "content": "<p>Yeah. Rust can't do anything about kernel space reading from it's own data (unless the possibility of a hardware race exists, in which case, unless the OS ensures synchronization on both sides, <em>any unrequested</em> read from userspace would be potentially invalid). But the OS is never guaranteed to see anything other than garbage, which, at the userspace level, would at the very least be <code>uninit</code>.</p>",
+        "id": 251952815,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1630710175
+    },
+    {
+        "content": "<p>Then we can say, <code>munlock</code> is effectively userspace requesting the OS make certain bytes swappable, which means they could be read--by the kernel swapper, and written to a physical medium, with physical consequences, in ways that they wouldn't have been before, so therefore <code>munlock</code> is unsafe too. :-)</p>",
+        "id": 251953102,
+        "sender_full_name": "Dan Gohman",
+        "timestamp": 1630710380
+    },
+    {
+        "content": "<p>If the effect of <code>munlock</code> is not observable from userspace, I still think it should be safe. I think this is different from <code>peek</code> that the effect of <code>peek</code> is actually observable by its return value.</p>",
+        "id": 251987592,
+        "sender_full_name": "hyd-dev",
+        "timestamp": 1630748070
+    },
+    {
+        "content": "<blockquote>\n<p>which means they could be read--by the kernel swapper, and written to a physical medium, with physical consequences</p>\n</blockquote>\n<p>This can also happen on memory that is never locked without involving <code>munlock</code> though.</p>",
+        "id": 251988457,
+        "sender_full_name": "hyd-dev",
+        "timestamp": 1630749056
+    },
+    {
+        "content": "<p>The only situation where <code>munlock</code> might cause issues is if you're doing some low-level DMA access, but in theory the kernel should take care of locking the pages for you in that case.</p>",
+        "id": 251988475,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1630749095
+    },
+    {
+        "content": "<p>I would argue that <code>peek</code> is also safe: it might return garbage data but it can never cause UB.</p>",
+        "id": 251988531,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1630749127
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"374396\">hyd-dev</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Is.20.60munlock.60.20unsafe.3F/near/251988457\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>which means they could be read--by the kernel swapper, and written to a physical medium, with physical consequences</p>\n</blockquote>\n<p>This can also happen on memory that is never locked without involving <code>munlock</code> though.</p>\n</blockquote>\n<p>That said, I'm not sure if it's possible to observe the effect of <code>munlock</code> by reading the physical medium.</p>",
+        "id": 251990630,
+        "sender_full_name": "hyd-dev",
+        "timestamp": 1630751632
+    },
+    {
+        "content": "<p><code>mlock</code> can be used to ensure that secret keys don't leak to swap I believe. In that case using <code>munlock</code> on the secret keys is a security issue.q</p>",
+        "id": 251996736,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1630757957
+    }
+]

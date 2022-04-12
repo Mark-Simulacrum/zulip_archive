@@ -1,0 +1,92 @@
+[
+    {
+        "content": "<p>If a symbol in an object file is not marked as being TLS, but is within a TLS section, is this probably more of a problem with the LLVM code generation, or something further upstream on the Rust side of things?  This is with the wasm32-unknown-emscripten target and more detail can be found at: <a href=\"https://github.com/rust-lang/rust/issues/92676\">https://github.com/rust-lang/rust/issues/92676</a> .  It seems like all of the symbols in the TLS sections need to be marked as TLS, otherwise linker complains (\"wasm-ld\" in this case).  I'm trying hone into an area to start investigating next.</p>",
+        "id": 268141834,
+        "sender_full_name": "Greg Buchholz",
+        "timestamp": 1642274186
+    },
+    {
+        "content": "<p>My first guess would be an llvm problem</p>",
+        "id": 268141863,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1642274243
+    },
+    {
+        "content": "<p>Can you see if the issue occurs with the unstable <code>#[thread_local]</code> attribute instead of <code>thread_local!</code></p>",
+        "id": 268141933,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1642274315
+    },
+    {
+        "content": "<p>Let me give that a whirl</p>",
+        "id": 268142028,
+        "sender_full_name": "Greg Buchholz",
+        "timestamp": 1642274412
+    },
+    {
+        "content": "<p>I don't think rustc has much code explicitly dealing with sections (except for embedding crate metadata / llvm bitcode)</p>",
+        "id": 268142056,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1642274506
+    },
+    {
+        "content": "<p>Hmmm..</p>\n<div class=\"codehilite\"><pre><span></span><code>error: expected item after attributes\n --&gt; src/main.rs:4:1\n  |\n4 | #[thread_local]{ static VAR1: Cell&lt;i32&gt; = Cell::new(11111); }\n  | ^^^^^^^^^^^^^^^\n</code></pre></div>",
+        "id": 268142228,
+        "sender_full_name": "Greg Buchholz",
+        "timestamp": 1642274720
+    },
+    {
+        "content": "<p>Oh, sorry - you need to apply that attribute directly to the static</p>",
+        "id": 268142280,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1642274774
+    },
+    {
+        "content": "<p>Without adding a new block</p>",
+        "id": 268142282,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1642274779
+    },
+    {
+        "content": "<p>For some reason it then can't find methods on the items I added the annotation to.  For example:</p>\n<div class=\"codehilite\"><pre><span></span><code>#[thread_local] static VAR1: Cell&lt;i32&gt; = Cell::new(11111);\n</code></pre></div>\n\n<p>...then has errors where the methods are used later on in the code:</p>\n<div class=\"codehilite\"><pre><span></span><code>error[E0599]: no method named `with` found for struct `Cell` in the current scope\n  --&gt; src/main.rs:10:40\n   |\n10 |     println!(&quot;VAR1 in thread: {}&quot;,VAR1.with(|v| {v.get()}));\n   |                                        ^^^^ method not found in `Cell&lt;i32&gt;`\n</code></pre></div>",
+        "id": 268142744,
+        "sender_full_name": "Greg Buchholz",
+        "timestamp": 1642275419
+    },
+    {
+        "content": "<p>With that attribute, I believe you can 'just' access that static like normal</p>",
+        "id": 268142764,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1642275474
+    },
+    {
+        "content": "<p>and all of the accesses will automatically become thread local</p>",
+        "id": 268142806,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1642275489
+    },
+    {
+        "content": "<p>the macro expansion of thread_local! looks like it might be using #[thread_local]:</p>\n<div class=\"codehilite\"><pre><span></span><code>const VAR1: ::std::thread::LocalKey&lt;Cell&lt;i32&gt;&gt; =\n    {\n        #[inline]\n        fn __init() -&gt; Cell&lt;i32&gt; { Cell::new(1) }\n        #[inline]\n        unsafe fn __getit() -&gt; ::std::option::Option&lt;&amp;&#39;static Cell&lt;i32&gt;&gt; {\n            #[thread_local]\n            #[cfg(all(target_thread_local,\n                      not(all(target_family = &quot;wasm&quot;,\n                              not(target_feature = &quot;atomics&quot;))),))]\n            static __KEY: ::std::thread::__FastLocalKeyInner&lt;Cell&lt;i32&gt;&gt; =\n                ::std::thread::__FastLocalKeyInner::new();\n\n            #[allow(unused_unsafe)]\n            unsafe { __KEY.get(__init) }\n        }\n        unsafe { ::std::thread::LocalKey::new(__getit) }\n    };\n</code></pre></div>",
+        "id": 268142912,
+        "sender_full_name": "Greg Buchholz",
+        "timestamp": 1642275667
+    },
+    {
+        "content": "<blockquote>\n<p>With that attribute, I believe you can 'just' access that static like normal</p>\n</blockquote>\n<p>I'll play around with that.</p>",
+        "id": 268142962,
+        "sender_full_name": "Greg Buchholz",
+        "timestamp": 1642275725
+    },
+    {
+        "content": "<p>...but most of the link errors come from elsewhere in the standard library, not my code.</p>",
+        "id": 268142983,
+        "sender_full_name": "Greg Buchholz",
+        "timestamp": 1642275787
+    },
+    {
+        "content": "<p>The LLVM IR (*.ll file) has a line:</p>\n<div class=\"codehilite\"><pre><span></span><code>@_ZN7Example4VAR17__getit5__KEY17hcfea1b84ac025f51E = internal thread_local(localexec) global &lt;{ [12 x i8] }&gt; zeroinitializer, align 4, !dbg !21\n</code></pre></div>\n\n<p>...the \"thread_local\" gives me a little bit of a warm fuzzy that it made it that far...</p>",
+        "id": 268143424,
+        "sender_full_name": "Greg Buchholz",
+        "timestamp": 1642276343
+    }
+]

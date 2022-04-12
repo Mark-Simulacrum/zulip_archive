@@ -1,0 +1,1970 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> The rules I originally gave are about the syntactic safety properties that are applied during and shortly after MIR creation. When I say \"safe\" and \"unsafe\" in those rules, I mean \"you need an <code>unsafe</code> block\". After applying those rules, you end up with something that doesn't directly need places, but the place operations are translated to relevant pointer operations:</p>\n<ul>\n<li><code>*ptr</code> and <code>addr_of!(ptr)</code> don't themselves require any pointer operations, since they are eliminated by the translation</li>\n<li><code>place.field</code> requires an operation that I have written <code>ptr.field()</code> and can be meta-circularly defined as <code>&amp;raw (*ptr).field</code>, or <code>ptr.add(offset_of!(Foo, field))</code>. Assuming we don't let it wrap, this operation is unsafe to be applied to a pointer which was not derived from a reference, but the safety rules ensure that we have an unsafe block around the operation.</li>\n<li>Reading a place, <code>{place}</code> translates to <code>ptr::read(place_ptr)</code>.</li>\n<li>Writing a place, <code>place = expr</code> translates to <code>ptr::drop_in_place(place_ptr); ptr::write(place_ptr, expr)</code>.</li>\n</ul>\n<p>What I mean by the final paragraph is that I think the safety checking and dynamic semantics should be <em>equivalent</em> to this model, whether or not places exist in MIR. Are there any specific aspects of the model where you think it gives the wrong answer?</p>",
+        "id": 233997838,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618097191
+    },
+    {
+        "content": "<blockquote>\n<p>MIR as a language inherently has places; it seems very strange to try to shoehorn a non-place semantics onto such a language. That just leads to confusion.</p>\n</blockquote>\n<p>I rather think it leads to simplification. Is there a reason places need to be magic that can't be simulated with pointers and/or references? In what way do they differ?</p>",
+        "id": 233998342,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618097676
+    },
+    {
+        "content": "<p>That said, I do see some inadequacies of the model around certain edge cases, particularly involving packed struct references and writes.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[repr(packed)]</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">Packed</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"kt\">u32</span> <span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">Foo</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"nc\">Packed</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">Foo</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">p</span>: <span class=\"nc\">Packed</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// pretend these are initialized</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// (1) should this be safe?</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">z</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// (2) should this be safe?</span>\n<span class=\"n\">p</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"p\">];</span><span class=\"w\"> </span><span class=\"c1\">// (3) should this be safe?</span>\n<span class=\"n\">p</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// (4) should this be safe?</span>\n</code></pre></div>\n<p>One can imagine doing an analysis with (1) to see that since <code>&amp;raw x.b.b = x + 8</code>, and <code>x</code> is aligned, <code>x.b.b</code> is also aligned and so (1) should be (syntactically) safe. To support this, the compositional semantics are insufficient, unless we add offsets: we have to remember that <code>x.b</code> is an unaligned place with offset 5, so <code>x.b.b</code> is a place with offset 8, which is aligned because the type's alignment is 4, and so <code>{x.b.b}</code> is a safe operation. (Then again, this is maybe exposing too much layout detail to the safety checker. The approach taken in the original proposal is more conservative and assumes that a place is unaligned if there are any packed structs involved at all.)</p>\n<p>For (2) and (3), currently it is legal to read and write from an unaligned place, but not take a reference and read from that. To support this, one would have to keep track of whether a place is aligned or (potentially) unaligned for its type, even if it's a pointer place, so that the MIR generates an aligned/unaligned load or store as appropriate.</p>",
+        "id": 233999829,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618099236
+    },
+    {
+        "content": "<blockquote>\n<p>The rules I originally gave are about the syntactic safety properties that are applied during and shortly after MIR creation. </p>\n</blockquote>\n<p>Oh I see. Those rules were not the main subject of this thread so I thought you meant something else.<br>\nThis thread [where these messages were originally posted; I moved them] is all about changing the <em>dynamic</em> safety rules (i.e., the UB rules).</p>",
+        "id": 234030310,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618132839
+    },
+    {
+        "content": "<p>I get the feeling you are proposing a rather radical change of MIR away from being a place-based language -- that's a fair proposal but entirely off-topic for this thread I think. So I created a new Zulip topic for this.</p>",
+        "id": 234030358,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618132884
+    },
+    {
+        "content": "<blockquote>\n<p>What I mean by the final paragraph is that I think the safety checking and dynamic semantics should be equivalent to this model, whether or not places exist in MIR. Are there any specific aspects of the model where you think it gives the wrong answer?</p>\n</blockquote>\n<p>Dynamic and static semantics are never going to be <em>equivalent</em>, I don't even know what that is supposed to mean...<br>\nAt some point during this thread we started talking entirely past each other and now I don't feel like this discussion even still has a clear goal or topic.^^</p>",
+        "id": 234030380,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618132916
+    },
+    {
+        "content": "<p>Of course a place-based language can always be translated to one without places (and the LLVM backend does exactly that). But since surface Rust has place-based syntax, MIR has place-based syntax, and Miri has place-based dynamic semantics (which is pretty much unavoidable given MIR being place-based) -- why would you want to do that?</p>\n<p>if you want to just change the MIR <em>semantics</em> away from places but keep places in the <em>syntax</em>, you'll need some really good arguments since that mismatch will be really painful... basically at this point you are proposing to add <em>another language</em> to the stack, \"MIR_noplace\", and to define the semantics of MIR by translation to MIR_noplace. I don't think that is a good idea, adding a whole new language is a major increase in complexity and in no way justified by the tiny gain of getting rid of places. It is certainly not how Miri works, so this change will also make it <em>harder</em> to relate a MIR spec with Miri.</p>\n<p>The static semantics of MIR is most certainly not going to move away from places any time soon (that would affect like half of rustc). So your proposal can only be about the dynamic semantics... but then you said it is about the <em>static</em> safety checks... I am still very confused about what it even is you are proposing to do. What is even the problem you are trying to solve by getting rid of places? That proposal came entirely out of the blue in the middle of an unrelated discussion, as far as I am concerned.^^ (I moved it to a new thread.)</p>",
+        "id": 234031137,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618133672
+    },
+    {
+        "content": "<blockquote>\n<p>Is there a reason places need to be magic that can't be simulated with pointers and/or references? In what way do they differ?</p>\n</blockquote>\n<p>Places aren't magic. They are also clearly distinct from (pointer) values, as is apparent even in the Rust syntax. You cannot syntactically use a value where a place is required.</p>",
+        "id": 234031335,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618133901
+    },
+    {
+        "content": "<p>See e.g. <a href=\"https://robbertkrebbers.nl/thesis.html\">this PhD thesis</a> for a formal semantics for C that works directly with places.<br>\nNo magic. And this way you get a nice and compositional semantics that follows the syntactic structure of the language. So IMO it is obviously the right way to give semantics to a language with places.</p>",
+        "id": 234031441,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134027
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234030380\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>What I mean by the final paragraph is that I think the safety checking and dynamic semantics should be equivalent to this model, whether or not places exist in MIR. Are there any specific aspects of the model where you think it gives the wrong answer?</p>\n</blockquote>\n<p>Dynamic and static semantics are never going to be <em>equivalent</em>, I don't even know what that is supposed to mean...<br>\nAt some point during this thread we started talking entirely past each other and now I don't feel like this discussion even still has a clear goal or topic.^^</p>\n</blockquote>\n<p>That's not what is being equated here. I mean that the safety checking should be equivalent to the safety checks in the static (MIR lowering) part of the model, and the dynamic semantics should be equivalent to the dynamic semantics (behavior of the place pointer operations) in the model</p>",
+        "id": 234031792,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618134431
+    },
+    {
+        "content": "<blockquote>\n<p>Places aren't magic. They are also clearly distinct from (pointer) values, as is apparent even in the Rust syntax. You cannot syntactically use a value where a place is required.</p>\n</blockquote>\n<p>We're definitely talking past each other. In what way is a place not a pointer? I don't mean syntactically, obviously the stars and ampersands move around. This is similar to the question of how C++ references differ from pointers; to a first approximation they are just a trivial syntactic transformation. I'm trying to get at what <em>other</em> differences there are, that make it impossible to desugar places into pointers as I've described.</p>",
+        "id": 234031976,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618134616
+    },
+    {
+        "content": "<p>I am sure you can devise a sufficiently complicated translation that accurately captures place semantics in a target language without places. it's not going to be entirely trivial; places in Miri are denoted by a pointer <em>and an alignment</em> to properly account for field accesses to packed structs in a compositional way.<br>\nBut that is a trivial statement, you can compile away almost anything.^^ What is wholly unclear to me is what you'd gain by doing this. all of the MIR-based static analyses, including unsafety checking, work on places -- and they have to unless you want to change like half of rustc. likewise for Miri, it works on places. and places aren't really complicated either, they are just a separate syntactic class with its own denotation  and reduction relation.</p>",
+        "id": 234031992,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134635
+    },
+    {
+        "content": "<blockquote>\n<p>In what way is a place not a pointer? </p>\n</blockquote>\n<p>a place isn't a value. we don't even seem to have compatible ontologies here...</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">Value</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Pointer</span><span class=\"p\">(</span><span class=\"n\">Pointer</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">Place</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">pointer</span>: <span class=\"nc\">Pointer</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">alignment</span>: <span class=\"nc\">Align</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 234032029,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134705
+    },
+    {
+        "content": "<p>but even if the <code>alignment</code> field wouldn't exist, there'd still be a very clear different between <code>Value</code> and <code>Place</code> here</p>",
+        "id": 234032082,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134730
+    },
+    {
+        "content": "<blockquote>\n<p>places in Miri are denoted by a pointer and an alignment to properly account for field accesses to packed structs in a compositional way.</p>\n</blockquote>\n<p>Okay, now we're getting somewhere. I mention that alignment needs to get added into the model to handle packed places in <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/233999829\">this</a> addendum, so I think we are converging</p>",
+        "id": 234032106,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618134767
+    },
+    {
+        "content": "<p>\"pointer\" is not a syntactic class in rustc. so if by \"is a place a pointer\" you mean \"are these two words for the same thing\", the answer is definitely no -- the question isn't even well-typed.</p>",
+        "id": 234032107,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134772
+    },
+    {
+        "content": "<p>the syntactic class here is \"value, of pointer type\"</p>",
+        "id": 234032122,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618134796
+    },
+    {
+        "content": "<p>that's not a syntactic class though</p>",
+        "id": 234032131,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134809
+    },
+    {
+        "content": "<p>\"value\" then</p>",
+        "id": 234032139,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618134817
+    },
+    {
+        "content": "<p>the syntax just has \"values\" and \"places\" (and a few other things like \"types\")</p>",
+        "id": 234032142,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134825
+    },
+    {
+        "content": "<p>and \"place\" as a syntactic class is clearly distinct from \"value\" as a syntactic class since \"5 = x\" is ill-formed syntax</p>",
+        "id": 234032207,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134858
+    },
+    {
+        "content": "<p>No, it's not 5 = x, it's <code>*5 = x</code></p>",
+        "id": 234032212,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618134872
+    },
+    {
+        "content": "<p>the \"value\" in question is the address of the place</p>",
+        "id": 234032227,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618134892
+    },
+    {
+        "content": "<p>if we ignore alignment, a place expression <em>denotes</em> a \"place result\" (<em>argh</em> why did we call the other class 'value' so we cannot use standard terminology here). which is, semantically, a pointer.</p>",
+        "id": 234032243,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134907
+    },
+    {
+        "content": "<p>yes!</p>",
+        "id": 234032259,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618134921
+    },
+    {
+        "content": "<p>a value expression <em>denotes</em> a \"value result\" or \"value\", which is an element of <a href=\"https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/value-domain.md\">an enum with many variants</a></p>",
+        "id": 234032267,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134935
+    },
+    {
+        "content": "<p>Okay, so we have a bit more syntactic type safety with this definition</p>",
+        "id": 234032324,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618134976
+    },
+    {
+        "content": "<p>there are typing rules for places and typing rules for values</p>",
+        "id": 234032334,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134985
+    },
+    {
+        "content": "<p>etc pp</p>",
+        "id": 234032340,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618134997
+    },
+    {
+        "content": "<p>But the typing rules for places should be a subset of the typing rules for values</p>",
+        "id": 234032349,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135017
+    },
+    {
+        "content": "<p><code>&amp;</code> turns a place into a value; denoting a <code>Value::Pointer</code>.<br>\n<code>*</code> does the opposite (causing UB if the value is not a <code>Value::Pointer</code>; this is prevented by the type system).</p>",
+        "id": 234032368,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135046
+    },
+    {
+        "content": "<p>specifically, the typing rules for values of the form <code>ptr</code> and <code>ptr.add(offset_of!(Foo, field))</code></p>",
+        "id": 234032373,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135050
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234032349\">said</a>:</p>\n<blockquote>\n<p>But the typing rules for places should be a subset of the typing rules for values</p>\n</blockquote>\n<p>no? they are just different</p>",
+        "id": 234032375,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135054
+    },
+    {
+        "content": "<p>I cant even typecheck your statement</p>",
+        "id": 234032379,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135073
+    },
+    {
+        "content": "<p>place typing and value typing apply to distinct syntactic classes</p>",
+        "id": 234032420,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135085
+    },
+    {
+        "content": "<p>There is an operation that adds a number to a pointer. Rust has annoying syntax for it, C would call it <code>&amp;ptr-&gt;field</code></p>",
+        "id": 234032437,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135109
+    },
+    {
+        "content": "<p>as in: <code>place_typing: place_expr → type → Prop</code>, <code>value_typing: value_expr → type → Prop</code></p>",
+        "id": 234032438,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135112
+    },
+    {
+        "content": "<p>That operation can be defined as a function from values of pointer type to values of pointer type</p>",
+        "id": 234032443,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135139
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234032437\">said</a>:</p>\n<blockquote>\n<p>There is an operation that adds a number to a pointer. Rust has annoying syntax for it, C would call it <code>&amp;ptr-&gt;field</code></p>\n</blockquote>\n<p>on the C side what you just wrote are <em>three</em> operations</p>",
+        "id": 234032445,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135143
+    },
+    {
+        "content": "<p>so type system and dynamic semantics treat that compositonally, of course</p>",
+        "id": 234032455,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135158
+    },
+    {
+        "content": "<p>even though the common syntax for it looks like places</p>",
+        "id": 234032456,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135158
+    },
+    {
+        "content": "<p>I mean <code>ptr + 8</code></p>",
+        "id": 234032459,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135168
+    },
+    {
+        "content": "<p>where <code>8</code> is the offset of <code>field</code></p>",
+        "id": 234032464,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135175
+    },
+    {
+        "content": "<p>that's not even the same thing in C</p>",
+        "id": 234032465,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135184
+    },
+    {
+        "content": "<p>like, the UB rules are very different</p>",
+        "id": 234032468,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135194
+    },
+    {
+        "content": "<p>it's just annoying to talk about this because the common syntax for it brings in all this place stuff</p>",
+        "id": 234032471,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135199
+    },
+    {
+        "content": "<p>(ptr arithmetic is allowed inside arrays but not for fields)</p>",
+        "id": 234032515,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135207
+    },
+    {
+        "content": "<p>Aah, I mean <code>&amp;ptr-&gt;field</code> <em>as one operation</em></p>",
+        "id": 234032546,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135226
+    },
+    {
+        "content": "<p>just pretend that's a primitive</p>",
+        "id": 234032553,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135238
+    },
+    {
+        "content": "<p>that's not a thing</p>",
+        "id": 234032559,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135239
+    },
+    {
+        "content": "<p>but it isn't?^^</p>",
+        "id": 234032566,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135243
+    },
+    {
+        "content": "<p>are we talking about C, Rust, or your fantasy language? ;)</p>",
+        "id": 234032573,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135254
+    },
+    {
+        "content": "<p>I'm desugaring all place ops into that operation</p>",
+        "id": 234032578,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135257
+    },
+    {
+        "content": "<p>but what problem is that solving?</p>",
+        "id": 234032594,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135275
+    },
+    {
+        "content": "<p>It exists in rust, it's <code>std::ptr::add</code></p>",
+        "id": 234032595,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135275
+    },
+    {
+        "content": "<p>that's not a primitive</p>",
+        "id": 234032600,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135282
+    },
+    {
+        "content": "<p>it's a function</p>",
+        "id": 234032601,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135284
+    },
+    {
+        "content": "<p>it's an intrinsic</p>",
+        "id": 234032602,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135288
+    },
+    {
+        "content": "<p>MIR could totally just have a primitive operation for this, just like <code>set_discriminant</code></p>",
+        "id": 234032652,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135326
+    },
+    {
+        "content": "<p>I mean, sure...</p>",
+        "id": 234032662,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135346
+    },
+    {
+        "content": "<p>(no idea where you are going)</p>",
+        "id": 234032664,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135350
+    },
+    {
+        "content": "<p>in a sense, it already does, these are the <code>Projection</code>s, but the place stuff is confusing matters</p>",
+        "id": 234032668,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135361
+    },
+    {
+        "content": "<p>could you maybe make a problem statement? you want to desugar all place ops. I already conceded that that is possible -- this was never contentious. the LLVM backend does it. but what problem do you want to solve?</p>",
+        "id": 234032713,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135394
+    },
+    {
+        "content": "<p>My point is that the safety of these place ops should be the same as the safety of computing <code>ptr + 8 + 3 * n + 2</code></p>",
+        "id": 234032714,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135394
+    },
+    {
+        "content": "<p>except that you can't directly write it like that for reasons</p>",
+        "id": 234032725,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135409
+    },
+    {
+        "content": "<p>but the compiler's basically doing that</p>",
+        "id": 234032729,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135422
+    },
+    {
+        "content": "<p>we have a way to give semantics to MIR that is fully compositional, by basically structural induction on the syntax, accounting for the fact that we have value expressions and place expressions. I encourage you to read the Miri core engine source code, it helped me a lot to understand how to give such semantics to MIR.<br>\nso, what's wrong with this semantics that you want to give a different one?</p>",
+        "id": 234032789,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135473
+    },
+    {
+        "content": "<p>I want to define what place ops are safe (both syntactically and dynamically), particularly when <code>addr_of</code> is involved</p>",
+        "id": 234032790,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135473
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234032790\">said</a>:</p>\n<blockquote>\n<p>I want to define what place ops are safe (both syntactically and dynamically), particularly when <code>addr_of</code> is involved</p>\n</blockquote>\n<p>you dont need to rearrange the entire operational semantics for that^^</p>",
+        "id": 234032823,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135520
+    },
+    {
+        "content": "<p>I think my model is already quite close to Miri's</p>",
+        "id": 234032835,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135528
+    },
+    {
+        "content": "<p>I'm not overhauling anything like you seem to think</p>",
+        "id": 234032844,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135537
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234032835\">said</a>:</p>\n<blockquote>\n<p>I think my model is already quite close to Miri's</p>\n</blockquote>\n<p>Miri fundamentally distinguishes between places and values though...</p>",
+        "id": 234032852,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135558
+    },
+    {
+        "content": "<p>That's fine</p>",
+        "id": 234032858,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135562
+    },
+    {
+        "content": "<p>it sounded earlier like you wanted to get rid of that via desugaring to another language...</p>",
+        "id": 234032906,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135581
+    },
+    {
+        "content": "<p>I want to make \"place results\" recognizable as a subset of \"value results\" (with alignment info)</p>",
+        "id": 234032916,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135594
+    },
+    {
+        "content": "<p>hm, I dont think \"subset\" is the right term here</p>",
+        "id": 234032946,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135624
+    },
+    {
+        "content": "<p>(certainly not in Miri due to alignment)</p>",
+        "id": 234032957,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135632
+    },
+    {
+        "content": "<p>it ignores the type structure</p>",
+        "id": 234032959,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135635
+    },
+    {
+        "content": "<p>as set theorist would say \"subset\" but as a type theorist I cannot agree :P</p>",
+        "id": 234032968,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135648
+    },
+    {
+        "content": "<p>A place result is a pointer plus an offset, yes?</p>",
+        "id": 234032972,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135654
+    },
+    {
+        "content": "<p><em>pointers</em> are a subset of values</p>",
+        "id": 234032976,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135661
+    },
+    {
+        "content": "<p>and places are \"newtyped pointers\"</p>",
+        "id": 234032979,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135665
+    },
+    {
+        "content": "<p>but \"newtyped\" matters</p>",
+        "id": 234032982,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135669
+    },
+    {
+        "content": "<p>Take the first projection, then it's a subset ^^</p>",
+        "id": 234032983,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135671
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234032972\">said</a>:</p>\n<blockquote>\n<p>A place result is a pointer plus an offset, yes?</p>\n</blockquote>\n<p>no, its just a pointer (plus an alignment)</p>",
+        "id": 234033026,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135690
+    },
+    {
+        "content": "<p>but as I said, the newtype matters</p>",
+        "id": 234033039,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135703
+    },
+    {
+        "content": "<p>Er, I meant alignment</p>",
+        "id": 234033041,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135709
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234032979\">said</a>:</p>\n<blockquote>\n<p>and places are \"newtyped pointers\"</p>\n</blockquote>\n<p>Great, I can work with that. So <code>*ptr</code> is the newtype constructor, and <code>addr_of!</code> is the newtype projection</p>",
+        "id": 234033075,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135737
+    },
+    {
+        "content": "<p>and neither one has to do anything else fancy</p>",
+        "id": 234033084,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135750
+    },
+    {
+        "content": "<p><code>addr_of!</code> is the newtype projection <em>followed by the value injection</em></p>",
+        "id": 234033092,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135762
+    },
+    {
+        "content": "<p>no no</p>",
+        "id": 234033094,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135769
+    },
+    {
+        "content": "<p>er wait</p>",
+        "id": 234033099,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135777
+    },
+    {
+        "content": "<p><code>addr_of!</code> basically has type <code>Place&lt;T&gt; → Value&lt;*const T&gt;</code></p>",
+        "id": 234033102,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135781
+    },
+    {
+        "content": "<p>which injection?</p>",
+        "id": 234033103,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135782
+    },
+    {
+        "content": "<p>It's throwing away the alignment you mean</p>",
+        "id": 234033108,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135796
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">Value</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">Pointer</span><span class=\"p\">(</span><span class=\"n\">Pointer</span><span class=\"p\">),</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p><code>Value::Pointer</code> is the injection</p>",
+        "id": 234033112,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135802
+    },
+    {
+        "content": "<p>\"enum constructor\"</p>",
+        "id": 234033140,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135805
+    },
+    {
+        "content": "<p>Sure</p>",
+        "id": 234033158,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135815
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234033102\">said</a>:</p>\n<blockquote>\n<p><code>addr_of!</code> basically has type <code>Place&lt;T&gt; → Value&lt;*const T&gt;</code></p>\n</blockquote>\n<p>^</p>",
+        "id": 234033179,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135836
+    },
+    {
+        "content": "<p>But the key point is that the pointer and whatever provenance it has has no bearing here</p>",
+        "id": 234033182,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135840
+    },
+    {
+        "content": "<p>the rest is type tetris</p>",
+        "id": 234033189,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135857
+    },
+    {
+        "content": "<p>thinking of places and values as being \"distinctly typed\" is what made it really click for me, FWIW</p>",
+        "id": 234033190,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135859
+    },
+    {
+        "content": "<p>I agree that they are newtyped</p>",
+        "id": 234033202,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135875
+    },
+    {
+        "content": "<p>so do we agree on this?<br>\n\"<code>addr_of!</code> basically has type <code>Place&lt;T&gt; → Value&lt;*const T&gt;</code>\"</p>",
+        "id": 234033211,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135888
+    },
+    {
+        "content": "<p>Yes</p>",
+        "id": 234033219,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135907
+    },
+    {
+        "content": "<p>It moreover should be a very trivial function</p>",
+        "id": 234033227,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135919
+    },
+    {
+        "content": "<p>throw away alginment information, inject to <code>Value</code></p>",
+        "id": 234033271,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135934
+    },
+    {
+        "content": "<p><em>unlike</em> <code>place2value</code></p>",
+        "id": 234033272,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135934
+    },
+    {
+        "content": "<p>I can show you the code in Miri^^</p>",
+        "id": 234033280,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135938
+    },
+    {
+        "content": "<p><code>place2value</code> has type <code>Place&lt;T&gt; → Value&lt;T&gt;</code>. it does a \"typed load\" from memory. indeed it is non-trivial.</p>",
+        "id": 234033293,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618135960
+    },
+    {
+        "content": "<p>Similarly, <code>*ptr</code> is also a simple operation</p>",
+        "id": 234033311,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618135998
+    },
+    {
+        "content": "<p>it should have type <code>Value&lt;*const T&gt; -&gt; Place&lt;T&gt;</code></p>",
+        "id": 234033321,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136013
+    },
+    {
+        "content": "<p>and it manufactures alignment information from the alignment of T I guess</p>",
+        "id": 234033329,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136034
+    },
+    {
+        "content": "<p>yes (or any other ptr type).<br>\nit is less simple though at least under our current UB rules -- it has to check if the ptr is dereferencable and aligned. (yes I know you want to change that.)</p>",
+        "id": 234033368,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136047
+    },
+    {
+        "content": "<p>Right, that's what I'm getting at here</p>",
+        "id": 234033383,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136071
+    },
+    {
+        "content": "<p>I think even in C it might check for being dereferencable? not sure. but yes we could change this.</p>",
+        "id": 234033386,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136080
+    },
+    {
+        "content": "<p>I even proposed exactly that <a href=\"#narrow/stream/213817-t-lang/topic/Alignment.20and.20raw.20pointer.20deref/near/233450446\">here</a></p>",
+        "id": 234033404,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136111
+    },
+    {
+        "content": "<p>It doesn't need to be dereferenceable to do its job (produce a place result)</p>",
+        "id": 234033405,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136111
+    },
+    {
+        "content": "<p>Not clear whether it has to be aligned to work</p>",
+        "id": 234033420,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136128
+    },
+    {
+        "content": "<p>I guess if it's an unaligned pointer it just produces an unaligned place</p>",
+        "id": 234033439,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136155
+    },
+    {
+        "content": "<p>which should be fine</p>",
+        "id": 234033442,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136159
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234033405\">said</a>:</p>\n<blockquote>\n<p>It doesn't need to be dereferenceable to do its job (produce a place result)</p>\n</blockquote>\n<p>not sure what you mean... if you mean \"we could remove that UB and still get a reasonably implementable semantics\", then yes.</p>",
+        "id": 234033444,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136161
+    },
+    {
+        "content": "<p>yes that's what I mean</p>",
+        "id": 234033487,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136170
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234033439\">said</a>:</p>\n<blockquote>\n<p>I guess if it's an unaligned pointer it just produces an unaligned place</p>\n</blockquote>\n<p>yeah, and you'd get UB on place2value as the alignment recorded in the place wouldnt match the actual ptr alignment.</p>",
+        "id": 234033497,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136182
+    },
+    {
+        "content": "<p>why would there be a mismatch?</p>",
+        "id": 234033509,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136207
+    },
+    {
+        "content": "<p>the alignment in the place would just be the actual alignment of the pointer</p>",
+        "id": 234033515,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136221
+    },
+    {
+        "content": "<p>(IOW, the alignment field of a \"place result\" would actually be important. currently, it could technically be removed from miri. I kept it in because I figured we'd eventually change the rules.^^)</p>",
+        "id": 234033516,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136222
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234033515\">said</a>:</p>\n<blockquote>\n<p>the alignment in the place would just be the actual alignment of the pointer</p>\n</blockquote>\n<p>no</p>",
+        "id": 234033526,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136228
+    },
+    {
+        "content": "<p>the alignment in the place created by <code>*</code> <em>needs</em> to be the alignment given be the type</p>",
+        "id": 234033530,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136240
+    },
+    {
+        "content": "<p>this is required for the way we ceate LLVM IR to be correct</p>",
+        "id": 234033535,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136253
+    },
+    {
+        "content": "<p>basically, the alignment must be statically known</p>",
+        "id": 234033542,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136259
+    },
+    {
+        "content": "<p>and then the LLVM backend puts that static value into the IR</p>",
+        "id": 234033548,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136269
+    },
+    {
+        "content": "<p>Ah right, that's one of the things that would need to change</p>",
+        "id": 234033591,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136292
+    },
+    {
+        "content": "<p>we can't use plain GEPi here</p>",
+        "id": 234033600,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136299
+    },
+    {
+        "content": "<p>GEPi is fine with misaligned things</p>",
+        "id": 234033609,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136309
+    },
+    {
+        "content": "<p><code>load (align=8)</code> is not</p>",
+        "id": 234033611,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136313
+    },
+    {
+        "content": "<p>The load (at the <code>place2value</code>) needs to be aligned</p>",
+        "id": 234033627,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136330
+    },
+    {
+        "content": "<p>yes</p>",
+        "id": 234033632,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136339
+    },
+    {
+        "content": "<p>but the intermediate place ops don't</p>",
+        "id": 234033633,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136340
+    },
+    {
+        "content": "<p>the alignment in the \"place result\" is for the load</p>",
+        "id": 234033641,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136351
+    },
+    {
+        "content": "<p>nor the original <code>*ptr</code> place creation</p>",
+        "id": 234033643,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136356
+    },
+    {
+        "content": "<p>the UB rule for <code>place2value</code> is: the ptr in the place must be aligned to the alginment in the place; if yes, proceed with memory access\"</p>",
+        "id": 234033652,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136376
+    },
+    {
+        "content": "<p>that is <em>the only reason</em> this alignment field in a place even exists</p>",
+        "id": 234033661,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136386
+    },
+    {
+        "content": "<p>and for that to make sense, a <code>*</code> needs to use the alignment of the type when computing the \"place result\"</p>",
+        "id": 234033713,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136413
+    },
+    {
+        "content": "<p>I think there needs to be another variant on <code>place2value</code> for unaligned loads though?</p>",
+        "id": 234033714,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136413
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234033714\">said</a>:</p>\n<blockquote>\n<p>I think there needs to be another variant on <code>place2value</code> for unaligned loads though?</p>\n</blockquote>\n<p>no</p>",
+        "id": 234033718,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136421
+    },
+    {
+        "content": "<p>Otherwise I don't understand how <code>let x = packed_struct.field;</code> works today</p>",
+        "id": 234033742,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136434
+    },
+    {
+        "content": "<p>alignment is initialized to the type alignment on <code>*</code></p>",
+        "id": 234033744,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136440
+    },
+    {
+        "content": "<p>and then the semantics of a \"place field projection\" (<code>Place&lt;Struct&gt; → Place&lt;Field&gt;</code>) is as follows:</p>\n<ul>\n<li>the resulting ptr is just <code>ptr_offset_inbounds(input.ptr, field_offset)</code></li>\n<li>the resulting alignment is the input alignment restricted to the offset of the field in the struct</li>\n</ul>",
+        "id": 234033805,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136515
+    },
+    {
+        "content": "<p>the latter happens <a href=\"https://github.com/rust-lang/rust/blob/ba6275b6a9fc05fd5d93220e9a67fe64d663cb62/compiler/rustc_mir/src/interpret/place.rs#L180\">here</a></p>",
+        "id": 234033886,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136595
+    },
+    {
+        "content": "<p>So the way I'm envisioning this, the compiler does an analysis at the MIR stage to see whether the <code>*</code> -&gt; place ops -&gt; load path offsets by a multiple of the load type's alignment, and generates an aligned load operation; if it doesn't know the alignment of the pointer or the offset is unaligned then it generates an unaligned load operation. Then the dynamic semantics don't have to carry around alignment as extra state</p>",
+        "id": 234033888,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136597
+    },
+    {
+        "content": "<p>the former is idneed what the compiler does when generating LLVM IR. but in no way does that entail the latter.</p>",
+        "id": 234033904,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136634
+    },
+    {
+        "content": "<p>such an analysis would make the dynamic semantics non-compositional</p>",
+        "id": 234033925,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136643
+    },
+    {
+        "content": "<p>surely we dont want that^^</p>",
+        "id": 234033946,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136647
+    },
+    {
+        "content": "<p>The dynamic semantics would say that place results are just pointers, and an aligned load asserts alignment of the pointer that was provided</p>",
+        "id": 234033966,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136681
+    },
+    {
+        "content": "<p>it would have no idea what alignment to assert</p>",
+        "id": 234033981,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136708
+    },
+    {
+        "content": "<p>the type being loaded</p>",
+        "id": 234033986,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136716
+    },
+    {
+        "content": "<p>please describe the semantics of <code>place2value</code> if no alignment information is available in the place</p>",
+        "id": 234033995,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136723
+    },
+    {
+        "content": "<p>that is wrong</p>",
+        "id": 234033996,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136725
+    },
+    {
+        "content": "<p>Oh!</p>",
+        "id": 234034001,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136731
+    },
+    {
+        "content": "<p>it doesnt account for packed fields correctly</p>",
+        "id": 234034002,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136731
+    },
+    {
+        "content": "<p>Oh wait that's still okay, you can bake the alignment into the operation</p>",
+        "id": 234034008,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136748
+    },
+    {
+        "content": "<p>no it's not there</p>",
+        "id": 234034009,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136758
+    },
+    {
+        "content": "<p>the operation is <code>place2value</code></p>",
+        "id": 234034019,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136763
+    },
+    {
+        "content": "<p>it has a <code>Place&lt;i32&gt;</code> to work with, for example</p>",
+        "id": 234034050,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136771
+    },
+    {
+        "content": "<p>it has <em>no clue</em> if that i32 is in a packed struct or not</p>",
+        "id": 234034059,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136779
+    },
+    {
+        "content": "<p>and it doesn't know <code>align_of&lt;i32&gt;</code>?</p>",
+        "id": 234034068,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136787
+    },
+    {
+        "content": "<p>it does but that's useless information</p>",
+        "id": 234034070,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136795
+    },
+    {
+        "content": "<p>it's loading into a value of type i32?</p>",
+        "id": 234034075,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136809
+    },
+    {
+        "content": "<p>this place could be the result of computing <code>packed_struct.field</code></p>",
+        "id": 234034076,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136812
+    },
+    {
+        "content": "<p><code>field</code> has type<code>i32</code></p>",
+        "id": 234034079,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136818
+    },
+    {
+        "content": "<p>so that place expression denotes a <code>Place&lt;i32&gt;</code></p>",
+        "id": 234034088,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136825
+    },
+    {
+        "content": "<p>but asserting alignment 4  would be wrong</p>",
+        "id": 234034095,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136830
+    },
+    {
+        "content": "<p>why?</p>",
+        "id": 234034099,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136835
+    },
+    {
+        "content": "<p>because it's a packed struct...?</p>",
+        "id": 234034102,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136845
+    },
+    {
+        "content": "<p>That's what an <em>aligned</em> load would do</p>",
+        "id": 234034114,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136865
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">packed_struct</span><span class=\"p\">.</span><span class=\"n\">field</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"c1\">// is sugar for</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">place2value</span><span class=\"p\">(</span><span class=\"n\">packed_struct</span><span class=\"p\">.</span><span class=\"n\">field</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 234034118,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136875
+    },
+    {
+        "content": "<p>there are no aligned and unaligned loads</p>",
+        "id": 234034125,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136882
+    },
+    {
+        "content": "<p>there is just <code>place2value</code></p>",
+        "id": 234034160,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136886
+    },
+    {
+        "content": "<p>(in the subset of the language we are considering here)</p>",
+        "id": 234034170,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136894
+    },
+    {
+        "content": "<p>Okay, so we're back at MIR selection now. In that case, we have to keep offset state and deduce whether we can make the place2value aligned at the point of generation</p>",
+        "id": 234034188,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136934
+    },
+    {
+        "content": "<p>note that \"aligned\" is not a <code>bool</code> here</p>",
+        "id": 234034208,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136972
+    },
+    {
+        "content": "<p>It is possible to just always make it unaligned, I think, and make things aligned as an optimization pass</p>",
+        "id": 234034209,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618136975
+    },
+    {
+        "content": "<p>there is such a think as <code>#[repr(packed(2))]</code></p>",
+        "id": 234034212,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136979
+    },
+    {
+        "content": "<p>which would make an <code>i32</code> field 2-aligned</p>",
+        "id": 234034216,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618136985
+    },
+    {
+        "content": "<p>true, I'm simplifying here, but I don't think that makes a major difference</p>",
+        "id": 234034276,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618137008
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234034209\">said</a>:</p>\n<blockquote>\n<p>It is possible to just always make it unaligned, I think, and make things aligned as an optimization pass</p>\n</blockquote>\n<p>this is possible under the current UB rules. it is not possible for your proposed UB rules.<br>\n(assuming we want to keep the same LLVM lowering.)</p>",
+        "id": 234034298,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137028
+    },
+    {
+        "content": "<p>that's what I said earlier: currently, the <code>alignment</code> field in Miri is redundant</p>",
+        "id": 234034314,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137045
+    },
+    {
+        "content": "<p>but it is redundant only because <code>*ptr</code> is UB on misaligned ptrs</p>",
+        "id": 234034326,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137060
+    },
+    {
+        "content": "<blockquote>\n<p>it is not possible for your proposed UB rules.</p>\n</blockquote>\n<p>I assume you say that because adding aligned load ops would \"add UB\"?</p>",
+        "id": 234034341,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618137075
+    },
+    {
+        "content": "<p>The idea is to do an analysis on the place expression to determine that no UB would be introduced before making it aligned</p>",
+        "id": 234034362,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618137115
+    },
+    {
+        "content": "<p>you could certainly still make some of the loads aligned</p>",
+        "id": 234034411,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137136
+    },
+    {
+        "content": "<p>but e.g. not this one</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">(</span><span class=\"n\">x</span>: <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">i32</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">i32</span> <span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 234034425,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137149
+    },
+    {
+        "content": "<p>so, at this point you are not just proposing to change the UB rules, or the lowering of address arithmetic, but also the lowering of loads</p>",
+        "id": 234034437,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137174
+    },
+    {
+        "content": "<p>I'm not necessarily opposed to that, but I am opposed to moving goalposts^^</p>",
+        "id": 234034491,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137224
+    },
+    {
+        "content": "<p>That's a good example. I want to say yes that's intentional</p>",
+        "id": 234034499,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618137241
+    },
+    {
+        "content": "<p>you started out saying one could get rid of the algnment field in the op.sem and replace it by an optimization; now you are saying we can <em>not</em> do that unless we also change how we compile our code</p>",
+        "id": 234034551,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137265
+    },
+    {
+        "content": "<p>If you really want it to be aligned you would have to write something like <code>*&amp;*x</code></p>",
+        "id": 234034556,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618137268
+    },
+    {
+        "content": "<p>Well some code lowering has to be changed to make <code>addr_of!((*NULL).field)</code> work, since as you said LLVM is already assuming this is UB</p>",
+        "id": 234034632,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618137330
+    },
+    {
+        "content": "<p>I get the feeling the \"get rid of places\" proposal also has moved enough that it's not actually getting rid of places any more but is more like a variant of <a href=\"#narrow/stream/213817-t-lang/topic/Alignment.20and.20raw.20pointer.20deref/near/233450446\">what I posted recently</a></p>",
+        "id": 234034634,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137330
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234034632\">said</a>:</p>\n<blockquote>\n<p>Well some code lowering has to be changed to make <code>addr_of!((*NULL).field)</code> work, since as you said LLVM is already assuming this is UB</p>\n</blockquote>\n<p>lowering of place offsets has to change for this. but not lowering of <code>place2value</code>.</p>",
+        "id": 234034657,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137360
+    },
+    {
+        "content": "<p>anyway I need to get going now. I hope next time we can be more clear from the start about what the <em>goals</em> are of a given proposal, and which problems it is trying to solve. if one starts with the proposed solution without giving that context, it is really hard to understand why anything makes any sense.^^</p>",
+        "id": 234034839,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618137537
+    },
+    {
+        "content": "<p>The goal of this proposal is to have simple rules about how places work, ideally defining as much as we can. I will have to think more about your points about unaligned places and place2value</p>",
+        "id": 234034962,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618137653
+    },
+    {
+        "content": "<p>in particular, <code>addr_of!((*ptr).field.subfield)</code> should not need to assume alignment or dereferenceable</p>",
+        "id": 234034997,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618137721
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234034962\">said</a>:</p>\n<blockquote>\n<p>The goal of this proposal is to have simple rules about how places work, ideally defining as much as we can. I will have to think more about your points about unaligned places and place2value</p>\n</blockquote>\n<p>so what about <a href=\"#narrow/stream/213817-t-lang/topic/Alignment.20and.20raw.20pointer.20deref/near/233450446\">these rules</a>? I keep mentioning them (including linking to them during our discussion today multiple times) and I do not think you have commented on them yet.</p>",
+        "id": 234035686,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618138470
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234034997\">said</a>:</p>\n<blockquote>\n<p>in particular, <code>addr_of!((*ptr).field.subfield)</code> should not need to assume alignment or dereferenceable</p>\n</blockquote>\n<p>this is achieved by the rules I linked above</p>",
+        "id": 234035697,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618138483
+    },
+    {
+        "content": "<p>(those rules do not go into the packed struct situation; but the existing <code>alignment</code> field of a \"place result\" in Miri is sufficient to handle that)</p>",
+        "id": 234035730,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618138520
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234034634\">said</a>:</p>\n<blockquote>\n<p>I get the feeling the \"get rid of places\" proposal also has moved enough that it's not actually getting rid of places any more but is more like a variant of <a href=\"#narrow/stream/213817-t-lang/topic/Alignment.20and.20raw.20pointer.20deref/near/233450446\">what I posted recently</a></p>\n</blockquote>\n<p>Looking at that again, I think I agree with all of it, and this matches a version of my proposal before our conversation. But as you yourself have pointed out, it's not refined enough to handle packed places properly; <code>let x = packed_struct.field;</code> would fail if we assert that it is 4 byte aligned. But given your later comments, I think the way you intend to fill the gap is by associating an \"environmental alignment\" value to place results, with the following rules:</p>\n<ul>\n<li>creating a place from a ptr/ref (via <code>*</code>) creates a place with environmental alignment from the type</li>\n<li>offsetting a place via (<code>place.field</code>) creates a place with environmental alignment <code>min(N, P, T)</code> where <code>N</code> is the <code>packed(N)</code> value of the struct, <code>P</code> is the environmental alignment of the place and <code>T</code> is the alignment of the type</li>\n<li>loading or writing to a place asserts that the place's pointer is aligned to its environmental alignment</li>\n</ul>\n<p>(I don't want to call it the place's alignment because the place need not actually be aligned to its environmental alignment; it only represents the alignment we are allowed to assume based on the structure of the place expression.)</p>",
+        "id": 234035925,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618138723
+    },
+    {
+        "content": "<blockquote>\n<p>offsetting a place via (place.field) creates a place with environmental alignment min(N, max(P, T)) where N is the packed(N) value of the struct, P is the environmental alignment of the place and T is the alignment of the type</p>\n</blockquote>\n<p>not exactly; the new \"env-align\" is given by <code>old_align.restrict_for_offset(offset)</code>. which is basically <code>min(old, off_align)</code> where <code>off_align</code> is the largest power of 2 that is a divisor of <code>offset</code>.</p>",
+        "id": 234036039,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618138833
+    },
+    {
+        "content": "<p>but this is probably equivalent</p>",
+        "id": 234036097,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618138900
+    },
+    {
+        "content": "<p>except, shouldnt the inner <code>max</code> in your term be <code>min</code>?</p>",
+        "id": 234036148,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618138938
+    },
+    {
+        "content": "<p>How do you feel about one of the litmus tests from above though?</p>\n<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/233999829\">said</a>:</p>\n<blockquote>\n<p><div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[repr(packed)]</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">Packed</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"kt\">u32</span> <span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">Foo</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"nc\">Packed</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">Foo</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// (1) should this be safe?</span>\n</code></pre></div><br>\n</p>\n</blockquote>",
+        "id": 234036156,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618138953
+    },
+    {
+        "content": "<p>I think these rules make that code UB</p>",
+        "id": 234036216,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618139022
+    },
+    {
+        "content": "<p>whether something is \"safe\" isnt part of our discussion; are you asking of it is UB?</p>",
+        "id": 234036220,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139029
+    },
+    {
+        "content": "<p>it is not, according to the rules I proposed and with the existing env-align handling in Miri</p>",
+        "id": 234036266,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139054
+    },
+    {
+        "content": "<p><code>x</code>'s env-align will be 1</p>",
+        "id": 234036292,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139084
+    },
+    {
+        "content": "<p><code>x.b</code> will still be 1</p>",
+        "id": 234036298,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139088
+    },
+    {
+        "content": "<p>and <code>x.b.b</code> likewise</p>",
+        "id": 234036300,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139092
+    },
+    {
+        "content": "<p>Oh I guess it goes the other way, we're underapproximating the alignment</p>",
+        "id": 234036303,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618139095
+    },
+    {
+        "content": "<p>so we're required to do an unaligned load even though it's aligned</p>",
+        "id": 234036323,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618139110
+    },
+    {
+        "content": "<p>it's not aligned though</p>",
+        "id": 234036333,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139120
+    },
+    {
+        "content": "<p><code>x</code> might be sitting at address 1337</p>",
+        "id": 234036340,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139124
+    },
+    {
+        "content": "<p>Oops, <code>Foo</code> is supposed to be <code>align(4)</code></p>",
+        "id": 234036360,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618139150
+    },
+    {
+        "content": "<p>stick a <code>u32</code> in there</p>",
+        "id": 234036366,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618139160
+    },
+    {
+        "content": "<p>ah^^</p>",
+        "id": 234036406,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139168
+    },
+    {
+        "content": "<p>well yeah that's like having a <code>(u32, u8)</code></p>",
+        "id": 234036417,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139178
+    },
+    {
+        "content": "<p>well actually for <code>(u32, u8)</code> my rules will emit a 4-aligned load</p>",
+        "id": 234036426,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139195
+    },
+    {
+        "content": "<p>to the 2nd field</p>",
+        "id": 234036430,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139199
+    },
+    {
+        "content": "<p>because only the offset of the field matters, not the alignment of the type of the field</p>",
+        "id": 234036438,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139215
+    },
+    {
+        "content": "<p>like this</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[repr(packed)]</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">Packed</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"kt\">u32</span> <span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">Foo</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"nc\">Packed</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">c</span>: <span class=\"kt\">u32</span> <span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">Foo</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// can this be an aligned load?</span>\n</code></pre></div>",
+        "id": 234036441,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618139220
+    },
+    {
+        "content": "<p>make <code>Foo</code> <code>repr(C)</code> and it <em>can</em> be an aligned load as part of an optimization, but our lowering scheme won't naively do that</p>",
+        "id": 234036477,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139254
+    },
+    {
+        "content": "<p>but... since we agree the load is not UB, that also seems irrelevant :)</p>",
+        "id": 234036546,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139300
+    },
+    {
+        "content": "<p>there'll always be aligned loads that we do not mark as such</p>",
+        "id": 234036552,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139308
+    },
+    {
+        "content": "<p>And I suppose you agree it should be <code>unsafe { } </code> regardless?</p>",
+        "id": 234036553,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618139312
+    },
+    {
+        "content": "<p>eh... this is safe code today^^</p>",
+        "id": 234036563,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139328
+    },
+    {
+        "content": "<p>it'll just emit a 1-aligned load</p>",
+        "id": 234036564,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139335
+    },
+    {
+        "content": "<p><code>&amp;x.b.b</code> is not just unsafe but outright forbidden -- and I dont think we should change that</p>",
+        "id": 234036598,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139361
+    },
+    {
+        "content": "<p>Great, I think we agree then. All this talk of env-aligned pointers makes me wonder whether there is space in the language for under-aligned references that can be used here</p>",
+        "id": 234036703,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618139493
+    },
+    {
+        "content": "<p>but I guess that's a conversation for another day</p>",
+        "id": 234036713,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618139511
+    },
+    {
+        "content": "<p>:)</p>",
+        "id": 234036900,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618139736
+    },
+    {
+        "content": "<p>By the way, now that I have a better idea about how \"env-align\" works, I think I can better describe the MIR lowering pass to move env-align out of the dynamic semantics and into the operation.</p>\n<ul>\n<li>Env-align is a property statically associated to place expressions in MIR, with rules essentially the same as those given above:<ul>\n<li>The env-align of <code>*ptr</code> or <code>*ref</code> of type <code>T</code> is the alignment of <code>T</code>.</li>\n<li>The env-align of <code>place.field</code> is the env-align of place restricted for the offset of <code>field</code> (using <code>restrict_for_offset</code>).</li>\n</ul>\n</li>\n<li>When constructing <code>place2value</code> of a place expression <code>place</code>, we get the env-align <code>n</code> of the place, and put the operation <code>place2value(place: T, align n)</code> in the MIR.</li>\n</ul>\n<p>In the dynamic semantics:</p>\n<ul>\n<li>Place results are (newtyped) pointers.</li>\n<li>The expression <code>place2value(place: T, align n)</code> evaluates <code>place</code> to a result (a pointer), and then loads the pointer at type <code>T</code>, using the alignment <code>n</code>. This operation is UB unless <code>place</code> is aligned to <code>n</code>, and dereferenceable with memory valid at <code>T</code>.</li>\n</ul>\n<p>I think the semantics can work either way (I assert that they are equivalent), but since env-align is a static property (it follows from the structure of a place expression) it makes a bit more sense to me to not put it in the dynamic semantics as ghost state when it's not needed. (Also, this lowering makes it really easy to see when it is safe to codegen an aligned load.)</p>",
+        "id": 234038595,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618141521
+    },
+    {
+        "content": "<p>I agree this would be possible. But the lowering also means that we dont end up having a purely compositional semantics <em>on MIR itself</em>.</p>",
+        "id": 234038923,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618141833
+    },
+    {
+        "content": "<p>In particular, we could not use this lowering in Miri.</p>",
+        "id": 234038928,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618141841
+    },
+    {
+        "content": "<p>Why is that? If <code>place2value</code> already contains the <code>align</code> field then miri should be able to use it too</p>",
+        "id": 234038954,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618141878
+    },
+    {
+        "content": "<p>it doesn't, though^^</p>",
+        "id": 234038959,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618141888
+    },
+    {
+        "content": "<p>so let me clarify: to use this approach in Miri we'd have to change the MIR datatypes that are used throughout the compiler</p>",
+        "id": 234038978,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618141921
+    },
+    {
+        "content": "<p>plenty of trade-offs apply there, and I am not sure if this would overall be a good change. MIR is consumed not just by Miri.</p>",
+        "id": 234039033,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618141943
+    },
+    {
+        "content": "<p>Right, this version would actually change the mir datatype</p>",
+        "id": 234039036,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618141947
+    },
+    {
+        "content": "<p>one could view this as sharing some code between Miri and the LLVM backend, by instead doing that work already during MIR building.</p>",
+        "id": 234039050,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618141971
+    },
+    {
+        "content": "<p>for size reasons, you might want to calculate this on the fly, which brings it back to the current version</p>",
+        "id": 234039054,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618141983
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234039054\">said</a>:</p>\n<blockquote>\n<p>for size reasons, you might want to calculate this on the fly, which brings it back to the current version</p>\n</blockquote>\n<p>no that wouldn't work in a compositional way for miri I think</p>",
+        "id": 234039074,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142035
+    },
+    {
+        "content": "<p>the <code>place2value</code> code has no idea what the original place <em>expression</em> was that it is running on</p>",
+        "id": 234039113,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142051
+    },
+    {
+        "content": "<p>and the place expression is executed projection-by-projection without knowing any other context</p>",
+        "id": 234039125,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142068
+    },
+    {
+        "content": "<p>This is like typechecker data, miri can forget most but not all of it</p>",
+        "id": 234039148,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142107
+    },
+    {
+        "content": "<p>Where is the type stored in a load?</p>",
+        "id": 234039165,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142123
+    },
+    {
+        "content": "<p>it also sounds rather painful if <em>each and every</em> <code>write</code> call in Miri has to somehow cook up an alignment</p>",
+        "id": 234039182,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142151
+    },
+    {
+        "content": "<p>that's what miri already has to do though, that's what the alignment field in place results is</p>",
+        "id": 234039245,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142186
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234039165\">said</a>:</p>\n<blockquote>\n<p>Where is the type stored in a load?</p>\n</blockquote>\n<p>also in the place (<code>PlaceTy</code> is the type we really carry around in miri during evaluation, it's a <code>Place</code> and a <code>TyAndLayout</code>)</p>",
+        "id": 234039254,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142199
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234039245\">said</a>:</p>\n<blockquote>\n<p>that's what miri already has to do though, that's what the alignment field in place results is</p>\n</blockquote>\n<p>there are many callers of these <code>write</code> methods. none of them worry about env-align as it is entirely handled by the <code>place.rs</code> methods.</p>",
+        "id": 234039272,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142227
+    },
+    {
+        "content": "<p>the place result or the type of the operation?</p>",
+        "id": 234039281,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142232
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234039281\">said</a>:</p>\n<blockquote>\n<p>the place result or the type of the operation?</p>\n</blockquote>\n<p>the place type</p>",
+        "id": 234039286,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142241
+    },
+    {
+        "content": "<p>Can the alignment be stored there too?</p>",
+        "id": 234039295,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142257
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234039295\">said</a>:</p>\n<blockquote>\n<p>Can the alignment be stored there too?</p>\n</blockquote>\n<p>not sure, maybe</p>",
+        "id": 234039357,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142298
+    },
+    {
+        "content": "<p>that would basically mean places are typed by a type <code>T</code> and an alignment <code>N</code></p>",
+        "id": 234039372,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142324
+    },
+    {
+        "content": "<p>at least in the past miri sometimes used the more precise dynamic alignment when dynamically sized types are involved; we'd have to be careful not to do that</p>",
+        "id": 234039394,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142360
+    },
+    {
+        "content": "<p>Oh that's an interesting example. Dynamically sized types are basically encoding the types at run time, does that mean the alignment also has to be encoded?</p>",
+        "id": 234039479,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142420
+    },
+    {
+        "content": "<p>the offset of the last field of a struct with an unsized tail is dynamic</p>",
+        "id": 234039504,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142447
+    },
+    {
+        "content": "<p>it depends on the alignment of the unsized tail</p>",
+        "id": 234039512,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142454
+    },
+    {
+        "content": "<p>but of course for LLVM codegen we really only care about the best static approximation of that dynamic value</p>",
+        "id": 234039537,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142477
+    },
+    {
+        "content": "<p>Oh I was thinking of trait objects, now I see what you mean</p>",
+        "id": 234039538,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142477
+    },
+    {
+        "content": "<p>so one could still make the alginment of a place a static concept</p>",
+        "id": 234039558,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142512
+    },
+    {
+        "content": "<p>not sure if that would really simplify miri and/or the spec by that much, though</p>",
+        "id": 234039599,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142528
+    },
+    {
+        "content": "<p>I suspect it would make miri a bit faster</p>",
+        "id": 234039619,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142547
+    },
+    {
+        "content": "<p>for miri it'd basically just move the field from one struct to another</p>",
+        "id": 234039628,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142560
+    },
+    {
+        "content": "<p>I dont see how that could possibly make any perf difference</p>",
+        "id": 234039630,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142568
+    },
+    {
+        "content": "<p>since it means runtime values are a bit smaller and the alignments don't need to be computed all the time</p>",
+        "id": 234039638,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142576
+    },
+    {
+        "content": "<p>miri doesn't use dependent types to literally have <code>Place&lt;T&gt;</code>^^</p>",
+        "id": 234039641,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142582
+    },
+    {
+        "content": "<p>so it'd still be all runtime for miri</p>",
+        "id": 234039684,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142599
+    },
+    {
+        "content": "<p>just moved from <code>Place</code> to <code>PlaceTy</code></p>",
+        "id": 234039687,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142604
+    },
+    {
+        "content": "<p>Oh, you are computing the Ty at runtime too?</p>",
+        "id": 234039693,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142620
+    },
+    {
+        "content": "<p>yeah sure... this is an interpreter, what else could we do?</p>",
+        "id": 234039695,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142632
+    },
+    {
+        "content": "<p>I thought you were just pulling it out of the mir</p>",
+        "id": 234039697,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142634
+    },
+    {
+        "content": "<p>yes we do</p>",
+        "id": 234039699,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142640
+    },
+    {
+        "content": "<p>but this is runtime</p>",
+        "id": 234039722,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142644
+    },
+    {
+        "content": "<p>of miri</p>",
+        "id": 234039736,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142645
+    },
+    {
+        "content": "<p>it's an interpreter after all^^</p>",
+        "id": 234039751,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142663
+    },
+    {
+        "content": "<p>right but you can prepare the mir beforehand to have all the types, and then when you go through the loops and such you just grab the type of the operation you are currently executing</p>",
+        "id": 234039765,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142695
+    },
+    {
+        "content": "<p>so the values themselves don't need to carry types, they are classified by the types</p>",
+        "id": 234039795,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142725
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234039795\">said</a>:</p>\n<blockquote>\n<p>so the values themselves don't need to carry types, they are classified by the types</p>\n</blockquote>\n<p>Rust doesnt have dependent types nearly as flexible as what we'd need for this^^</p>",
+        "id": 234039808,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142744
+    },
+    {
+        "content": "<p>I dont know what kind of magic you think we are doing</p>",
+        "id": 234039855,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142766
+    },
+    {
+        "content": "<p>but I suspect I am describing a rather large change to miri so I'll investigate before making more uneducated comments</p>",
+        "id": 234039857,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142766
+    },
+    {
+        "content": "<p>but each time Miri executes <code>x.field</code>, it looks in <code>x</code>'s type for the right field, gets the offset, gets its type, ...</p>",
+        "id": 234039878,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142796
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234039857\">said</a>:</p>\n<blockquote>\n<p>but I suspect I am describing a rather large change to miri so I'll investigate before making more uneducated comments</p>\n</blockquote>\n<p>I dont know how what you propose could even possibly be done in Rust.^^ that would require full-blown dependent types.</p>",
+        "id": 234039896,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142825
+    },
+    {
+        "content": "<p>I <em>think</em> I'm not proposing dependent types</p>",
+        "id": 234039917,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142841
+    },
+    {
+        "content": "<p>(That said, Rust gets closer to dependent types every time I look at the const-eval or const-generics groups ^_^)</p>",
+        "id": 234039980,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142887
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">Place</span><span class=\"o\">&lt;</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">TY</span>: <span class=\"nc\">Type</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">N</span>: <span class=\"nc\">Align</span><span class=\"o\">&gt;</span><span class=\"p\">{</span><span class=\"o\">..</span><span class=\"p\">.}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>that's basically dependent types, isn't it? given how complex of a type <code>Type</code> is I doubt this will work any time soon, if ever^^</p>",
+        "id": 234040017,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142910
+    },
+    {
+        "content": "<p>Yeah I don't mean that</p>",
+        "id": 234040022,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618142925
+    },
+    {
+        "content": "<p>well but then you end up with what we have (if you flatten a bit)</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">Place</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">ty</span>: <span class=\"nc\">Type</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">align</span>: <span class=\"nc\">Align</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"n\">ptr</span>: <span class=\"nc\">Pointer</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"c1\">// more stuff for unsized places</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 234040047,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618142984
+    },
+    {
+        "content": "<p><code>x.field</code> is a piece of MIR that you have previously prepared for execution. While doing such preparation, you annotate that <code>x.field : T</code>. Then, during interpretation, when you want to know what type <code>x.field</code> is, you say <code>T</code> instead of getting the <code>field</code> member of <code>x</code>'s type</p>",
+        "id": 234040054,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143001
+    },
+    {
+        "content": "<p>I dont know what you mean by \"prepare for execution\"</p>",
+        "id": 234040106,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143019
+    },
+    {
+        "content": "<p>that sounds like a bytecode-based interpreter</p>",
+        "id": 234040116,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143028
+    },
+    {
+        "content": "<p>which Miri is not</p>",
+        "id": 234040119,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143030
+    },
+    {
+        "content": "<p>Miri is a pretty naive interpreter just traversing plain MIR</p>",
+        "id": 234040135,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143061
+    },
+    {
+        "content": "<p>This elaboration data is probably useful for other things too, but it would bloat the MIR a lot so I dunno if it's good to keep around</p>",
+        "id": 234040155,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143098
+    },
+    {
+        "content": "<p>well, there are certainly many ways Miri could be sped up :)</p>",
+        "id": 234040215,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143141
+    },
+    {
+        "content": "<p>While you could turn it into bytecode, here I'm just talking about putting more types on things</p>",
+        "id": 234040221,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143147
+    },
+    {
+        "content": "<p>It's good to know that Miri is not super optimized, I didn't know that</p>",
+        "id": 234040245,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143190
+    },
+    {
+        "content": "<p>lol^^</p>",
+        "id": 234040258,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143204
+    },
+    {
+        "content": "<p>if Miri is super anything then it is super slow ;)</p>",
+        "id": 234040263,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143210
+    },
+    {
+        "content": "<p>I thought all the slowdown was a necessary component of the safety checking</p>",
+        "id": 234040269,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143219
+    },
+    {
+        "content": "<p>but on the plus side this means the code can be fairly clean</p>",
+        "id": 234040274,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143240
+    },
+    {
+        "content": "<p>which is also important for this kind of interpreter^^</p>",
+        "id": 234040314,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143250
+    },
+    {
+        "content": "<p>Hm, sounds like a tale of two interpreters then</p>",
+        "id": 234040334,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143280
+    },
+    {
+        "content": "<p>I dont even know what it is that makes miri slow (besides stacked borrows and validity checking which add a 10x or more overhead)</p>",
+        "id": 234040339,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143290
+    },
+    {
+        "content": "<p>Im not epxerienced in using profilers and interpreting their results, and Miri was \"fast enough\" for my experiments</p>",
+        "id": 234040376,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143336
+    },
+    {
+        "content": "<p>I wonder how feasible it is to <em>compile</em> miri executables like valgrind</p>",
+        "id": 234040394,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143362
+    },
+    {
+        "content": "<p>I think getting the speed up would be really useful for folks who are using miri as a UB detector</p>",
+        "id": 234040450,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143397
+    },
+    {
+        "content": "<p>well, valgrind isnt sound</p>",
+        "id": 234040564,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143525
+    },
+    {
+        "content": "<p>Ah, but we can do better</p>",
+        "id": 234040567,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143535
+    },
+    {
+        "content": "<p>ub-san would be the more interesting model to follow</p>",
+        "id": 234040569,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143537
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/MIR.20without.20places/near/234040567\">said</a>:</p>\n<blockquote>\n<p>Ah, but we can do better</p>\n</blockquote>\n<p>you cant do better with the valgrind approach</p>",
+        "id": 234040583,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143550
+    },
+    {
+        "content": "<p>you cant do sound UB detection <em>after</em> running an optimizing compiler on your code</p>",
+        "id": 234040587,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143567
+    },
+    {
+        "content": "<p>you need to instrument the code already during compilation, ub-san style</p>",
+        "id": 234040597,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143583
+    },
+    {
+        "content": "<p>As a first pass, I guess you could \"just\" turn miri into a proc-macro that adds instrumentation to the input code, as though you were just unrolling all the functions in miri</p>",
+        "id": 234040672,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143642
+    },
+    {
+        "content": "<p>Or I guess that could be expressed as a function MIR -&gt; rust code and then compile the rust code</p>",
+        "id": 234040700,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143700
+    },
+    {
+        "content": "<p>so no fancy memory managers here, just lots of hopefully inlined and optimized function calls</p>",
+        "id": 234040786,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618143746
+    },
+    {
+        "content": "<p>basically just instantiate Miri with some particular MIR, partially evaluate the heck out of that, and -- done :D</p>",
+        "id": 234040953,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143908
+    },
+    {
+        "content": "<p>the old story: interpreter + partial evaluation = compiler</p>",
+        "id": 234040964,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1618143918
+    }
+]

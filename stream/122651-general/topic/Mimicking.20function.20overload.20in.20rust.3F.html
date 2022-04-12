@@ -1,0 +1,132 @@
+<html>
+<head><meta charset="utf-8"><title>Mimicking function overload in rust? · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Mimicking.20function.20overload.20in.20rust.3F.html">Mimicking function overload in rust?</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="265708803"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Mimicking%20function%20overload%20in%20rust%3F/near/265708803" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Mimicking.20function.20overload.20in.20rust.3F.html#265708803">(Dec 21 2021 at 16:58)</a>:</h4>
+<p>Given the following code:</p>
+<div class="codehilite"><pre><span></span><code>pub trait DynConstErr {
+    fn get_const_err(self) -&gt; ConstEvalErr;
+
+    fn get_handled_err(self) -&gt; ErrorHandled;
+}
+
+pub struct ErrorHandled;
+impl DynConstErr for ErrorHandled {
+    fn get_const_err(self) -&gt; ConstEvalErr {
+        panic!()
+    }
+
+    fn get_handled_err(self) -&gt; ErrorHandled {
+        self
+    }
+}
+
+pub struct ConstEvalErr;
+impl DynConstErr for ConstEvalErr {
+    fn get_const_err(self) -&gt; ConstEvalErr {
+        self
+    }
+
+    fn get_handled_err(self) -&gt; ErrorHandled {
+        panic!()
+    }
+}
+
+pub enum Reveal {
+    Selection,
+    UserFacing,
+}
+
+enum ConstDedupError&lt;E: DynConstErr&gt; {
+    Silent(E),
+    Handled(ErrorReported),
+}
+
+impl&lt;E: DynConstErr&gt; ConstDedupError&lt;E&gt; {
+    fn new(e: E, reveal: Reveal) -&gt; Self {
+        match reveal {
+            Reveal::Selection =&gt; ConstDedupError::Silent(e),
+            Reveal::UserFacing =&gt; ConstDedupError::Handled(e.get_handled_err()),
+        }
+    }
+}
+
+pub enum ConstDedupResult&lt;T, E: DynConstErr&gt; {
+    Selection&lt;Result&lt;T, E&gt;&gt;,
+    UserFacing&lt;Result&lt;T, ErrorReported&gt;&gt;,
+}
+
+impl&lt;T, E: DynConstErr&gt; ConstDedupResult&lt;T, E&gt; {
+    pub fn new(val: Result&lt;T, E&gt;, reveal: Reveal) -&gt; Self {
+        match reveal {
+            Reveal::Selection =&gt; {
+                val.map_err(|e| ConstDedupError::new(e, reveal))
+            }
+            Reveal::UserFacing =&gt; {
+                val.map_err(|e| ConstDedupError::new(e, reveal))
+            }
+        }
+    }
+}
+
+fn use_result&lt;T, E: DynConstErr&gt;(val: ConstDedupResult&lt;T, E&gt;) {
+    match val {
+        ConstDedupResult::Selection(Ok(val)) =&gt; ...
+        ConstDedupResult::Selection(Err(e)) =&gt; {
+            // need to distinguish between type of e here
+        }
+        ....
+    }
+}
+</code></pre></div>
+<p>How can I prevent exposing <code>ConstDedupError</code> while still having a generic <code>new</code> method on <code>ConstDedupResult</code>? I feel that this is poorly designed, can anybody make some suggestions? </p>
+<p>I could write a non-generic version by creating another enum, say <code>SilentError</code> that allows me to distinguish between <code>ConstEvalErr</code> and <code>ErrorHandled</code> in <code>ConstDedupError::Silent</code>, but that would require having to expose both <code>ConstDedupError</code> and <code>SilentError</code> when creating <code>ConstDedupResult</code>. How can I design a generic <code>ConstDedupResult::new</code> function that still allows me to distinguish between the error types later? Is <code>TypeId</code> the only option here and if so, is it acceptable to use this inside the compiler (there isn't a single use of it currently)?</p>
+
+
+
+<a name="265710886"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Mimicking%20function%20overload%20in%20rust%3F/near/265710886" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Mimicking.20function.20overload.20in.20rust.3F.html#265710886">(Dec 21 2021 at 17:16)</a>:</h4>
+<p>Why do you want to avoid exposing <code>ConstDedupError</code>?</p>
+
+
+
+<a name="265712076"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Mimicking%20function%20overload%20in%20rust%3F/near/265712076" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Mimicking.20function.20overload.20in.20rust.3F.html#265712076">(Dec 21 2021 at 17:27)</a>:</h4>
+<p>Just convenience I guess. I'd like to avoid having to always repeat writing something like <code>ConstDedupResult::new(Err(ConstDedupError::Silent(SilentError::ConstErr(e))))</code> e.g., which isn't really that bad, but I was just wondering whether there was a more elegant approach.</p>
+
+
+
+<a name="265713081"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Mimicking%20function%20overload%20in%20rust%3F/near/265713081" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Mimicking.20function.20overload.20in.20rust.3F.html#265713081">(Dec 21 2021 at 17:35)</a>:</h4>
+<p>Why are there two <code>Ok</code> variants in <code>ConstDedupResult</code>? Does <code>ConstDedupResult::Selection(Ok(val))</code> mean the same thing as <code>ConstDedupResult::UserFacing(Ok(val))</code>?</p>
+
+
+
+<a name="265713252"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Mimicking%20function%20overload%20in%20rust%3F/near/265713252" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Mimicking.20function.20overload.20in.20rust.3F.html#265713252">(Dec 21 2021 at 17:37)</a>:</h4>
+<p>because if so it would be highly preferable to just use <code>Result</code> at the top level and have an enum only for the error case</p>
+
+
+
+<a name="265714211"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Mimicking%20function%20overload%20in%20rust%3F/near/265714211" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Mimicking.20function.20overload.20in.20rust.3F.html#265714211">(Dec 21 2021 at 17:46)</a>:</h4>
+<p>The <code>Ok</code> variants are equivalent, but the errors aren't. I'm trying to store query results in order to deduplicate calls, which is why I wrap them in <code>ConstDedupResult</code>. How would having a separate error enum simplify things here (this would just be <code>ConstDedupError</code> afaict)?</p>
+
+
+
+<a name="265743228"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Mimicking%20function%20overload%20in%20rust%3F/near/265743228" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Mimicking.20function.20overload.20in.20rust.3F.html#265743228">(Dec 21 2021 at 22:41)</a>:</h4>
+<p>It would at least eliminate the <code>ConstDedupResult::new</code> in your example. With some <code>From</code> impls you could get it down to just <code>Err(e)?</code></p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

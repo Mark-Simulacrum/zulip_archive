@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>Is anyone around here knowledgeable about debugging malloc issues with the default macOS allocator? Several users (and myself) are reporting a problem where rustc built without jemalloc often crashes with SIGABORT with the following:</p>\n<p>rustc(74427,0x700008ae8000) malloc: *** error for object 0x60000400bc00: pointer being realloc'd was not allocated<br>\nrustc(74427,0x700008ae8000) malloc: *** set a breakpoint in malloc_error_break to debug</p>\n<p>We have a backtrace, with the relevant frames being:</p>\n<div class=\"codehilite\"><pre><span></span><code>frame #5: 0x00007ff8197b1542 libsystem_malloc.dylib`realloc + 328\nframe #6: 0x000000010b3df6f4 librustc_driver-e74dfddec80dd206.dylib`alloc::raw_vec::finish_grow::h95b47d0479269564 + 52\nframe #7: 0x000000010beaaaad librustc_driver-e74dfddec80dd206.dylib`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve::do_reserve_and_handle::h9a25a6cccb7e4cb0 + 125\nframe #8: 0x000000010b35053e librustc_driver-e74dfddec80dd206.dylib`rustc_expand::mbe::quoted::parse::h1bce1dc409525940 + 910\nframe #9: 0x000000010b35033b librustc_driver-e74dfddec80dd206.dylib`rustc_expand::mbe::quoted::parse::h1bce1dc409525940 + 395\n</code></pre></div>\n\n<p>I can easily reproduce.  However, I haven't been able to reproduce with debug enabled.  I've been playing with the various Malloc* environment variables, but they haven't provided any insight.</p>",
+        "id": 263955993,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1638849617
+    },
+    {
+        "content": "<p>Smells like a problem where there are two different allocators in play, and a pointer produced by one gets given to the other. But I don't know how/why that would occur in the scenario you described</p>",
+        "id": 263956542,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638850310
+    },
+    {
+        "content": "<p>There's a rayon issue like that too:<br>\n<a href=\"https://github.com/rayon-rs/rayon/issues/901\">https://github.com/rayon-rs/rayon/issues/901</a></p>",
+        "id": 263956663,
+        "sender_full_name": "cuviper",
+        "timestamp": 1638850449
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120989\">@nnethercote</span> That message is created in a use-after-free.  I think that is a more likely candidate than multiple allocators being involved.</p>",
+        "id": 263959865,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1638854342
+    },
+    {
+        "content": "<p>Yep, that'll do it too</p>",
+        "id": 263959889,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638854378
+    },
+    {
+        "content": "<p>Weird combination to have a vector that is freed and then resized</p>",
+        "id": 263959944,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638854426
+    },
+    {
+        "content": "<p>Not sure if this is the issue but... it's very hard to swap out the default allocator on macOS.</p>\n<p>System APIs will allocate memory out of the zones and pass it to free (one example: <a href=\"https://github.com/opensource-apple/objc4/blob/master/runtime/hashtable2.mm#L64-L68\">https://github.com/opensource-apple/objc4/blob/master/runtime/hashtable2.mm#L64-L68</a>). The allocations here often happen inside DYLD and run prior to process startup, before you have a chance to replace the default zone.</p>\n<p>Note that this is more-or-less documented here: <a href=\"https://opensource.apple.com/source/Libc/Libc-825.26/include/malloc/malloc.h.auto.html\">https://opensource.apple.com/source/Libc/Libc-825.26/include/malloc/malloc.h.auto.html</a> on the doc for <code>size</code>:</p>\n<blockquote>\n<p>returns the size of a block or 0 if not in this zone; must be fast, especially for negative answers</p>\n</blockquote>\n<p>The expectation is:</p>\n<ul>\n<li>\n<p>If you replace <code>free</code>, it has to do the same thing as the default <code>free</code>, and walk the list of all registered zones and ask each one if it's the owner of the allocation, freeing it with the first one that  returns a positive size. This is very slow, and is why <code>free</code> on macOS has such terrible perf.</p>\n<p>In practice you can <em>sometimes</em> get around it by interposing more aggressively, e.g. <a href=\"https://github.com/microsoft/mimalloc/issues/313\">https://github.com/microsoft/mimalloc/issues/313</a>, but I suspect there could still be system APIs which walk the zone list, grab some non-default zone (the purgeable zone or something, perhaps), and then free with global free.</p>\n</li>\n<li>\n<p>If you replace the global allocator by installing a zone, it must be able to detect when the pointer being freed did not come from it. This is unlike most fast mallocs, which treat it as UB to free something not allocated.</p>\n</li>\n</ul>\n<p>This is a pretty abysmal situation for the userspace allocation on macOS, and I believe is part of why the swift compiler just leaks all allocations. Free is too slow (unlikely to be viable for us, ofc).</p>",
+        "id": 263962597,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1638857314
+    },
+    {
+        "content": "<p>It would be interesting to see how much the max RSS changes by just never dropping anything - rustc already uses an arena allocator so I can believe it might not increase it that much</p>",
+        "id": 264003866,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1638885258
+    },
+    {
+        "content": "<p>Compiling the <code>core</code> crate did 8.46GiB malloc allocations on my system.  Not as much as I expected, though I suspect that doesn't include mmap stuff.</p>",
+        "id": 264015263,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1638890359
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"232545\">Joshua Nelson</span> <a href=\"#narrow/stream/182449-t-compiler.2Fhelp/topic/macos.20malloc.20debugging/near/264003866\">said</a>:</p>\n<blockquote>\n<p>It would be interesting to see how much the max RSS changes by just never dropping anything - rustc already uses an arena allocator so I can believe it might not increase it that much</p>\n</blockquote>\n<p>That would make rls leak memory.</p>",
+        "id": 264020218,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1638892355
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"133247\">bjorn3</span> <a href=\"#narrow/stream/182449-t-compiler.2Fhelp/topic/macos.20malloc.20debugging/near/264020218\">said</a>:</p>\n<blockquote>\n<p>That would make rls leak memory.</p>\n</blockquote>\n<p>I believe RLS on linux already has very significant leaks (<a href=\"https://github.com/rust-lang/rust/issues/56980\">#56980</a>).</p>",
+        "id": 264021829,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1638892973
+    },
+    {
+        "content": "<p>I just read that issue and it looks like it was caused by an allocator update and not by a leak inside rustc itself.</p>",
+        "id": 264025440,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1638894231
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> sure - I think the experiment alone is interesting though. If it's feasible for rustc we could make it opt-out so RLS can turn it off.</p>",
+        "id": 264049745,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1638901954
+    }
+]

@@ -1,0 +1,230 @@
+[
+    {
+        "content": "<p>I am trying to figure out a recent memory usage regression and for that I had a look at how much memory constants are using. Something seems like it's not adding up. I created a small playground example that shows my problem: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=de695b292b3e1d6f21043293c76c2996\" target=\"_blank\" title=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=de695b292b3e1d6f21043293c76c2996\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=de695b292b3e1d6f21043293c76c2996</a></p>",
+        "id": 154638614,
+        "sender_full_name": "oli",
+        "timestamp": 1546947181
+    },
+    {
+        "content": "<p>The <code>Scalar</code> enum is 24 bytes in size (a <code>u128</code> (16 bytes) a <code>u8</code> (1 byte) and a discriminant (1 byte)). The missing 6 bytes are padding</p>",
+        "id": 154638677,
+        "sender_full_name": "oli",
+        "timestamp": 1546947255
+    },
+    {
+        "content": "<p>So far so good, I can live with that</p>",
+        "id": 154638682,
+        "sender_full_name": "oli",
+        "timestamp": 1546947266
+    },
+    {
+        "content": "<p>But then <code>ConstValue</code> takes up <code>56</code> bytes, even though I would have assumed the two <code>Scalar</code>s to add up to <code>48</code> and the discriminant of <code>ConstValue</code> would end up in the <code>Scalar</code>'s padding</p>",
+        "id": 154638700,
+        "sender_full_name": "oli",
+        "timestamp": 1546947317
+    },
+    {
+        "content": "<p>or can't we use that padding because writing to one of the scalars would overwrite the padding (and thus nuke the discriminant)?</p>",
+        "id": 154638708,
+        "sender_full_name": "oli",
+        "timestamp": 1546947339
+    },
+    {
+        "content": "<p>Contents of padding in a type are undefined</p>",
+        "id": 154639175,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546947974
+    },
+    {
+        "content": "<p>so while it would be possible to use \"padding\" that belonged to the containing type (i.e. <code>(Scalar, Scalar)</code>), it is not possible to use Scalar’s own padding for this.</p>",
+        "id": 154639190,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948014
+    },
+    {
+        "content": "<p>so... If I added an <code>enum Foo { Bar = 0 }</code> field to the type I could overwrite that assumption and niche opts could fill in the field with other values to encode the discriminant?</p>",
+        "id": 154639212,
+        "sender_full_name": "oli",
+        "timestamp": 1546948045
+    },
+    {
+        "content": "<p>Maybe I explained it unwell… The niche finding optimisation should not and cannot, I believe, operate recursively. I.e. regardless of what padding <code>Scalar</code> has, niche filling a <code>(Scalar, Scalar)</code> sees a tuple of two opaque 24-byte blobs… I believe…</p>",
+        "id": 154639273,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948141
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 154639285,
+        "sender_full_name": "oli",
+        "timestamp": 1546948175
+    },
+    {
+        "content": "<p>A good reason, as you intuited, would be somebody overwriting the padding of one of the <code>Scalar</code>s in case a reference was taken to it and assigned through that.</p>",
+        "id": 154639353,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948257
+    },
+    {
+        "content": "<p>still. If I filled the padding with a known enum like <code>bool</code>, I get another <code>254</code> values to assign to that field for encoding that another variant is in use here</p>",
+        "id": 154639423,
+        "sender_full_name": "oli",
+        "timestamp": 1546948342
+    },
+    {
+        "content": "<p>If you changed <code>Scalar</code> itself, sure.</p>",
+        "id": 154639512,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948461
+    },
+    {
+        "content": "<p>actually</p>",
+        "id": 154639528,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948476
+    },
+    {
+        "content": "<p>hmm</p>",
+        "id": 154639529,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948477
+    },
+    {
+        "content": "<p><code>bool</code> is represented as a byte in memory with two valid values</p>",
+        "id": 154639538,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948499
+    },
+    {
+        "content": "<p>&amp;bool cannot be anything other than 1 or 0 when dereferenced, and if we were to \"niche-fill\" that, it would be expensive af</p>",
+        "id": 154639553,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948538
+    },
+    {
+        "content": "<p>because every use of <code>bool</code> would have to mask for the single bit</p>",
+        "id": 154639604,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948571
+    },
+    {
+        "content": "<p>my turn in having explained badly</p>",
+        "id": 154639613,
+        "sender_full_name": "oli",
+        "timestamp": 1546948598
+    },
+    {
+        "content": "<p>But perhaps something like <code>#[compiler_builtin] struct ByteSizedNiche;</code> would work?</p>",
+        "id": 154639626,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948624
+    },
+    {
+        "content": "<p>I don't want niche optimizations to write anything but <code>0</code> and <code>1</code> to the bool field as long as we are in the variant that has that bool</p>",
+        "id": 154639633,
+        "sender_full_name": "oli",
+        "timestamp": 1546948654
+    },
+    {
+        "content": "<p>Other variants who only have padding here can use the field for encoding their discriminant</p>",
+        "id": 154639642,
+        "sender_full_name": "oli",
+        "timestamp": 1546948679
+    },
+    {
+        "content": "<p>as long as all variants have padding here</p>",
+        "id": 154639684,
+        "sender_full_name": "oli",
+        "timestamp": 1546948687
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124288\">@Oli</span> sure.</p>",
+        "id": 154639692,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948698
+    },
+    {
+        "content": "<p>but then you have 2 discriminant values for a single variant?</p>",
+        "id": 154639700,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948743
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 154639715,
+        "sender_full_name": "oli",
+        "timestamp": 1546948773
+    },
+    {
+        "content": "<p>well I wanted <code>enum Foo { Bar = 0 }</code> anyway</p>",
+        "id": 154639722,
+        "sender_full_name": "oli",
+        "timestamp": 1546948786
+    },
+    {
+        "content": "<p>which does not sound so much of a problem until you get to things like <code>std::mem::discriminant_value()</code>.</p>",
+        "id": 154639725,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948788
+    },
+    {
+        "content": "<p>yaeh idk, the current optimisation is definitely more conservative than it needs to be at times.</p>",
+        "id": 154639802,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948860
+    },
+    {
+        "content": "<p><code>Result&lt;&amp;'static u32, Foo&gt;</code> is 8 bytes, so we are doing this correctly already <span class=\"emoji emoji-1f615\" title=\"confused\">:confused:</span></p>",
+        "id": 154639824,
+        "sender_full_name": "oli",
+        "timestamp": 1546948896
+    },
+    {
+        "content": "<p>What is <code>Foo</code> here?</p>",
+        "id": 154639881,
+        "sender_full_name": "nagisa",
+        "timestamp": 1546948949
+    },
+    {
+        "content": "<p><code>enum Foo { Bar = 0 }</code></p>",
+        "id": 154639885,
+        "sender_full_name": "oli",
+        "timestamp": 1546948957
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 154639893,
+        "sender_full_name": "oli",
+        "timestamp": 1546948973
+    },
+    {
+        "content": "<p>doesn't work with <code>#[repr(u64)]</code></p>",
+        "id": 154639905,
+        "sender_full_name": "oli",
+        "timestamp": 1546948992
+    },
+    {
+        "content": "<p>it only worked as a ZST</p>",
+        "id": 154639907,
+        "sender_full_name": "oli",
+        "timestamp": 1546949002
+    },
+    {
+        "content": "<p>that explains it</p>",
+        "id": 154639909,
+        "sender_full_name": "oli",
+        "timestamp": 1546949006
+    },
+    {
+        "content": "<p>we're just not doing this optimization :D</p>",
+        "id": 154639911,
+        "sender_full_name": "oli",
+        "timestamp": 1546949013
+    },
+    {
+        "content": "<p>fix it; fix it; fix it</p>",
+        "id": 154663607,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1546970686
+    }
+]

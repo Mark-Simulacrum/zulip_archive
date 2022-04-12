@@ -1,0 +1,698 @@
+[
+    {
+        "content": "<p>Hi!</p>\n<p>I wrote an abstraction that caches a buffer split into many mutable sub slices. The use case is for a framebuffer where we want to be able to split it according to some layout for writing, and then we want to use the same reference to read from the same buffer which means giving up on all the computed splits. In order not to lose all that computation, I'm caching them in a type that uses unsafe and only grants access to the splits if it's provided with the same exact reference as the one they were created from.</p>\n<p>However, I see that miri considers this UB and I'm having a bit of a hard time understanding why.</p>",
+        "id": 271288183,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644417930
+    },
+    {
+        "content": "<p><a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=01a3d38c1915c266faa2d7137bff5239\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=01a3d38c1915c266faa2d7137bff5239</a></p>",
+        "id": 271288664,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644418133
+    },
+    {
+        "content": "<p>The issue seems to be around storing the cached splits between accesses since the first access seems to pass fine, which means that storing it in the cache and then transmuting it seems to be the main issue.</p>",
+        "id": 271289194,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644418356
+    },
+    {
+        "content": "<p>My end goal here was to have a cache where I can store non-overlapping mutable sub-slices of a buffer and only have access to the when I have mutable access to the buffer itself.</p>",
+        "id": 271291177,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644419141
+    },
+    {
+        "content": "<p>Here is a simplified version that still fails: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=9363bbc4c9a5c240f34fd5c77fc8c4e6\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=9363bbc4c9a5c240f34fd5c77fc8c4e6</a></p>",
+        "id": 271311403,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644426391
+    },
+    {
+        "content": "<p>the <code>&amp;mut buffer</code> in line 37 invalidates the pointers created in the <code>new</code> call in line 35. It doesn't matter that the pointers are equal, the first pointers are now invalid</p>",
+        "id": 271313416,
+        "sender_full_name": "oli",
+        "timestamp": 1644427149
+    },
+    {
+        "content": "<p>Does the same happen here: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=0895607f812aaa0e5030d64056c05d20\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=0895607f812aaa0e5030d64056c05d20</a><br>\n?</p>",
+        "id": 271313951,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644427335
+    },
+    {
+        "content": "<p>miri seems to pass this one.</p>",
+        "id": 271313973,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644427346
+    },
+    {
+        "content": "<p>Also, why would <code>&amp;mut buffer</code> invalidate the pointers? Isn't this what <code>RefCell</code> does?</p>",
+        "id": 271314234,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644427441
+    },
+    {
+        "content": "<p>Miri passes with the default flags. It does not pass if you enable all of Stacked Borrows with <code>MIRIFLAGS=-Zmiri-tag-raw-pointers</code>.</p>",
+        "id": 271314356,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1644427471
+    },
+    {
+        "content": "<p>Stacked Borrows is an absolute minefield for implementing code like this. In general, under Stacked Borrows, you need to avoid creating unique references. The code it makes you write can seem a bit convoluted as a result.</p>",
+        "id": 271315053,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1644427713
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"351014\">Dragoș Tiselice</span> <a href=\"#narrow/stream/269128-miri/topic/Pointer.20caching/near/271314234\">said</a>:</p>\n<blockquote>\n<p>Also, why would <code>&amp;mut buffer</code> invalidate the pointers? Isn't this what <code>RefCell</code> does?</p>\n</blockquote>\n<p><code>&amp;mut</code> stands for <em>unique</em> / <em>exclusive</em> / unaliased pointer; <code>RefCell</code> and other like abstractions are based on <em>shared</em> pointers. Usually the trick is, when receiving  a <code>&amp;mut …</code>, to use something semantically akin to <a href=\"https://doc.rust-lang.org/stable/std/cell/struct.Cell.html#method.from_mut\">https://doc.rust-lang.org/stable/std/cell/struct.Cell.html#method.from_mut</a> to loosen the \"exclusive &amp; mutable\" invariant down to \"shared &amp; mutable\". then you can freely interleave these <code>&amp;</code> accesses, provided you be careful when temporarily upgrading them back to <code>&amp;mut</code>, to only do so when the lifetimes in the API, or runtime tools, somehow guarantee that temporary exclusivity</p>",
+        "id": 271315237,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1644427776
+    },
+    {
+        "content": "<p><code>Cell::from_mut</code> is similar in spirit to what I'm trying to achieve here.</p>",
+        "id": 271315570,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644427883
+    },
+    {
+        "content": "<p>I guess the main issue in my example is the provenience of the pointer used to create the unique reference?</p>",
+        "id": 271315750,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644427935
+    },
+    {
+        "content": "<p>The current problems you're running into are aliasing, not necessarily provenance. I think you can get around the problems with Stacked Borrows invalidation based on creation of &amp;mut by not creating &amp;mut. Just pay attention to calling methods that have a &amp;mut receiver.</p>",
+        "id": 271317400,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1644428435
+    },
+    {
+        "content": "<p>That makes sense, but I'm having issues seeing where I'm creating &amp;mut's. Lemme try to digest it further.</p>",
+        "id": 271317725,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644428534
+    },
+    {
+        "content": "<p>I guess this is caused by the fact that <code>slice</code> will be aliased by the sub-slices that I'm returning in <code>fn access</code>. But without passing <code>slice</code> as a <code>&amp;mut</code> I won't be able to grab its lifetime.</p>",
+        "id": 271319117,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644428978
+    },
+    {
+        "content": "<p>Maybe a better question to ask would be: for such saved raw slices (ptr + len), is there any way you can produce unique <code>&amp;mut</code> slices from them that would be accepted by Stacked Borrows?</p>",
+        "id": 271321472,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644429730
+    },
+    {
+        "content": "<p>In these cases I like to use <code>&amp;UnsafeCell&lt;[T]&gt;</code> instead of <code>&amp;mut [T]</code> everywhere. Then, using raw pointer arithmetic, I can create disjoint subslices (also passed around as <code>&amp;UnsafeCell&lt;[T]&gt;</code> or <code>&amp;UnsafeCell&lt;T&gt;</code>) and either write directly through the raw pointer or temporarily upgrade it to a <code>&amp;mut T</code> where needed, without invalidating the pointer(s) that it was reborrowed from.</p>",
+        "id": 271336822,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644436041
+    },
+    {
+        "content": "<p>Caveat: this will make <code>T</code> invariant, so it won't work so well when <code>T</code> has any lifetimes attached, unless you apply more tricks to work-around that on a case-by-case basis.</p>",
+        "id": 271337017,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644436110
+    },
+    {
+        "content": "<p>but for stuff like <code>&amp;UnsafeCell&lt;[u8]&gt;</code> this approach works great.</p>",
+        "id": 271337138,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644436173
+    },
+    {
+        "content": "<p>If you are concerned about preserving variance, then raw pointers and/or <code>NonNull</code> are your next best bet.</p>",
+        "id": 271337277,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644436230
+    },
+    {
+        "content": "<p>Actually, <code>NonNull</code> is better, <code>*mut T</code> is also invariant in <code>T</code> :)</p>",
+        "id": 271337392,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644436282
+    },
+    {
+        "content": "<p><code>T</code> being invariant works fine. The issue with this approach is that I really wanted to have an API that lets end-users use this without having to write unsafe code.</p>",
+        "id": 271338154,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644436577
+    },
+    {
+        "content": "<p><code>NonNull&lt;[T]&gt;</code> and <code>&amp;UnsafeCell&lt;[T]&gt;</code> both promise the pointer won't be null, but differ in a couple of ways: the latter encodes the promise that the pointee is properly aligned and properly initialized and <code>NonNull</code> does not, which matters for some compiler optimizations.</p>",
+        "id": 271338214,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644436602
+    },
+    {
+        "content": "<p>Another issue is that I don't have ownership of the array.</p>",
+        "id": 271338237,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644436614
+    },
+    {
+        "content": "<p><code>&amp;UnsafeCell&lt;[T]&gt;</code> is safe to pass around, as long as the end-users don't access the pointee. Alternatively, you can exchange <code>&amp;Cell&lt;[T]&gt;</code> or <code>Cell&lt;T&gt;</code> with your end-users as a safe encapsulation for accessing the inner <code>&amp;UnsafeCell</code>.</p>",
+        "id": 271338394,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644436681
+    },
+    {
+        "content": "<p>(it's also sound to cast <code>&amp;mut T</code> to a <code>&amp;UnsafeCell&lt;T&gt;</code> in case you don't have ownership to the array, a mutable borrow would suffice in this case)</p>",
+        "id": 271338684,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644436774
+    },
+    {
+        "content": "<p><code>Cell::from_mut</code> has a safe API for this, for <code>&amp;UnsafeCell</code> you have to resort to unsafe (but sound) pointer casts to obtain it from a <code>&amp;mut T</code>.</p>",
+        "id": 271338860,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644436816
+    },
+    {
+        "content": "<p><code>Cell::from_mut</code> could be promising. But I'm not completely sure whether it'll work.</p>",
+        "id": 271338916,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644436830
+    },
+    {
+        "content": "<p>Exactly.</p>",
+        "id": 271338948,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644436839
+    },
+    {
+        "content": "<p>Another suggestion (just shooting ideas here :P) is to change the API to not give out mutable references, but rather accept an immutable reference from the caller, which your API will then internally write to the correct memory location (I guess giving a <code>&amp;mut T</code> or a <code>&amp;Cell&lt;T&gt;</code> to the end-user is more desirable if you're concerned about stuff like minimal copying etc.).</p>",
+        "id": 271339386,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644437025
+    },
+    {
+        "content": "<p>It's just not very clear to me whether <code>Cell::from_mut</code> could let me cache splits.</p>",
+        "id": 271339816,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644437172
+    },
+    {
+        "content": "<p>Ah, how I intended that is if you have a <code>&amp;UnsafeCell&lt;T&gt;</code> for which you know it's safe to let a end-user to write to that location (e.g. no <code>Sync</code> accesses from multiple threads), then you can  hand-out a reference <code>r</code> where <code>let r: &amp;Cell&lt;T&gt; = Cell::from_mut(unsafe { &amp;mut *unsafe_cell.get() });</code></p>",
+        "id": 271340344,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644437423
+    },
+    {
+        "content": "<p>To the caller <code>Cell&lt;T&gt;</code> is a safe interface, but internally within the API you'd have to resort to a bit of unsafe to obtain the right pointer to build the temporary <code>&amp;mut T</code>.</p>",
+        "id": 271340497,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644437511
+    },
+    {
+        "content": "<p>The issue is that I actually need a long-living object that will repeatedly obtain the <code>&amp;mut [T]</code>. Since the pointer is expected to be the same, I'm trying to cache the sub-slices.</p>",
+        "id": 271340717,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644437617
+    },
+    {
+        "content": "<p>The exact use case is rendering once per frame to a framebuffer.</p>",
+        "id": 271340804,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644437653
+    },
+    {
+        "content": "<p>Which comes in the form of a <code>&amp;mut [u8]</code>.</p>",
+        "id": 271340834,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644437667
+    },
+    {
+        "content": "<p>I'm also trying to write to the framebuffer from multiple threads, so <code>Cell</code> won't work.</p>",
+        "id": 271340965,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644437735
+    },
+    {
+        "content": "<p>are the subslices that the multiple threads are writing to disjoint in this case?</p>",
+        "id": 271341779,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644438159
+    },
+    {
+        "content": "<p>Yes.</p>",
+        "id": 271341811,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644438173
+    },
+    {
+        "content": "<p>That's why I liked the first design: it forces you to come up with splits from an original slice, so they are guaranteed to be disjoint.</p>",
+        "id": 271341876,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644438214
+    },
+    {
+        "content": "<p>I see, but now the problem becomes the recombination of those slices under Stacked Borrows. Hmm, I think the only way to work-around that I think is to keep one main slice around, and only hand-out disjoint subslices to different threads. Then recover the original \"main slice\" at the end when all the threads finish the work.</p>",
+        "id": 271342055,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644438299
+    },
+    {
+        "content": "<p>A while back I published a crate that may help with drawing inspiration how to do this: <a href=\"https://crates.io/crates/deferred-reference\">https://crates.io/crates/deferred-reference</a></p>",
+        "id": 271342103,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644438318
+    },
+    {
+        "content": "<p>Do you need to recover it?</p>",
+        "id": 271342169,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644438349
+    },
+    {
+        "content": "<p>Mandatory heads-up: it currently has some soundness issues which I have not gotten around to fixing yet :)</p>",
+        "id": 271342171,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644438351
+    },
+    {
+        "content": "<p>I guess you only need to recover the original whole slice if you want to pass it to the next consumer. If there is no next consumer, then recovering it is optional.</p>",
+        "id": 271342336,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644438419
+    },
+    {
+        "content": "<p>The way the concept of \"Deferred References\" works, is that you can start out with a full slice, and obtain reference to subslices without taking a reference to the entire original slice (and in this way you can avoid invalidating any <code>&amp;mut</code> references that were already given out to other subslices.</p>",
+        "id": 271342712,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644438593
+    },
+    {
+        "content": "<p>e.g. this example from the docs: <a href=\"https://docs.rs/deferred-reference/0.1.2/deferred_reference/struct.Deferred.html#method.get_mut\">https://docs.rs/deferred-reference/0.1.2/deferred_reference/struct.Deferred.html#method.get_mut</a></p>",
+        "id": 271342860,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644438657
+    },
+    {
+        "content": "<p>This looks very impressive, but since it still keeps a reference from the original slice, it doesn't help with my use case. :')</p>",
+        "id": 271343492,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644438937
+    },
+    {
+        "content": "<p>Hmm, what about using the <code>slice</code> passed to <code>.access(slice)</code> and re-execute the closure to split it into identical slices, instead of re-using the inner <code>splits_raw</code> pointer?</p>",
+        "id": 271344452,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644439392
+    },
+    {
+        "content": "<p>That improved the situation, but re-executing the closure is exactly what I'm trying to avoid. Imagine a 4K framebuffer where this can be expensive to execute each frame.</p>",
+        "id": 271344706,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644439507
+    },
+    {
+        "content": "<p>I understand, in that case I'm afraid using something like <code>&amp;UnsafeCell&lt;[T]&gt;</code> is the only option. It might still be possible to do safely though, let me see if I can alter the example to see if I can get it to work, one moment :)</p>",
+        "id": 271345078,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644439704
+    },
+    {
+        "content": "<p>How do you produce the <code>&amp;UnsafeCell&lt;[T]&gt;</code>? I guess transmuting the <code>&amp;mut [T]</code> is the only way.</p>",
+        "id": 271345240,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644439796
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"351014\">Dragoș Tiselice</span> <a href=\"#narrow/stream/269128-miri/topic/Pointer.20caching/near/271345240\">said</a>:<br>\nTry to avoid <code>transmute</code>s on <code>repr(Rust)</code> data types such as pointers or references to <code>!Sized</code> types (wide pointers). Instead, in this instance, a pointer cast would be less dangerous:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">from_mut</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">slice</span>: <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"nb\">_</span> <span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">T</span><span class=\"p\">])</span><span class=\"w\"></span>\n<span class=\"w\">  </span>-&gt; <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"nb\">_</span> <span class=\"nc\">UnsafeCell</span><span class=\"o\">&lt;</span><span class=\"p\">[</span><span class=\"n\">T</span><span class=\"p\">]</span><span class=\"o\">&gt;</span><span class=\"w\"></span>\n<span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"o\">&amp;*</span><span class=\"p\">(</span><span class=\"n\">slice</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">T</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">UnsafeCell</span><span class=\"o\">&lt;</span><span class=\"p\">[</span><span class=\"n\">T</span><span class=\"p\">]</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 271345869,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1644440106
+    },
+    {
+        "content": "<p>Like so: <a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2021&amp;gist=dce42d18d1ed589e19df860bb9c92fe2\">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2021&amp;gist=dce42d18d1ed589e19df860bb9c92fe2</a></p>",
+        "id": 271345882,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440110
+    },
+    {
+        "content": "<p>(without transmute or pointer cast :) )</p>",
+        "id": 271345941,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440141
+    },
+    {
+        "content": "<p>(from the end-user's perspective)</p>",
+        "id": 271345984,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440159
+    },
+    {
+        "content": "<p>It does require a nightly feature though</p>",
+        "id": 271346113,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440205
+    },
+    {
+        "content": "<p>otherwise we can't take the slice pointer length without creating a reference to it</p>",
+        "id": 271346140,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440219
+    },
+    {
+        "content": "<p>I've been trying to nudge it along into getting stabilized (at least for <code>NonNull::len</code>), but the <a href=\"https://github.com/rust-lang/rust/issues/71146\">tracking issue</a> is not so active atm, I'll give it another nudge one of these days. It's a really useful API, I'm using it in a couple of places myself, too :)</p>",
+        "id": 271346425,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440367
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"400735\">Pointerbender</span> <a href=\"#narrow/stream/269128-miri/topic/Pointer.20caching/near/271346140\">said</a>:</p>\n<blockquote>\n<p>otherwise we can't take the slice pointer length without creating a reference to it</p>\n</blockquote>\n<p>AFAIK, in cases such as this one it can be polyfilled as <code>(&amp;*(raw_slice as *const [()])).len()</code></p>",
+        "id": 271346624,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1644440435
+    },
+    {
+        "content": "<p>Omg, that's clever, this opens up so many possibilities! <span aria-label=\"smiley\" class=\"emoji emoji-1f603\" role=\"img\" title=\"smiley\">:smiley:</span></p>",
+        "id": 271346764,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440502
+    },
+    {
+        "content": "<p>That even works for slice lengths above <code>isize::MAX</code> too!</p>",
+        "id": 271346885,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440551
+    },
+    {
+        "content": "<p>(not likely to encounter those in practice, but apparently it's possible to encounter them on 32-bit systems with Physical Address Extension enabled :P )</p>",
+        "id": 271346964,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440591
+    },
+    {
+        "content": "<p>Thanks for sharing that little nugget, that made my day :)</p>",
+        "id": 271347130,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644440666
+    },
+    {
+        "content": "<p>Thank you so much for the help! :) Does passing <code>UnsafeCell</code> make it work with miri?</p>",
+        "id": 271348547,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644441349
+    },
+    {
+        "content": "<p>Yes, on the playground it does, I think that has the <code>MIRIFLAGS=\"-Zmiri-track-raw-pointers\"</code> flag turned on by default, but I'm not 100% sure.</p>",
+        "id": 271348778,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644441466
+    },
+    {
+        "content": "<p>Let me run it locally real quick to make sure, one sec.</p>",
+        "id": 271348809,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644441489
+    },
+    {
+        "content": "<p>Yep, it passes with <code>MIRIFLAGS=\"-Zmiri-track-raw-pointers\"</code>, too. Note that end-users might be tempted to create their own references into the <code>UnsafeCell</code> wrapper since it exposes an API to get the raw pointer. This would require <code>unsafe</code> on the end-user side, so therefore I think still counts as \"sound\", because it would require <code>unsafe</code> to trigger UB. But, if you want to take away this footgun you could wrap the <code>UnsafeCell</code> in a <code>#[repr(transparent)]</code> <code>FrameBuffer</code> wrapper struct so that end-users can't obtain a raw pointer.</p>",
+        "id": 271349396,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644441796
+    },
+    {
+        "content": "<p>Something like:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[repr(transparent)]</span><span class=\"w\"></span>\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">struct</span> <span class=\"nc\">FrameBuffer</span><span class=\"o\">&lt;</span><span class=\"n\">T</span>: <span class=\"o\">?</span><span class=\"nb\">Sized</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"k\">pub</span><span class=\"p\">(</span><span class=\"k\">crate</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">buffer</span>: <span class=\"nc\">UnsafeCell</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">impl</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"n\">FrameBuffer</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">new</span><span class=\"p\">(</span><span class=\"n\">buffer</span>: <span class=\"nc\">T</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">Self</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">      </span><span class=\"bp\">Self</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">buffer</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 271349682,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644441954
+    },
+    {
+        "content": "<p>A wrapper makes sense, but I think I can probably change the API a bit in order to hide this part. Thank you so much for the help! :) I hope, if anything, that this might prove to be a useful test case.</p>",
+        "id": 271349764,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644441989
+    },
+    {
+        "content": "<p>My pleasure, thanks for the fun puzzle :D</p>",
+        "id": 271349814,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644442016
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"351014\">@Dragoș Tiselice</span> I had an after-thought about this :) Since <code>SplitsCache</code> implements <code>Sync</code>, but <code>UnsafeCell</code> is not <code>Sync</code>, there is a soundness hole in the approach I suggested: it's possible to create multiple <code>SplitsCache</code> instances backed by the same memory slice and an end-user can safely (but unsoundly) share these between threads, this could in theory allow data races to the backing memory which is undefined behavior. In order to make this sound, you may need to globally keep track of slices that are being held by a <code>SplitsCache</code>, and not let a end-user create a second <code>SplitsCache</code> to a slice which is already wrapped in a <code>SplitsCache</code> somewhere else.</p>",
+        "id": 271411811,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644488808
+    },
+    {
+        "content": "<p>I think I finally understood the issue and, unfortunately, the solution with <code>UnsafeCell</code>doesn't work. The issue with this is that I want to be able to provide different <code>&amp;mut</code>s to <code>access</code>.</p>\n<p>E.g. there's a code that I don't own that serves <code>&amp;mut</code> every frame. If I simply covert those to <code>&amp;UnsafeCell&lt;[T]&gt;</code>, I'm just moving the problem to a different place, but the issue is still there since the pointer that ultimately ends up sent to <code>access</code> comes from a different <code>&amp;mut</code>.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">feed_framebuffer</span><span class=\"p\">(</span><span class=\"n\">framebuffer</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">])</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// This fails here because for every iteration of the loop below, you produce another &amp;mut.</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">uc</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">UnsafeCell</span><span class=\"o\">&lt;</span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">]</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">&amp;*</span><span class=\"p\">(</span><span class=\"n\">framebuffer</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">UnsafeCell</span><span class=\"o\">&lt;</span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">]</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">cache</span><span class=\"p\">.</span><span class=\"n\">access</span><span class=\"p\">(</span><span class=\"n\">uc</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">framebuffer</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"k\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">1920</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"mi\">1080</span><span class=\"p\">];</span><span class=\"w\"></span>\n\n<span class=\"k\">loop</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">feed_framebuffer</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">framebuffer</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Ofc, this would work if the <code>framebuffer</code> was stored as an <code>UnsafeCell&lt;[u8]&gt;</code>, but this is not code that I have control of. Is this use case something Stacked Borrows could accommodate? If not, I will have to provide my own types for the slices, but that's annoying I will be simply duplicating slice code.</p>",
+        "id": 271427109,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644498066
+    },
+    {
+        "content": "<p>And, yes, I've noticed that too (<code>Sync</code> unsoundness), but I was more concerned about the general solution because of the issue above.</p>",
+        "id": 271427259,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644498131
+    },
+    {
+        "content": "<p>Ah I see. The way Stacked Borrows works is that when you take out a \"fresh\" <code>&amp;mut</code> (i.e. not a reborrow) it invalidates all other pointers and references to the pointee. The <code>&amp;mut</code> then becomes the only exclusive reference to it.</p>",
+        "id": 271428446,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644498829
+    },
+    {
+        "content": "<p>Makes sense. I was under the impression that this is not the case. But I see the reasoning behind this. This does mean that the current design won't work, though. :(</p>",
+        "id": 271428572,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644498884
+    },
+    {
+        "content": "<blockquote>\n<p>E.g. there's a code that I don't own that serves &amp;mut every frame. If I simply covert those to &amp;UnsafeCell&lt;[T]&gt;, I'm just moving the problem to a different place, but the issue is still there since the pointer that ultimately ends up sent to access comes from a different &amp;mut.</p>\n</blockquote>\n<p>If there is a way to do all the work inside the loop, then this could still work. However, when the next <code>&amp;mut</code> comes around from the code you don't control, this means all prior pointers/references are now invalidated.</p>",
+        "id": 271428711,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644498957
+    },
+    {
+        "content": "<p>Exactly. And it will. There can be either Rust or C code that owns the framebuffer.</p>",
+        "id": 271428807,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644498997
+    },
+    {
+        "content": "<p>If you find a way to make it work, I'd be curious to hear how you did it :)</p>",
+        "id": 271429074,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644499137
+    },
+    {
+        "content": "<p>I made a small example for the sake of completion: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=211cb6c9f156f392f0a1c0a917357837\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=211cb6c9f156f392f0a1c0a917357837</a></p>",
+        "id": 271429833,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644499488
+    },
+    {
+        "content": "<p>Ah yes, the only way to satisfy Stacked Borrows there is to not cache the pointer, unfortunately :) I recall this being a problem because of the size of the frame buffers that might be passed. How about storing the slice indices internally instead of raw pointers? Then you can recreate the slices from the cached indices without re-executing the closure.</p>",
+        "id": 271430530,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644499828
+    },
+    {
+        "content": "<p>I had tried this in the past and the performance difference was noticeable. Mostly because some algorithms using this split the buffer into quite a lot of sub-slices.</p>",
+        "id": 271430689,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644499907
+    },
+    {
+        "content": "<p>It could be worth re-doing the experiment.</p>",
+        "id": 271430774,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644499936
+    },
+    {
+        "content": "<p>Was it doing slice index bounds checks in that earlier version? I'm not sure how much difference that would make, but it could alleviate the overhead by just a bit if it performs unchecked accesses to the slice.</p>",
+        "id": 271430992,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644500049
+    },
+    {
+        "content": "<p>(if the slice has the same length, then it would be sound to unchecked slice accesses, because those were calculated by the closure before that)</p>",
+        "id": 271431046,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644500085
+    },
+    {
+        "content": "<p>I think the issue is simply that it performance <em>some</em> work on the sub-slices which is enough to make the difference. Lemme try to see what <a href=\"http://godbolt.org\">godbolt.org</a> thinks.</p>",
+        "id": 271431095,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644500107
+    },
+    {
+        "content": "<p>That won't work since it will have to definitely offset the pointer. :')</p>",
+        "id": 271431204,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644500156
+    },
+    {
+        "content": "<p>So it's still O(sub-slices) work.</p>",
+        "id": 271431277,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644500178
+    },
+    {
+        "content": "<p>Ah yes that won't be constant-time :)</p>",
+        "id": 271431350,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644500223
+    },
+    {
+        "content": "<p>For a 4K framebuffer, this is around ~500K additions, which is definitely noticeable.</p>",
+        "id": 271431427,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644500267
+    },
+    {
+        "content": "<p>This would probably be fine if it could somehow be delayed, but that won't work since you can only have one root <code>&amp;mut</code>.</p>",
+        "id": 271431525,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644500306
+    },
+    {
+        "content": "<p>Another wild out-of-the-box idea: I'm guessing that the code you're not in charge of would not accept a PR that adds an option to work with <code>*mut</code> instead of <code>&amp;mut</code> in order to avoid pointer invalidations? :P</p>",
+        "id": 271431659,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644500382
+    },
+    {
+        "content": "<p>For all the current clients, that might be an option, but long-term it would be ideal to be flexible, I guess.</p>",
+        "id": 271431822,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644500442
+    },
+    {
+        "content": "<p>I have to say that I'm quite unhappy with trying to come up with a slice-like API for a <code>Slice&lt;'a&gt;</code> type. Any ideas how to make this more user-friendly?</p>",
+        "id": 271443627,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644505562
+    },
+    {
+        "content": "<p>What API features should it have and how is it used?</p>",
+        "id": 271443791,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644505617
+    },
+    {
+        "content": "<p>Well, I would imagine users wanting to write with random access, iterate mutably, maybe even split more.</p>",
+        "id": 271446149,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644506494
+    },
+    {
+        "content": "<p><code>slice[x] = foo;</code> will never work, though.</p>",
+        "id": 271446203,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644506516
+    },
+    {
+        "content": "<p>Would the users have a <code>&amp;mut Slice&lt;'a&gt;</code> at some point?</p>",
+        "id": 271447741,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644507122
+    },
+    {
+        "content": "<p>(this would run into the same problems under Stacked Borrows if it's used in the same manner as from the previous examples, I believe. That's why I'm asking to learn more about how it's used :) )</p>",
+        "id": 271447871,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644507183
+    },
+    {
+        "content": "<p>Could you share the struct definition for <code>Slice&lt;'a&gt;</code>?</p>",
+        "id": 271449262,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644507766
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"400735\">Pointerbender</span> <a href=\"#narrow/stream/269128-miri/topic/Pointer.20caching/near/271348778\">said</a>:</p>\n<blockquote>\n<p>Yes, on the playground it does, I think that has the <code>MIRIFLAGS=\"-Zmiri-track-raw-pointers\"</code> flag turned on by default, but I'm not 100% sure.</p>\n</blockquote>\n<p>AFAIK it does not; and sadly the flag cannot be user-controlled either</p>",
+        "id": 271454915,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1644509960
+    },
+    {
+        "content": "<p>if someone wants to tackle <a href=\"https://github.com/integer32llc/rust-playground/issues/446\">https://github.com/integer32llc/rust-playground/issues/446</a> that would be great :D</p>",
+        "id": 271455103,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1644510024
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">Slice</span><span class=\"o\">&lt;'</span><span class=\"na\">a</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">ptr</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">len</span>: <span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">_phantom</span>: <span class=\"nc\">PhantomData</span><span class=\"o\">&lt;&amp;'</span><span class=\"na\">a</span><span class=\"w\"> </span><span class=\"p\">()</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>This is what I've been thinking about. I'm also thinking about making it a write-only API since it'll have to deviate from slices too much anyway.</p>",
+        "id": 271458540,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644511493
+    },
+    {
+        "content": "<p>You can use <code>ptr::NonNull&lt;T&gt;</code> for the <code>ptr</code> to get nice \"packed\" <code>Option&lt;Slice&gt;</code>s, but then make sure to be using <code>PhantomData&lt;&amp;'a mut [T]&gt;</code> as the <code>_phantom</code> field, since that's what your type represents, and otherwise you could fall into accidentally being covariant</p>",
+        "id": 271471717,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1644516864
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"351014\">@Dragoș Tiselice</span> I got something you might like :) <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=5fb76c27d514e82807df48c0cc40ed6a\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=5fb76c27d514e82807df48c0cc40ed6a</a></p>",
+        "id": 271548883,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644571307
+    },
+    {
+        "content": "<p>There are a couple of tricks going on there.</p>\n<p>1) The struct definition of <code>Slice</code> is:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">struct</span> <span class=\"nc\">Slice</span><span class=\"o\">&lt;'</span><span class=\"na\">a</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">T</span>: <span class=\"o\">?</span><span class=\"nb\">Sized</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">slice</span>: <span class=\"kp\">&amp;</span><span class=\"o\">'</span><span class=\"na\">a</span> <span class=\"nc\">UnsafeCell</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>meaning that under Stacked Borrows, we can safely take out a <code>&amp;mut Slice&lt;T&gt;</code>, because asserting exclusive access to the <code>Slice</code> is not transitive to the pointee. In other words, a <code>&amp;mut Slice&lt;T&gt;</code> we can freely modify the <code>Slice</code> struct itself, but not  the memory location pointed to by the <code>slice</code> field. This ensures that the contents of the <code>UnsafeCell</code> retain their SharedReadWrite access, even when taking out a <code>&amp;mut Slice&lt;T&gt;</code>.</p>",
+        "id": 271549256,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644571498
+    },
+    {
+        "content": "<p>In essence, <code>&amp;mut Slice&lt;T&gt;</code> is a \"pointer to a pointer\" (this indirection is vital to making this work under stacked borrows).</p>",
+        "id": 271549416,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644571565
+    },
+    {
+        "content": "<p>2) I added a lifetime to the <code>CachedIncr</code>struct. Initially, this lifetime is unbounded, but it binds to the lifetime of <code>Slice&lt;'a, T&gt;</code> the first time the <code>incr</code> method is called.  This ensures that whenever a new <code>&amp;mut T</code> is given, it won't be possible to pass it to the same instance of <code>CachedIncr</code>, avoiding UB there (at this point, the end-user will just have to create a new <code>CachedIncr</code>).</p>",
+        "id": 271549690,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644571710
+    },
+    {
+        "content": "<p>3) At the same time, the end-user can retain access to the original <code>&amp;mut T</code>, hopefully this will save you from having to write custom slice APIs. Once the end-user uses the <code>&amp;'a mut T</code> again, this will invalidate the <code>Slice&lt;'a, T&gt;</code> due to compiler lifetime rules.</p>",
+        "id": 271549970,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644571832
+    },
+    {
+        "content": "<p>4) Since this is much closer to your original API and doesn't rely on the end-user passing around <code>&amp;UnsafeCell&lt;T&gt;</code> manually, this should also be sound w.r.t. <code>Sync</code> :)</p>",
+        "id": 271550272,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644571973
+    },
+    {
+        "content": "<p>(all this does mean that the end-user needs a new <code>CachedIncr</code> instance on every iteration of \"the loop\", because the new <code>&amp;mut T</code> has a different lifetime, but this is what Stacked Borrows \"demands\" anyway, so on paper this matches what's needed, I just hope that's also good enough for your use case :) )</p>",
+        "id": 271551706,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644572708
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/269128-miri/topic/Pointer.20caching/near/271454915\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"400735\">Pointerbender</span> <a href=\"#narrow/stream/269128-miri/topic/Pointer.20caching/near/271348778\">said</a>:</p>\n<blockquote>\n<p>Yes, on the playground it does, I think that has the <code>MIRIFLAGS=\"-Zmiri-track-raw-pointers\"</code> flag turned on by default, but I'm not 100% sure.</p>\n</blockquote>\n<p>AFAIK it does not; and sadly the flag cannot be user-controlled either</p>\n</blockquote>\n<p>Thanks for that insight Ralf :) I'm starting a sabbatical in April, if nobody got around to it yet by then I might take a stab at adding it :D</p>",
+        "id": 271553040,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1644573419
+    },
+    {
+        "content": "<p>Thanks a lot for the idea! I actually came up with something that seems to work quite well while working with different references and keeping the slice type: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=8b61b653d3771101197b5c6837ad7838\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=8b61b653d3771101197b5c6837ad7838</a></p>",
+        "id": 271584774,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644590003
+    },
+    {
+        "content": "<p>Ah, still seems to complain when run with <code>miri-tag-raw-pointers</code>.</p>",
+        "id": 271585748,
+        "sender_full_name": "Dragoș Tiselice",
+        "timestamp": 1644590452
+    }
+]

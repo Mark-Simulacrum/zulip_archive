@@ -1,0 +1,71 @@
+<html>
+<head><meta charset="utf-8"><title>Proposal: new attributes for use with raw-dylib · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Proposal.3A.20new.20attributes.20for.20use.20with.20raw-dylib.html">Proposal: new attributes for use with raw-dylib</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="274199959"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Proposal%3A%20new%20attributes%20for%20use%20with%20raw-dylib/near/274199959" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Richard Cobbe <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Proposal.3A.20new.20attributes.20for.20use.20with.20raw-dylib.html#274199959">(Mar 04 2022 at 22:56)</a>:</h4>
+<p>tl;dr: I'm proposing some new attributes for use with the <a href="https://github.com/rust-lang/rfcs/blob/master/text/2627-raw-dylib-kind.md">raw-dylib feature</a> that provide additional information necessary to use <code>stdcall</code> functions on Windows for 32-bit Intel.</p>
+<p>When creating a Windows DLL on 32-bit Intel that exports stdcall functions, it is possible to export the symbols from that DLL in one of four different ways, corresponding to the <a href="https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#import-name-type">import name types</a> from the PE-COFF spec.  Each import name type has a different way to represent the symbols in the DLL's export table, and the symbols in the import library have to match in order to get a usable image.  (Mismatches lead either to link failures when creating the image or to "undefined symbol" errors upon attempting to load the image.)  For details, see the comments on the <a href="https://github.com/rust-lang/rust/issues/58713">feature's tracking PR</a>.</p>
+<p>It is also possible for a single DLL to export symbols with different types simultaneously, although I do not know how common this is in practice.  (To do so, do not include <code>__declspec(dllexport)</code> annotations in the DLL's source code, and when linking, provide a .DEF file that contains both decorated (<code>_exported_function@8</code>) and undecorated (<code>second_function</code>) identifiers.)</p>
+<p>The import name type appears to affect only stdcall functions on Windows for x86-32.  This does not affect <code>extern "C"</code> functions on Windows for x86-32, or any functions on other platforms.  I suspect that it also affects fastcall and vectorcall functions on x86-32, but I haven't tested that yet -- and anyway there appear to be outstanding issues with code generation for those calling conventions, not related to the raw-dylib feature.</p>
+<p>To generate the correct import libraries for these cases, rustc has to know the import name type for each function defined in an <code>extern</code> block, and there is currently no way for users to provide this information.</p>
+<p>Therefore, I propose adding a new <em>MetaNameValueStr</em> key to the <code>#[link]</code> attribute.  This key would be called <code>import_name_type</code>, and it would accept three values: <code>"name"</code>, <code>"noprefix"</code>, and <code>"undecorate"</code>.  If not present on an <code>extern "stdcall"</code> or <code>extern "system"</code> block, it would default to <code>import_name_type = "name"</code>.</p>
+<p>Further, since it might be necessary to override this setting for individual functions, I propose adding a new attribute that could appear on individual functions in an <code>extern</code> block.  This attribute would have the form <code>#[link_import_name_type = "name"]</code>, and it would accept the same values as above.</p>
+<p>There is a fourth import name type defined in the spec, <code>IMPORT_ORDINAL</code>, but this case is already handled by the <code>#[link_ordinal]</code> attribute, and test coverage exists for it in src/test/run-make/raw-dylib-link-ordinal and src/test/run-make/raw-dylib-stdcall-ordinal.  It's probably worth emphasizing that, unlike the other three types, this type requires information specific to each function, so adding support for this to the <code>#[link]</code> attribute doesn't seem useful.</p>
+<p>Open points of discussion:</p>
+<ul>
+<li>Do we want to signal a warning or error if <code>import_name_type</code> or <code>#[link_import_name_type]</code> appears on or in an <code>extern</code> block with a calling convention that doesn't require it?  It would be kind of irritating to disallow users from providing this on platforms other than x86-32 Windows, though, so I don't think we should issue a diagnostic there.</li>
+<li>The value <code>"name"</code> isn't hugely descriptive, although it is (roughly) consistent with the PE-COFF spec.  I'm open to suggestions for alternatives.</li>
+<li>Is <code>import_name_type = "name"</code> a reasonable default?  The DLLs in the Windows API require <code>import_name_type = "undecorate"</code>, for what that's worth.</li>
+<li>Is it the right choice to provide a default at the library level and allow per-function overrides?  Or should we just require it on each individual function?</li>
+</ul>
+<p>Finally, what's the best process for continuing the conversation on this proposal?  Just continue this thread?  Should I propose a change on the tracking PR?  Or should I open a PR against the RFC?</p>
+<p>Feedback and questions welcome.</p>
+
+
+
+<a name="274446481"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Proposal%3A%20new%20attributes%20for%20use%20with%20raw-dylib/near/274446481" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Proposal.3A.20new.20attributes.20for.20use.20with.20raw-dylib.html#274446481">(Mar 07 2022 at 19:41)</a>:</h4>
+<p>I think given that this only affects i686-pc-windows, we don't need to offer maximum flexibility by adding the <code>#[link_import_name_type]</code> attribute. It seems sufficient to allow the user to specify the import name type in the <code>#[link]</code> attribute. If a library has mixed import name types, the user should be able to just do</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[link(name = </span><span class="s">"mylib"</span><span class="cp">, kind = </span><span class="s">"raw-dylib"</span><span class="cp">, import_name_type = </span><span class="s">"undecorate"</span><span class="cp">)]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">fn</span> <span class="nf">one</span><span class="p">(</span><span class="n">x</span>: <span class="kt">u32</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="cp">#[link(name = </span><span class="s">"mylib"</span><span class="cp">, kind = </span><span class="s">"raw-dylib"</span><span class="cp">, import_name_type = </span><span class="s">"name"</span><span class="cp">)]</span><span class="w"></span>
+<span class="k">extern</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">fn</span> <span class="nf">two</span><span class="p">(</span><span class="n">y</span>: <span class="kt">u32</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>and then place the functions in the appropriate extern block.</p>
+
+
+
+<a name="274446819"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Proposal%3A%20new%20attributes%20for%20use%20with%20raw-dylib/near/274446819" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Proposal.3A.20new.20attributes.20for.20use.20with.20raw-dylib.html#274446819">(Mar 07 2022 at 19:43)</a>:</h4>
+<blockquote>
+<p>Finally, what's the best process for continuing the conversation on this proposal? Just continue this thread? Should I propose a change on the tracking PR? Or should I open a PR against the RFC?</p>
+</blockquote>
+<p>It doesn't seem like this will impact a huge set of users and the motivations for the <code>raw-dylib</code> feature have already been explored in the RFC so I think <a href="https://github.com/rust-lang/compiler-team/issues/new?assignees=&amp;labels=major-change%2C+T-compiler&amp;template=major_change.md&amp;title=%28My+major+change+proposal%29">opening an MCP</a> would be the best next step.</p>
+
+
+
+<a name="274452481"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Proposal%3A%20new%20attributes%20for%20use%20with%20raw-dylib/near/274452481" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Richard Cobbe <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Proposal.3A.20new.20attributes.20for.20use.20with.20raw-dylib.html#274452481">(Mar 07 2022 at 20:27)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125250">Wesley Wiser</span> <a href="#narrow/stream/131828-t-compiler/topic/Proposal.3A.20new.20attributes.20for.20use.20with.20raw-dylib/near/274446819">said</a>:</p>
+<blockquote>
+<p>It doesn't seem like this will impact a huge set of users and the motivations for the <code>raw-dylib</code> feature have already been explored in the RFC so I think <a href="https://github.com/rust-lang/compiler-team/issues/new?assignees=&amp;labels=major-change%2C+T-compiler&amp;template=major_change.md&amp;title=%28My+major+change+proposal%29">opening an MCP</a> would be the best next step.</p>
+</blockquote>
+<p>Sounds good.  I've just opened <a href="https://github.com/rust-lang/compiler-team/issues/495">an MCP</a> for this proposal.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

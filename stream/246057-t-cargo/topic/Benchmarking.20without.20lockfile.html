@@ -1,0 +1,159 @@
+<html>
+<head><meta charset="utf-8"><title>Benchmarking without lockfile · t-cargo · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/index.html">t-cargo</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html">Benchmarking without lockfile</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="257772505"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/257772505" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eh2406 <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#257772505">(Oct 15 2021 at 22:08)</a>:</h4>
+<p>I was playing with adding a benchmark for the resolver ignoring a lock-file. Working off the code for <code>generate_lockfile</code> I got:</p>
+<div class="codehilite"><pre><span></span><code>                let mut registry = PackageRegistry::new(ws.config()).unwrap();
+                cargo::ops::resolve_with_previous(
+                    &amp;mut registry,
+                    ws,
+                    cli_features,
+                    *has_dev_units,
+                    None,
+                    None,
+                    specs,
+                    true,
+                )
+                .unwrap();
+</code></pre></div>
+<p>When I ran this it cloned all the git deps again. It is downloading the branch specified in the <code>Cargo.toml</code> not the commit in the <code>Cargo.lock</code>. Because I told it to ignore the lockfile. So this ends up just being a benchmark of cloning git repository's. <br>
+I tried making it use <code>offline</code>, so it no longer updates the git repos, but it also only looks at versions where we have downloaded the tarball in the temporary cargo home. Which ends up being equivalent to having a lock file.<br>
+Any thoughts on how to benchmark only the resolver without a lockfile?</p>
+
+
+
+<a name="257773339"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/257773339" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#257773339">(Oct 15 2021 at 22:15)</a>:</h4>
+<p>One thought I had is to just skip the workspaces with git dependencies, but I see that is almost all of the ones I chose. <span aria-label="grinning" class="emoji emoji-1f600" role="img" title="grinning">:grinning:</span></p>
+
+
+
+<a name="257773830"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/257773830" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#257773830">(Oct 15 2021 at 22:19)</a>:</h4>
+<p>Is it feasible to call <code>PackageRegistry::add_sources</code> for all of the git packages?  I think it would need to load <code>Cargo.lock</code> once to get the list of git packages.  I think that will force the <code>PackageRegistry</code> to think those are locked, and won't update them.</p>
+
+
+
+<a name="257774072"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/257774072" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#257774072">(Oct 15 2021 at 22:21)</a>:</h4>
+<p>I think something like <code>ops::load_pkg_lockfile(ws)?.unwrap().iter().map(|p| p.source_id()).filter(|sid| sid.is_git())</code> should get you a list of git source ids.</p>
+
+
+
+<a name="257774444"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/257774444" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#257774444">(Oct 15 2021 at 22:24)</a>:</h4>
+<p>Oh, hmm, <code>add_sources</code> might not work.  <code>add_preloaded</code> might?</p>
+
+
+
+<a name="261970427"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/261970427" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eh2406 <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#261970427">(Nov 18 2021 at 18:38)</a>:</h4>
+<p>Sorry for the delay, getting back to this today.<br>
+I am not seeing how to get a <code>Box&lt;dyn Source + 'cfg&gt;</code> to pass to <code>add_preloaded</code>. Thoughts?</p>
+
+
+
+<a name="261993035"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/261993035" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eh2406 <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#261993035">(Nov 18 2021 at 21:24)</a>:</h4>
+<p>Here is the ugly hack I have so far.<br>
+<a href="https://github.com/rust-lang/cargo/compare/master...Eh2406:resolve_without_lockfile">https://github.com/rust-lang/cargo/compare/master...Eh2406:resolve_without_lockfile</a></p>
+
+
+
+<a name="261993093"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/261993093" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eh2406 <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#261993093">(Nov 18 2021 at 21:25)</a>:</h4>
+<p>It still does a no op clone of the index pretty often</p>
+
+
+
+<a name="261993394"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/261993394" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eh2406 <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#261993394">(Nov 18 2021 at 21:27)</a>:</h4>
+<p>and pages of</p>
+<div class="codehilite"><pre><span></span><code>warning: Patch `packed_simd v0.3.4 (https://github.com/hsivonen/packed_simd?rev=8b4bd7d8229660a749dbe419a57ea01df9de5453#8b4bd7d8)` was not used in the crate graph.
+Check that the patched package version and available features are compatible
+with the dependency requirements. If the patch has a different version from
+what is locked in the Cargo.lock file, run `cargo update` to use the new
+version. This may also occur with an optional dependency that is not enabled.
+</code></pre></div>
+
+
+
+<a name="261993509"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/261993509" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eh2406 <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#261993509">(Nov 18 2021 at 21:28)</a>:</h4>
+<p>and pages of:</p>
+<div class="codehilite"><pre><span></span><code>Benchmarking resolve_without_lockfile/rust: Warming up for 3.0000 s    Updating `local-snapshot` index
+    Updating git repository `https://github.com/rust-lang/cargo`
+    Updating git repository `https://github.com/rust-lang/rustfmt`
+    Updating git repository `https://github.com/rust-lang/cargo`
+    Updating git repository `https://github.com/rust-lang/rustfmt`
+    Updating git repository `https://github.com/rust-lang/cargo`
+    Updating git repository `https://github.com/rust-lang/rustfmt`
+</code></pre></div>
+
+
+
+<a name="262013890"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/262013890" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#262013890">(Nov 19 2021 at 00:50)</a>:</h4>
+<p>Hm, those are tricky problems.</p>
+<p>For the index update, I can't see a way to trick it to avoid the update. There is a set in <code>Config</code> called <a href="https://github.com/rust-lang/cargo/blob/59076352592712c4efe11e916cc23ad47785bab2/src/cargo/util/config/mod.rs#L174-L175"><code>updated_sources</code></a> which will avoid updates for those sources. You can easily insert into that. However, the tricky part is getting the proper <code>SourceId</code> to insert. It needs the <code>SourceId</code> for the <em>replaced</em> source called "local-snapshot", but I don't see an easy way to get that. It is stuffed away in the <code>SourceConfigMap</code>, and that is private to the <code>PackageRegistry</code>.</p>
+<p>As for the <code>git</code> updates, it looks like those are due to <code>[patch]</code>. Again, that looks really difficult to avoid. When the original packages are unlocked, the code <a href="https://github.com/rust-lang/cargo/blob/59076352592712c4efe11e916cc23ad47785bab2/src/cargo/core/registry.rs#L587-L594">here</a> really wants to make sure that what it is querying against is up-to-date. However, the patched dependency doesn't exist in <code>Cargo.lock</code>, and thus there is nothing to call with <code>add_preloaded</code>. Somehow you'd need to get the <code>GitSource</code> of the original before it is patched.</p>
+
+
+
+<a name="262014071"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/262014071" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#262014071">(Nov 19 2021 at 00:52)</a>:</h4>
+<p>Maybe the workspaces that use git sources and patches aren't good candidates for this benchmark?</p>
+
+
+
+<a name="262087654"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/262087654" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eh2406 <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#262087654">(Nov 19 2021 at 16:11)</a>:</h4>
+<p>That suggests adding new workspaces that just rely on the index, or abusing the current workspaces by ignoring the parts that aren't helpful.</p>
+
+
+
+<a name="262484766"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/262484766" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#262484766">(Nov 23 2021 at 17:12)</a>:</h4>
+<p><span class="user-mention" data-user-id="120179">@Eh2406</span>  Here's a list of the largest dependency trees on <a href="http://crates.io">crates.io</a>:  <a href="https://gist.github.com/ehuss/e6db8a578f07a1e71fbcbeb4a74aa8ce">https://gist.github.com/ehuss/e6db8a578f07a1e71fbcbeb4a74aa8ce</a></p>
+<p>Might be worth thinking about using some of those.</p>
+<p>Another idea.  Try benchmarking all of them, and see if there are any major differences in performance, or is performance directly correlated to dependency size?</p>
+
+
+
+<a name="262484808"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/262484808" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#262484808">(Nov 23 2021 at 17:13)</a>:</h4>
+<p>We could then hand pick a few of the exceptional ones if it isn't linear.</p>
+
+
+
+<a name="262484865"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/262484865" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#262484865">(Nov 23 2021 at 17:13)</a>:</h4>
+<p><span class="user-mention" data-user-id="120518">@Eric Huss</span> Very nice.</p>
+
+
+
+<a name="262485013"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/262485013" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#262485013">(Nov 23 2021 at 17:14)</a>:</h4>
+<p>What did you use to generate that? And how easily could the tool you used label crates that have already appeared in the dependencies of a previous crate? Some of the large crates I see there seem likely to be dependencies of larger crates higher in the list.</p>
+
+
+
+<a name="262485398"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/Benchmarking%20without%20lockfile/near/262485398" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/Benchmarking.20without.20lockfile.html#262485398">(Nov 23 2021 at 17:17)</a>:</h4>
+<p>I used <code>rg -c -g '**/Cargo.lock' 'name = '</code></p>
+<p>and then sorted those numerically.</p>
+<p>It would require a bit more complexity to label ones that already include larger trees.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

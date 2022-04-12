@@ -1,0 +1,914 @@
+[
+    {
+        "content": "<h1>(Pre-RFC?) target-api/os-version</h1>\n<p>(long post ahead!)</p>\n<p>Hi everyone, I'd like to discuss some approaches to allowing conditional compilation based on a target API or OS version, with the specific focus on Windows (but ideally in a cross-platform way).</p>\n<p>The motivation would be to allow both the stdlib and crates to use the optimal system APIs. Currently, Rust has a \"soft\" minimum Windows target version of Windows 7, as seen here <a href=\"https://github.com/rust-lang/rust/issues/35471\">(1)</a><a href=\"https://github.com/rust-lang/rust/issues/34538\">(2)</a><a href=\"https://github.com/rust-lang/rust/issues/26654\">(3)</a>. The Tier 3 Windows XP target <a href=\"https://github.com/rust-lang/rust/issues/26654\">does not have</a> RWLocks, Condvars, working Panics, etc.</p>\n<p>On the other hand, the <a href=\"https://github.com/rust-lang/rust/blob/master/src/libstd/sys/windows/mutex.rs\">current <code>Mutex</code> impl</a> has a Windows XP fallback which wouldn't be needed for Vista+.</p>\n<p>The <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/__fastfail.20in.20libpanic_abort\"><code>__fastfail</code> impl</a> thankfully works on systems before Windows 8, but for other changes in the future this might not be always true.</p>\n<h2>target_api_version compilation option</h2>\n<p>To get a bit of initial input on the idea I've asked <span class=\"user-mention\" data-user-id=\"125267\">@Peter Rabbit</span>  (since the idea comes from <a href=\"https://github.com/rust-lang/rust/issues/37638#issuecomment-473465818\">here</a> anyways :)) what an \"ideal world\" implementation for such a feature would look like, from the perspective of <code>winapi-rs</code> and its users.</p>\n<p>The <code>cfg</code> attribute would look roughly like</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"cp\">#[cfg(target_api_version &gt;= </span><span class=\"s\">&quot;10.0.10240&quot;</span><span class=\"cp\">)]</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>where <code>&gt;=</code> <em>must</em> be used, or</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"cp\">#[cfg(target_api_min_version = </span><span class=\"s\">&quot;10.0.10240&quot;</span><span class=\"cp\">)]</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>which would be closer to the current <code>cfg</code> look. These could be chained with the help of <code>cfg!()</code>/<code>cfg_if!</code> for example, if multiple different implementation are needed.</p>\n<p>Looking back at the mutex implementation, it could look like this, for example:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">unlock</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"bp\">self</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">*</span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">held</span><span class=\"p\">.</span><span class=\"n\">get</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"kc\">false</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">cfg</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">target_api_version</span><span class=\"w\"> </span><span class=\"o\">&gt;=</span><span class=\"w\"> </span><span class=\"s\">&quot;6.0.6000&quot;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"c1\">// Vista</span>\n<span class=\"w\">        </span><span class=\"n\">c</span>::<span class=\"n\">ReleaseSRWLockExclusive</span><span class=\"p\">(</span><span class=\"n\">raw</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">))</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">kind</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">Kind</span>::<span class=\"n\">SRWLock</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"n\">c</span>::<span class=\"n\">ReleaseSRWLockExclusive</span><span class=\"p\">(</span><span class=\"n\">raw</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">)),</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">Kind</span>::<span class=\"n\">CriticalSection</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"o\">*</span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">remutex</span><span class=\"p\">()).</span><span class=\"n\">unlock</span><span class=\"p\">(),</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>If Vista or higher is targeted, the whole <code>CriticalSection</code> fallback is removed.</p>\n<p>Implementation-wise, the biggest problem would be the special handling of <code>target_api_version</code>, since regular compilation options are pretty simple (<code>FxHashSet&lt;(Symbol, Option&lt;Symbol&gt;)&gt;</code>). The idea would be to allow specifying any semver-like version number and doing a <code>&gt;=</code> comparison, similar to the <a href=\"https://docs.rs/semver/0.10.0/src/semver/version.rs.html#339-366\"><code>Ord</code> impl</a> of <code>semver-rs</code>, so that anything bigger than the specified version would eval to <code>true</code>.</p>\n<p>I'm not even close to knowledgeable in terms of the compiler, so how viable would such a change be? Do the pros outweigh the implementation complexity?</p>\n<p>An alternative would be to have a fixed list of versions (e.g. all NT-based versions listed <a href=\"https://www.gaijin.at/en/infos/windows-version-numbers\">here</a>), where the selected target version would also define all supported previous versions. This would make the implementation pretty easy, but means that the list has to be maintained in the future.</p>\n<h2>Other notes/questions</h2>\n<h3>Selecting the desired version</h3>\n<p>How would the desired target version be selected? My guess would be to add it somewhere in the <a href=\"https://doc.rust-lang.org/cargo/reference/config.html#target\"><code>[target]</code> section</a> of the Cargo configuration. Rustc must know which value was set, or if the default value should be used.</p>\n<h3>Default version</h3>\n<p>I <em>think</em> the officially supported minimum target version of Windows is Windows 7, currently. By having to specify the default version a better compatibility guarantee is made.</p>\n<p>In the future, when Windows 7 will be replaced with a newer version as default minimum, this makes the transition easier by keeping the old impls around (e.g. demoting the os/api versions to lower tiers like with XP).</p>\n<h3><code>std</code>-aware cargo</h3>\n<p>Once cargo <a href=\"https://github.com/rust-lang/wg-cargo-std-aware\">becomes std-aware</a>, this can automatically cause a recompile of <code>libstd</code> to give you the optimal standard library implementation for the selected os/api version.</p>\n<h3>Windows versioning</h3>\n<p>In the discussion with <span class=\"user-mention\" data-user-id=\"125267\">@Peter Rabbit</span>  we've settled on <code>&lt;major&gt;.&lt;minor&gt;.&lt;build&gt;</code> for Windows, since that encompasses both client and server variants and increased monotonically. Is that the correct call or would something else be better?</p>\n<hr>\n<p>I'd love to hear your feedback and guidance on this idea and if/how to continue with it!</p>\n<p>Thanks :)</p>",
+        "id": 200581751,
+        "sender_full_name": "seri",
+        "timestamp": 1591898180
+    },
+    {
+        "content": "<p>I'm a little curious how do windows 9x/nt/me/2000/xp fit into this version scheme</p>",
+        "id": 200625116,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1591923480
+    },
+    {
+        "content": "<p>There's a list of Windows versions here: <a href=\"https://www.gaijin.at/en/infos/windows-version-numbers\">https://www.gaijin.at/en/infos/windows-version-numbers</a></p>",
+        "id": 200628603,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1591927923
+    },
+    {
+        "content": "<p>DOS-based Windows doesn't really fit in there (in terms of higher version → more API), but <code>&lt;major&gt;.&lt;minor&gt;.&lt;build&gt;</code> maps fine for all NT-based ones.</p>",
+        "id": 200644507,
+        "sender_full_name": "seri",
+        "timestamp": 1591949907
+    },
+    {
+        "content": "<p>Just noticed: Together with <code>cfg_attr</code> you'd be able to add nice conditional <code>#[deprecated]</code> attributes as well.</p>",
+        "id": 200683313,
+        "sender_full_name": "seri",
+        "timestamp": 1591975040
+    },
+    {
+        "content": "<p>Using <code>&lt;major&gt;.&lt;minor&gt;.&lt;build&gt;</code> may not perfectly fit every platform and platforms can change their own API version schemes in incompatible ways but I think manipulating them to be consistent and \"semver-like\" is the better option. Obviously Rust cannot control how outside projects choose to version their APIs but it can mandate a (platform dependent) way to translate those versions into a consistent form.</p>\n<p>This could perhaps be made more user friendly with named aliases for each target but I'm not sure if/how that would work.  For example, on Windows we could have \"latest\", \"Windows 7\", etc and they'd be mapped to the correct API version.</p>",
+        "id": 200687772,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1591977255
+    },
+    {
+        "content": "<p><code>&lt;major&gt;.&lt;minor&gt;.&lt;build&gt;</code> is meant specifially the Windows versioning, yes. In general, the feature works with any semver-like version when going for the <code>&gt;=</code> checks, or basically anything when going with fixed versions.</p>\n<p>Aliasing them should be relatively easy as well with the fixed versions :)</p>",
+        "id": 200700552,
+        "sender_full_name": "seri",
+        "timestamp": 1591983462
+    },
+    {
+        "content": "<p>Aliases certainly are an easy extension and quality of life improvement. For \"latest\" specifically, I think that's a bad idea as its value would depend on the version of Rust you're using and require Rust to continually update that constant, and code should never cfg against \"latest\".<br>\nAlso you can leave off the <code>.&lt;build&gt;</code> or <code>.&lt;minor&gt;.&lt;build&gt;</code>. Thus you could compile code for Windows 7 as <code>&gt;= \"6.1\"</code>.</p>\n<p>For the semver aspect of the version, remember that it is strictly for version <em>ordering</em>. It does not imply anything about whether breaking changes can occur in a given version. For non-Windows platforms as long as there is some sort of monotonic version ordering then it can be translated into an <code>a.b.c</code> format version that we can <code>&gt;=</code> compare against.</p>",
+        "id": 200727691,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1591998115
+    },
+    {
+        "content": "<blockquote>\n<p>For non-Windows platforms as long as there is some sort of monotonic version ordering then it can be translated into an a.b.c format version that we can &gt;= compare against.</p>\n</blockquote>\n<p>Absolutely. My point is that we can't necessarily assume a monotonic version ordering by the vendor. For example they may switch from a date based scheme (e.g. <code>2020.06</code>) to a <code>major.minor</code> scheme (e.g. <code>5.0</code>). In that case it would be necessary to translate the new versions so that they're comparable with the old versions. That's what I meant about Rust not being able to control the weird things a company might do.</p>",
+        "id": 200760161,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1592044738
+    },
+    {
+        "content": "<p>I've implemented the easier version (no changes to <code>cfg</code>, regular compilation options) as a <a href=\"https://github.com/seritools/rust/pull/1\">proof-of-concept</a>.</p>\n<p>Some changes/clarifications compared to the initial text/idea above:</p>\n<ul>\n<li>The logic that decides which options will be set is separate and can be different for non-windows, for example. This might give better flexibility in case it'll be used for other systems. It also circumvents the problem of different versioning schemes completely.</li>\n<li>Named the option/cfg symbol <code>target_api_feature</code>/<code>-C target-api-features</code> to bring it to the idea of what it means in general, rather than for windows</li>\n</ul>\n<p>Already works like a charm:<br>\n<a href=\"/user_uploads/4715/hi3Z2EuQZr4O_orYQz-6kFjF/image.png\">image.png</a></p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/4715/hi3Z2EuQZr4O_orYQz-6kFjF/image.png\" title=\"image.png\"><img src=\"/user_uploads/4715/hi3Z2EuQZr4O_orYQz-6kFjF/image.png\"></a></div><p>Soo, where to go from here? Maybe create a thread on IRLO to get a wider/non-windows look at it?</p>",
+        "id": 200952423,
+        "sender_full_name": "seri",
+        "timestamp": 1592259177
+    },
+    {
+        "content": "<p>Maybe write up an <a href=\"https://github.com/rust-lang/rfcs\">official RFC</a> but post it to IRLO before doing a PR? It might also be worth having a chat with the Rust lang team if you can.</p>",
+        "id": 200954362,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1592260671
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span> Here's the previous discussion on this feature by the way.</p>",
+        "id": 215192302,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1604151697
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"307203\">@seri</span> <span class=\"user-mention\" data-user-id=\"125267\">@Peter Rabbit</span> has any additional progress been made on this (besides the [related]((<a href=\"#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Drop.20official.20support.20for.20Windows.20XP.20compiler-team.23378\">https://rust-lang.zulipchat.com/#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Drop.20official.20support.20for.20Windows.20XP.20compiler-team.23378</a>) <a href=\"#narrow/stream/122651-general/topic/On.20WinXP.20support\">conversations</a> happening right now on dropping Windows XP support? If not, I'd like to write up a draft RFC and post it on <a href=\"http://internals.rust-lang.org\">internals.rust-lang.org</a>. Thoughts?</p>",
+        "id": 215304988,
+        "sender_full_name": "rylev",
+        "timestamp": 1604315336
+    },
+    {
+        "content": "<p>I know <span class=\"user-mention\" data-user-id=\"260325\">@Chris Denton</span> expressed some interest recently in working on an RFC and <span class=\"user-mention\" data-user-id=\"307203\">@seri</span> was experimenting with a proof of concept implementation.</p>",
+        "id": 215305248,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1604315552
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> chrisd on discord (now that i see  the name i guess <span class=\"user-mention\" data-user-id=\"260325\">@Chris Denton</span>  :D) asked the same a few days ago.</p>\n<p>I didn't get around to writing any of it yet, so if you two would be up to it please do!<br>\nYou can find the PoC impl of the minimal version (without &gt;= checks and stuff) here: <a href=\"https://github.com/rust9x/rust/tree/target-api-features\">https://github.com/rust9x/rust/tree/target-api-features</a><br>\nAnd see some of the commits over here for actual usages of it: <a href=\"https://github.com/rust9x/rust/tree/rust9x\">https://github.com/rust9x/rust/tree/rust9x</a></p>",
+        "id": 215305306,
+        "sender_full_name": "seri",
+        "timestamp": 1604315622
+    },
+    {
+        "content": "<p>I'm happy to put the work in. I'll post here for review before posting on internals</p>",
+        "id": 215305395,
+        "sender_full_name": "rylev",
+        "timestamp": 1604315666
+    },
+    {
+        "content": "<p>If you're happy to do the work, I don't mind at all! I'll be sure to say if I think you've missed anything ;)</p>",
+        "id": 215305506,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1604315759
+    },
+    {
+        "content": "<p>same here, just ping if there's stuff to review :)</p>",
+        "id": 215336429,
+        "sender_full_name": "seri",
+        "timestamp": 1604332124
+    },
+    {
+        "content": "<p>So the biggest question to me right now is how this feature works on other platforms. Are we leaving it up to future RFCs how the versioning schemas for other platforms will be? Are we essentially saying that all there has to be is a <code>Ord</code> implementation for the version strings for a given target and what that implementation is is out of the scope of this RFC (except for Windows)?</p>",
+        "id": 215355532,
+        "sender_full_name": "rylev",
+        "timestamp": 1604340103
+    },
+    {
+        "content": "<p>So I think, as you say, there's two approaches:</p>\n<ol>\n<li>\n<p>An ordered list of strings. Not necessarily implemented as a literal list but, as you say, they'll have to have a target-defined <code>Ord</code>. </p>\n</li>\n<li>\n<p>A structured version number like <code>1.20.3018</code>. I.e. a series of one or more decimal integers (ascii digits) separated by a dot (<code>.</code>).  This would inherently have an order.  Targets could define what numbers makes most sense to them with the only restriction being they fit this format (and, of course, the versions are properly ordered according to this scheme).<br>\n   However, this would perhaps be an issue if there isn't an obvious mapping from platform versions to a number. In the worst case it may mean users having to consult a lookup table to know what they mean.</p>\n</li>\n</ol>",
+        "id": 215358751,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1604341684
+    },
+    {
+        "content": "<p>I think forcing every target to fit into the decimal format might be a tall order. I wonder if option 1 is too much of a maintenance burden</p>",
+        "id": 215456630,
+        "sender_full_name": "rylev",
+        "timestamp": 1604412181
+    },
+    {
+        "content": "<p>Yeah. I'm not sure there's a clear good solution. Still a pre-RFC doesn't have to solve all the issues. It's fine to leave it an open question and ask for feedback or other ideas.</p>",
+        "id": 215457213,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1604412430
+    },
+    {
+        "content": "<p>Ideally, it would be a non-exhaustive enum.</p>",
+        "id": 215467566,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604417067
+    },
+    {
+        "content": "<p>I guess that would be an implementation detail right? The only important thing is that the versions can be ordered</p>",
+        "id": 215467734,
+        "sender_full_name": "rylev",
+        "timestamp": 1604417144
+    },
+    {
+        "content": "<p>For instance we'll probably want to allow for aliases which means more than _just_ an enum</p>",
+        "id": 215467940,
+        "sender_full_name": "rylev",
+        "timestamp": 1604417232
+    },
+    {
+        "content": "<p>Here's an alpha version of the RFC for folks to poke at: <a href=\"https://gist.github.com/rylev/1efe2dffcfc088b66519b70f0cb9286f\">https://gist.github.com/rylev/1efe2dffcfc088b66519b70f0cb9286f</a><br>\nOnce we're reasonably happy with here, I can post it on internals. <span class=\"user-mention\" data-user-id=\"260325\">@Chris Denton</span> <span class=\"user-mention\" data-user-id=\"125267\">@Peter Rabbit</span> <span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span> <span class=\"user-mention\" data-user-id=\"307203\">@seri</span> <span class=\"user-mention\" data-user-id=\"274471\">@Arlie Davis</span></p>",
+        "id": 215468643,
+        "sender_full_name": "rylev",
+        "timestamp": 1604417528
+    },
+    {
+        "content": "<p>In your example in the summary, that boolean for whether the lock is held actually only matters when using the critical section fallback, which is a wart of the current implementation that it sets it even when using srwlock.</p>",
+        "id": 215468870,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1604417628
+    },
+    {
+        "content": "<p>Do you think that that distracts from the point? I don't even think we need to present the code for a real-world use case, we just want to show the mechanics</p>",
+        "id": 215469079,
+        "sender_full_name": "rylev",
+        "timestamp": 1604417707
+    },
+    {
+        "content": "<p>Would the RFCs for using <code>cfg</code> on Rust's minimum version also be relevant prior art? They're a different use case but are still about matching on a version at compile time. E.g. <a href=\"https://github.com/rust-lang/rfcs/blob/2b0c911d55cf4095036b984ae30d8b632718241e/text/2523-cfg-path-version.md\"><code>cfg_version</code> and <code>cfg_accessible</code></a> and <a href=\"https://github.com/rust-lang/rfcs/blob/3071138d4ed510d6dfc1f8e1d7e9d4b099ea12e8/text/2495-min-rust-version.md\"><code>min_rust_version</code></a></p>",
+        "id": 215469366,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1604417840
+    },
+    {
+        "content": "<p>Yes that's a good point</p>",
+        "id": 215469603,
+        "sender_full_name": "rylev",
+        "timestamp": 1604417941
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> That draft looks great!</p>\n<p>Two bits of feedback:</p>\n<p>I like that the name is used with &gt;= in Rust code. But that isn't captured in the Cargo directive, which feels like an \"equal\" or \"semver compat\" rather than a \"greater than or equal\". And while Windows might be forward-compatible, other OSes like FreeBSD are not. I think the Cargo directive needs to incorporate either a &gt;= or a \"min\".</p>\n<p>There should be some discussion about whether, prior to std-aware cargo, there would be any sensible way for us to handle building a version of std that omits support for older versions. Special target that reports the same target string but a higher minimum API version? Something else?</p>",
+        "id": 215470740,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604418391
+    },
+    {
+        "content": "<p>Personally I think <code>=</code> for the cargo directive makes sense, as you're declaring the minimum supported version, not comparing. A different name however could make sense, and I'm not strongly biased either way.</p>",
+        "id": 215471193,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1604418571
+    },
+    {
+        "content": "<p>Yea min_target_api_version could work. We can go with that and bikeshed it in the RFC process</p>",
+        "id": 215471407,
+        "sender_full_name": "rylev",
+        "timestamp": 1604418652
+    },
+    {
+        "content": "<p>In the reference-level section you might also need to mention how this works with the <code>cfg</code> attribute. <code>#[cfg(target_api_version &gt;= \"6.1.7600\")]</code> requires a change to <a href=\"https://doc.rust-lang.org/reference/conditional-compilation.html\">the Rust reference</a> to add support for <code>&gt;=</code>. Though I'm sure this is purely a documentation change and not something that's hard to implement.</p>",
+        "id": 215471902,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1604418838
+    },
+    {
+        "content": "<p>Personally I think using this attribute on targets that don't have a versioning schema, or specifying a version that doesn't parse as a valid version for that target, should at least result in a warning. Also there's an argument to be made about whether invalid version requirements should be treated as a true or false cfg. I personally would lean towards false.</p>",
+        "id": 215472077,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1604418883
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"260325\">Chris Denton</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/215471902\">said</a>:</p>\n<blockquote>\n<p>In the reference-level section you might also need to mention how this works with the <code>cfg</code> attribute. <code>#[cfg(target_api_version &gt;= \"6.1.7600\")]</code> requires a change to <a href=\"https://doc.rust-lang.org/reference/conditional-compilation.html\">the Rust reference</a> to add support for <code>&gt;=</code>. Though I'm sure this is purely a documentation change and not something that's hard to implement.</p>\n</blockquote>\n<p>If we move away from <code>&gt;=</code> comparisons (as was suggested above) this won't be needed</p>",
+        "id": 215472130,
+        "sender_full_name": "rylev",
+        "timestamp": 1604418903
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125267\">Peter Rabbit</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/215472077\">said</a>:</p>\n<blockquote>\n<p>Personally I think using this attribute on targets that don't have a versioning schema, or specifying a version that doesn't parse as a valid version for that target, should at least result in a warning. Also there's an argument to be made about whether invalid version requirements should be treated as a true or false cfg. I personally would lean towards false.</p>\n</blockquote>\n<p>It seems most cfg attributes simply return false when you give them garbage. I agree a warning is best, but I'd like to understand why other <code>cfg</code> flags don't do this.</p>",
+        "id": 215472285,
+        "sender_full_name": "rylev",
+        "timestamp": 1604418958
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224872\">Ryan Levick</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/215472285\">said</a>:</p>\n<blockquote>\n<p>I agree a warning is best, but I'd like to understand why other <code>cfg</code> flags don't do this.</p>\n</blockquote>\n<p>Because there's no way in general to tell whether a specified <code>cfg</code> is invalid or not as build scripts can specify any arbitrary <code>cfg</code> they want. Whereas with this we would <em>know</em> what a valid version is and be able to warn on that.</p>",
+        "id": 215472622,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1604419081
+    },
+    {
+        "content": "<p>We would need to be careful, though, that we don't generate a warning on syntax that a future rust would accept.</p>",
+        "id": 215473000,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604419211
+    },
+    {
+        "content": "<p>For example, if you're on a target that has API versioning, mentioning a version that rust hasn't heard of should just be a silent \"false\".</p>",
+        "id": 215473079,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604419245
+    },
+    {
+        "content": "<p>Because we should only append versions to the list of versions, not change them in the middle.</p>",
+        "id": 215473113,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604419261
+    },
+    {
+        "content": "<p>For the proof-of-concept impl I'd link to this instead: <a href=\"https://github.com/rust9x/rust/commit/cccfa575a4bb449defdcbf362757f1e161f6cdf5\">https://github.com/rust9x/rust/commit/cccfa575a4bb449defdcbf362757f1e161f6cdf5</a><br>\nI've fixed some issues and added the relevant docs in that branch/commit there as well.</p>\n<p>And this shows how the <code>target_api_feature</code>-based mutex impl could look like: <a href=\"https://github.com/rust9x/rust/commit/76bcb08c787c7576c98484fa3a5f5b292507a557\">https://github.com/rust9x/rust/commit/76bcb08c787c7576c98484fa3a5f5b292507a557</a></p>\n<p>Dropping the  enum variants for newer systems is nicely shown <a href=\"https://github.com/rust9x/rust/commit/76bcb08c787c7576c98484fa3a5f5b292507a557#diff-7a56b055b83056e871bebce20aeac418a70b81301113597c4a24991cab49ee34R46\">here</a>.</p>\n<blockquote>\n<p>If we move away from &gt;= comparisons (as was suggested above) this won't be needed<br>\nYeah, allowing for &gt;= is connected with a much higher implementation cost (cfg features currently are just a <code>FxHashSet&lt;(Name, Value)&gt;</code>) and imposes a restriction/validation of the values.</p>\n</blockquote>\n<p>What is yalls opinion on:</p>\n<blockquote>\n<p>Named the option/cfg symbol <code>target_api_feature</code>/<code>-C target-api-features</code> to bring it to the idea of what it means in general, rather than for windows</p>\n</blockquote>\n<p>Is there any forseeable usage outside of windows for this? If so, is limiting it to <code>version</code> naming/functionality-wise still enough for these usecases? In the PoC it's just defined for windows to happen to be version numbers, and since the Windows API is additive any chosen version implies all previous versions.</p>\n<blockquote>\n<p>There should be some discussion about whether, prior to std-aware cargo, there would be any sensible way for us to handle building a version of std that omits support for older versions. Special target that reports the same target string but a higher minimum API version? Something else?</p>\n</blockquote>\n<p>Yeah, std-aware cargo would help immensely with it, for both opting in support for older systems, and opting in newer features by dropping support. Are there currently any big API usage changes planned that would profit from having an additional target for newer versions?</p>",
+        "id": 215486113,
+        "sender_full_name": "seri",
+        "timestamp": 1604424865
+    },
+    {
+        "content": "<p>I believe I've addressed (almost) all of the feedback and the gist should be updated. <a href=\"https://gist.github.com/rylev/1efe2dffcfc088b66519b70f0cb9286f\">https://gist.github.com/rylev/1efe2dffcfc088b66519b70f0cb9286f</a></p>",
+        "id": 215503906,
+        "sender_full_name": "rylev",
+        "timestamp": 1604433993
+    },
+    {
+        "content": "<p>Looks good! There are still a couple places where you refer to <code>target_api_version</code> instead of <code>min_target_api_version</code>. Another point that occured to me was that this would also tie in nicely with Android's target API levels. For example, the libc crate recently added a <a href=\"https://github.com/rust-lang/libc/pull/1968\">workaround</a> for older API levels that don't expose accept4. You could include that as another motivation which builds the case that this isn't just windows specific and broadly useful across targets.</p>",
+        "id": 215530351,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1604451513
+    },
+    {
+        "content": "<p>I've posted to internals: <a href=\"https://internals.rust-lang.org/t/pre-rfc-min-target-api-version/13339\">https://internals.rust-lang.org/t/pre-rfc-min-target-api-version/13339</a></p>",
+        "id": 215690822,
+        "sender_full_name": "rylev",
+        "timestamp": 1604570382
+    },
+    {
+        "content": "<p>There isn't any way this option could be cross compatible, right? I think a <code>min_windows_api_version</code> option would be much clearer to read, since this isn't a generic property of the \"target\"</p>",
+        "id": 215721923,
+        "sender_full_name": "Plecra",
+        "timestamp": 1604588021
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"263805\">@Plecra</span>  It has been mention that this would be useful for Android, FreeBSD and MacOS. Possibly others too. It would not be useful for all targets but in that case it can be blank. For example, <code>target_env</code> already works this way.</p>",
+        "id": 215722444,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1604588212
+    },
+    {
+        "content": "<p>Skimming the rest of the discussion, it looks like this was a deliberate choice. Is there any way the meaning of version numbers could overlap?<br>\nI totally understand that we will want a similar option on other platforms, I don't think it helps to give it the same name. <code>target_env</code> can be used to define options that <em>are</em> the same across multiple \"targets\" like <code>gnu</code>.</p>",
+        "id": 215723008,
+        "sender_full_name": "Plecra",
+        "timestamp": 1604588421
+    },
+    {
+        "content": "<p>Ah I see what you mean. Hmm.. to be honest most of places I'd personally be using this are inherently targetting a specific OS already so this hadn't occurred to me. So it can be the same across some targets, but only if the targets have the same <code>target_os</code>.</p>",
+        "id": 215724371,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1604589000
+    },
+    {
+        "content": "<p>I 'm not sure I follow 100%. Are you saying we should have separate named predicates for each target? <code>min_windows_api_version</code> <code>min_android_api_version</code>, etc.?</p>",
+        "id": 215725407,
+        "sender_full_name": "rylev",
+        "timestamp": 1604589429
+    },
+    {
+        "content": "<p>I think so, yes. I haven't given much thought to the alternatives, but simply \"target\" seems inappropriate for a configuration option that will always depend on the active <code>target_os</code> being a specific value</p>",
+        "id": 215730017,
+        "sender_full_name": "Plecra",
+        "timestamp": 1604591217
+    },
+    {
+        "content": "<p>One advantage of naming it the same: macros and code generation can target it without having to have platform-specific tables of attribute names.</p>",
+        "id": 215758049,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604602601
+    },
+    {
+        "content": "<p>For instance, you could have a table that's just (handwaving version numbers) <code>(\"windows\", \"10\"), (\"freebsd\", \"6\")</code>, and generate code from that.</p>",
+        "id": 215758160,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604602653
+    },
+    {
+        "content": "<p>What would be the advantage of target-specific attribute names? Just readability? Or is the proposal that you could write <code>min_windows_api_version</code> without actually checking for \"windows\" first, and count on it evaluating to false on non-Windows?</p>",
+        "id": 215758363,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604602733
+    },
+    {
+        "content": "<p>That's a convincing use case <span aria-label=\"big smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"big smile\">:big_smile:</span></p>\n<p>Personally, I view it more as a helpful \"description\" of the contents of the version number. <code>10.0.10240</code> is only meaningful as a Windows version number, and an attribute that mentioned windows would be self-describing for people reading the code. So yes, for me it <em>is</em> primarily readability, which I think the cfg system is sorely in need of. And you're right that it'd also make for more concise cfg attributes.</p>",
+        "id": 215759027,
+        "sender_full_name": "Plecra",
+        "timestamp": 1604603032
+    },
+    {
+        "content": "<p>I would expect, most of the time, to see this in one of two patterns: either check the target once and then have many checks on the version, or check the target and version together.</p>",
+        "id": 215766394,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604606432
+    },
+    {
+        "content": "<p>Either way, I'd expect to see the target mentioned in close proximity.</p>",
+        "id": 215766423,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604606446
+    },
+    {
+        "content": "<p>That said, I think this makes a convincing argument for some kind of clear aliasing, so that it's possible to very obviously say \"windows 7 or newer\" or \"windows 10 or newer\" without having to look up version numbers in a map.</p>",
+        "id": 215766482,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604606482
+    },
+    {
+        "content": "<p>Why's that? It doesn't seem like the \"user facing\" versions are particularly significant, just the versions the APIs were added in</p>",
+        "id": 215766607,
+        "sender_full_name": "Plecra",
+        "timestamp": 1604606534
+    },
+    {
+        "content": "<p>And your example of the macro has mostly justified it for me - I just didn't see another explanation for it</p>",
+        "id": 215766707,
+        "sender_full_name": "Plecra",
+        "timestamp": 1604606587
+    },
+    {
+        "content": "<p>You were pointing out that cfg could use more readability, and the version numbers <em>can</em> get kinda inscrutable sometimes, particularly when the user-visible version and the underlying version are misleadingly different.</p>",
+        "id": 215773681,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604610172
+    },
+    {
+        "content": "<p>Right, but \"Windows 10\" isn't going to be significant for many features, right? You'd nearly always need a more specific Windows 10 version or be missing out on compatibility with late Windows 8 versions</p>",
+        "id": 215774008,
+        "sender_full_name": "Plecra",
+        "timestamp": 1604610325
+    },
+    {
+        "content": "<p>One thing that wasn't clear to me about was how/where we define the valid values for <code>min_target_api_version</code> with each target. My initial reading reads that <code>min_target_api_version</code> would essentially be part of the target spec (either builtin or custom json). But where would the hypothetical Ord implementing versions for windows, android, etc be defined? Within each target spec itself?</p>",
+        "id": 215777578,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1604612255
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"132778\">Luqman Aden</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/215777578\">said</a>:</p>\n<blockquote>\n<p>One thing that wasn't clear to me about was how/where we define the valid values for <code>min_target_api_version</code> with each target. My initial reading reads that <code>min_target_api_version</code> would essentially be part of the target spec (either builtin or custom json). But where would the hypothetical Ord implementing versions for windows, android, etc be defined? Within each target spec itself?</p>\n</blockquote>\n<p>Yes I was imagining this inside the target spec. I should add that.</p>",
+        "id": 216110789,
+        "sender_full_name": "rylev",
+        "timestamp": 1604940263
+    },
+    {
+        "content": "<p>I've not messed around enough with target spec json files to know where a good place for this to go is. Any suggestions?</p>",
+        "id": 216110920,
+        "sender_full_name": "rylev",
+        "timestamp": 1604940337
+    },
+    {
+        "content": "<p>Should this just be another key inside of the target specification json that has an ordered array of values to correspond to valid <code>min_target_api_version</code>s?</p>",
+        "id": 216111166,
+        "sender_full_name": "rylev",
+        "timestamp": 1604940450
+    },
+    {
+        "content": "<p>I'd rather something more intelligent than just an array of values, especially for Windows where we have a versioning scheme that should continue to work in the future with versions Rust is not yet aware of.</p>",
+        "id": 216152514,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1604961906
+    },
+    {
+        "content": "<p>I think the problem is that requiring a stricter scheme is much easier to do for the built-in targets but not entirely clear how to do with the json-based targets. Although it might be ok to just decide that this is something that only works with built-in targets (for now?).</p>",
+        "id": 216161679,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1604969538
+    },
+    {
+        "content": "<p>I declared bankruptcy on the question of custom targets and just added it to the list of unanswered questions. I think the issue now is answering those at least some of those questions before opening an RFC. Thoughts?</p>",
+        "id": 217164233,
+        "sender_full_name": "rylev",
+        "timestamp": 1605718687
+    },
+    {
+        "content": "<p>It was brought to my attention that this could also help with the desire to have UnixStream available on Windows which is only possible on newer versions of Windows (<a href=\"https://github.com/rust-lang/rust/issues/56533\">https://github.com/rust-lang/rust/issues/56533</a>)</p>",
+        "id": 217754258,
+        "sender_full_name": "rylev",
+        "timestamp": 1606225156
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span> (and others), in order to proceed forward with this, we may need to figure out the question of how this feature works on other platforms. So far the strong motivations for this feature have largely been Windows related (There's one example of Android featured in the pre-RFC). If we only aim to support Windows related targets we can make certain decisions we would not make if this is meant to be a cross platform supported feature.</p>",
+        "id": 217755548,
+        "sender_full_name": "rylev",
+        "timestamp": 1606225767
+    },
+    {
+        "content": "<p>Where I stand: we support cross platform but only on built in targets (json-based targets are out of scope for v1). The schemes for each platform type are independent meaning that Windows, Android, Linux, etc. can all have different schemas as long as there an unambiguous ordering.</p>",
+        "id": 217756105,
+        "sender_full_name": "rylev",
+        "timestamp": 1606226051
+    },
+    {
+        "content": "<p>What is the Windows equivalent of <code>ENOSYS</code>? What happens if you try to call a function that doesn't exist?</p>",
+        "id": 217778550,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606235554
+    },
+    {
+        "content": "<p>Is there a way to gracefully error out?</p>",
+        "id": 217778578,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606235571
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> I think it's reasonable to only have meaningful support for the minimum OS version on a few targets, and on other targets, it parses but there are no versions to compare to.</p>",
+        "id": 217779932,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606236131
+    },
+    {
+        "content": "<p>I also think it's reasonable, on Windows, for the OS version values to effectively be an enum.</p>",
+        "id": 217780242,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606236249
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"239881\">Josh Triplett</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/217778550\">said</a>:</p>\n<blockquote>\n<p>What is the Windows equivalent of <code>ENOSYS</code>? What happens if you try to call a function that doesn't exist?</p>\n</blockquote>\n<p><code>ERROR_PROC_NOT_FOUND</code> or <code>STATUS_ENTRYPOINT_NOT_FOUND</code> is generally the equivalent I'd say. But what's the context here? Someone trying to run a binary targeting some function in a newer version but running it on an older release? In that case the program would terminate with the <code>STATUS_ENTRYPOINT_NOT_FOUND</code> error at startup afaik.</p>",
+        "id": 217796482,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1606243254
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132778\">@Luqman Aden</span> Is there some reasonable way to say \"call this function if it exists, or give me a graceful error at runtime if it doesn't\"? Does that require doing a full manual <code>LoadLibrary</code>/<code>GetProcAddress</code> to allow for the library or function not existing?</p>",
+        "id": 217810154,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606250199
+    },
+    {
+        "content": "<p>Yes, the only options are: the program aborts before it even starts or the programmer manually uses <code>LoadLibrary</code>/<code>GetProcAddress</code>.</p>\n<p>The MSVC linker does have <a href=\"https://docs.microsoft.com/en-us/cpp/build/reference/delayload-delay-load-import?view=msvc-160\">an option</a> to automatically generate <code>LoadLibrary</code>/<code>GetProcAddress</code> code for you. If finding the dll or function fails it throws an exception (which can be handled). However this has certain limitations and I don't think the GNU linker supports this.</p>",
+        "id": 217811374,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1606250889
+    },
+    {
+        "content": "<p>I'm afraid not, last I checked the DLL loader will bail out at startup if it encounters an import it can't resolve.</p>",
+        "id": 217811442,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1606250931
+    },
+    {
+        "content": "<p>Yea, just as <span class=\"user-mention\" data-user-id=\"260325\">@Chris Denton</span>  mentioned. But do note that delay loading will change _all_ references to the DLL you're trying to delay load. There's no such thing as per-function delay loading (<a href=\"https://docs.microsoft.com/en-us/cpp/build/reference/constraints-of-delay-loading-dlls\">delay loading constraints</a>)</p>",
+        "id": 217811514,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1606250978
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span>  But libstd today already has macros to try to load functions with <code>LoadLibrary</code>/<code>GetProcAddress</code> and provide a fallback if it doesn't exists</p>",
+        "id": 217811679,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1606251067
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132778\">@Luqman Aden</span> Does Windows have any equivalent at all to \"weak symbols\", as in \"if this symbol is available great, if not make it NULL so we can check it before calling it\"?</p>",
+        "id": 217812453,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606251497
+    },
+    {
+        "content": "<p>In any case, that's not optimal, and I'd love to see the minimum OS version used to solve this problem.</p>",
+        "id": 217812481,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606251519
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> I think the most general solution is \"there's a set of ways to write an OS version, as a string, that aren't guaranteed to be ordered in any obvious fashion and have a manually defined order given in the target definition\".</p>",
+        "id": 217812593,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606251574
+    },
+    {
+        "content": "<p>Let's not imply to people that it's a semver; we don't control OS versioning.</p>",
+        "id": 217812721,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606251620
+    },
+    {
+        "content": "<p>And people will want to be able to use familiar names, not just internal API versions (which on Windows can differ substantially from the \"brand\" versions).</p>",
+        "id": 217812774,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606251650
+    },
+    {
+        "content": "<p>Internally, we could represent OS versions as an enum inside rustc, that implements <code>Ord</code>, <code>FromStr</code>, and <code>Display</code>.</p>",
+        "id": 217812952,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606251726
+    },
+    {
+        "content": "<p>And each target can have a different enum.</p>",
+        "id": 217812973,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606251741
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"239881\">Josh Triplett</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/217812453\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"132778\">Luqman Aden</span> Does Windows have any equivalent at all to \"weak symbols\", as in \"if this symbol is available great, if not make it NULL so we can check it before calling it\"?</p>\n</blockquote>\n<p>While there are ways to emulate weak linkage at linking time I don't think there's a way to do it at runtime which is what we'd need here.</p>",
+        "id": 217813171,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1606251842
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224872\">Ryan Levick</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/217755548\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"239881\">Josh Triplett</span> (and others), in order to proceed forward with this, we may need to figure out the question of how this feature works on other platforms. So far the strong motivations for this feature have largely been Windows related (There's one example of Android featured in the pre-RFC). If we only aim to support Windows related targets we can make certain decisions we would not make if this is meant to be a cross platform supported feature.</p>\n</blockquote>\n<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> What kind of decisions are you imagining that would possibly preclude non-windows targets? I was envisioning something along the lines of what the actual versions are and their orderings being defined per-target.</p>",
+        "id": 217833485,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1606265525
+    },
+    {
+        "content": "<p>I definitely want this for macos/ios, and know of others who are interested too.</p>",
+        "id": 217839963,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1606273079
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"132778\">Luqman Aden</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/217833485\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"224872\">Ryan Levick</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/217755548\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"239881\">Josh Triplett</span> (and others), in order to proceed forward with this, we may need to figure out the question of how this feature works on other platforms. So far the strong motivations for this feature have largely been Windows related (There's one example of Android featured in the pre-RFC). If we only aim to support Windows related targets we can make certain decisions we would not make if this is meant to be a cross platform supported feature.</p>\n</blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"224872\">Ryan Levick</span> What kind of decisions are you imagining that would possibly preclude non-windows targets? I was envisioning something along the lines of what the actual versions are and their orderings being defined per-target.</p>\n</blockquote>\n<p>This can determine how flexible we need to make the versioning scheme, but I'm in favor of simply leaving this as a per target (or rather per platform with related targets [e.g., windows related target] being group together). We can punt on custom JSON based targets for now.</p>",
+        "id": 217864718,
+        "sender_full_name": "rylev",
+        "timestamp": 1606298500
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"239881\">Josh Triplett</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/217812721\">said</a>:</p>\n<blockquote>\n<p>Let's not imply to people that it's a semver; we don't control OS versioning.</p>\n</blockquote>\n<p>I agree with this fully, but we do need to assume that versions are future compatible i.e., if something works on min_target_api_version N then it will also work on all min_target_api_version &gt; N.</p>",
+        "id": 217864896,
+        "sender_full_name": "rylev",
+        "timestamp": 1606298599
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span> <span class=\"user-mention\" data-user-id=\"132778\">@Luqman Aden</span> can you two (and anyone else) take a look at the pre-RFC text again and let me know if you think its sufficient to post to the RFCs repo (<a href=\"https://gist.github.com/rylev/1efe2dffcfc088b66519b70f0cb9286f\">https://gist.github.com/rylev/1efe2dffcfc088b66519b70f0cb9286f</a>)? I hope to have answered all the questions one would have to answer to accept the proposal.</p>",
+        "id": 217882204,
+        "sender_full_name": "rylev",
+        "timestamp": 1606309975
+    },
+    {
+        "content": "<blockquote>\n<p>We can punt on custom JSON based targets for now.</p>\n</blockquote>\n<p>Just to note: It would be nice for these to be supported, or at least have some plans for a path forward. I believe <code>watchos</code> would also want this, but is currently necessarily a custom target, due to it being bitcode-only, meaning it requires a custom rustc build (must use system LLVM).</p>\n<p>I realize that this is hard and there's no obvious way to make that work though <span aria-label=\"disappointed\" class=\"emoji emoji-1f61e\" role=\"img\" title=\"disappointed\">:disappointed:</span></p>",
+        "id": 217908740,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1606322362
+    },
+    {
+        "content": "<p>If anyone has any possible ideas on how to make it work, we can at least put them in future possibilities.</p>",
+        "id": 217909244,
+        "sender_full_name": "rylev",
+        "timestamp": 1606322590
+    },
+    {
+        "content": "<p>If a target doesn't have api versions, every check should return false, not true, I think. That would be forward-compatible with introducing versions in the future.</p>",
+        "id": 217909515,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606322756
+    },
+    {
+        "content": "<p>Whoops. You're correct. Will change</p>",
+        "id": 217909636,
+        "sender_full_name": "rylev",
+        "timestamp": 1606322797
+    },
+    {
+        "content": "<p>Also, your example at the top uses = rather than &gt;=, which seems confusing. Shouldn't we only support the latter?</p>",
+        "id": 217909657,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606322804
+    },
+    {
+        "content": "<p>I believe we only want to support <code>=</code> as the predicate name is <em>min</em>_target_api_version</p>",
+        "id": 217909726,
+        "sender_full_name": "rylev",
+        "timestamp": 1606322839
+    },
+    {
+        "content": "<p>That seems even more confusing to me. it makes sense to say \"if the minimum is at least this, I can use this function unconditionally\".</p>",
+        "id": 217909876,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606322898
+    },
+    {
+        "content": "<p>= suggests \"if the minimum is exactly this\".</p>",
+        "id": 217909916,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606322924
+    },
+    {
+        "content": "<p>That's fair. I think we can make that change</p>",
+        "id": 217909984,
+        "sender_full_name": "rylev",
+        "timestamp": 1606322960
+    },
+    {
+        "content": "<p><span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span></p>",
+        "id": 217910014,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606322974
+    },
+    {
+        "content": "<p>Have to go to a meeting. Will review more later. Looks good at a high level.</p>",
+        "id": 217910089,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606323002
+    },
+    {
+        "content": "<p>Note that <code>&gt;=</code> is technically new syntax for cfg attributes. It currently <a href=\"https://doc.rust-lang.org/reference/conditional-compilation.html#conditional-compilation\">only supports <code>=</code></a>. So the reference would need to be updated.</p>",
+        "id": 217910737,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1606323274
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224872\">Ryan Levick</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/217909244\">said</a>:</p>\n<blockquote>\n<p>If anyone has any possible ideas on how to make it work, we can at least put them in future possibilities.</p>\n</blockquote>\n<p>One idea I was toying around with is allowing 2 new keys in the json: a sorted array <code>allowed_target_api_versions</code> and  <code>min_target_api_version</code>. Perhaps not the most comprehensive way of implementing it but would cover most of the basic cases</p>",
+        "id": 217953056,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1606348944
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224872\">Ryan Levick</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/217864896\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"239881\">Josh Triplett</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/(Pre-RFC.3F).20target-api.2Fos-version/near/217812721\">said</a>:</p>\n<blockquote>\n<p>Let's not imply to people that it's a semver; we don't control OS versioning.</p>\n</blockquote>\n<p>I agree with this fully, but we do need to assume that versions are future compatible i.e., if something works on min_target_api_version N then it will also work on all min_target_api_version &gt; N.</p>\n</blockquote>\n<p>Is this a reasonable assumption? Are there any cases of windows (Or the other proposed use cases) breaking this?<br>\nEven if the OS or platform <em>does</em> promise something like this, is it reasonable to tie our promise to theirs? (In case they break it anyways)</p>",
+        "id": 218027982,
+        "sender_full_name": "Nick12",
+        "timestamp": 1606414508
+    },
+    {
+        "content": "<p>Have approaches similar to \"features\" been considered? Where you could have some kind of os-feature that you can check at compile time for \"Windows UnixStream\", and rust knows how to map windows os versions to feature support</p>",
+        "id": 218028083,
+        "sender_full_name": "Nick12",
+        "timestamp": 1606414583
+    },
+    {
+        "content": "<blockquote>\n<p>Is this a reasonable assumption</p>\n</blockquote>\n<p>That claim is perhaps a bit strongly worded but I think the idea behind it is right. Rust is saying \"this application only needs to support version <em>x</em> and newer\". Libraries can do what they will with that information. Rust itself doesn't need to make any claims or guarantees about what this <em>means</em>, only that it is so.</p>\n<p>Adding \"features\" seems like too much to put into Rust itself, no? The Windows API is big, really big, and it's far from static. I think categorizing everything into features would be quite some undertaking, no?</p>",
+        "id": 218029130,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1606415489
+    },
+    {
+        "content": "<blockquote>\n<p>Adding \"features\" seems like too much to put into Rust itself, no? The Windows API is big, really big, and it's far from static. I think categorizing everything into features would be quite some undertaking, no?</p>\n</blockquote>\n<p>Yeah, especially when you consider all the other platforms, this quickly gets very painful. Every new version of any os would require breaking down the updated apis into which features were added, getting them into rustc... I think this is a non-starter.</p>",
+        "id": 218032723,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1606418827
+    },
+    {
+        "content": "<p>I think if it ever isn't true we would need a new target.</p>",
+        "id": 218042603,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1606429779
+    },
+    {
+        "content": "<blockquote>\n<p>Is this a reasonable assumption? Are there any cases of windows (Or the other proposed use cases) breaking this?</p>\n</blockquote>\n<p>Apple has taken APIs out before but it's pretty rare. Like i don't think you can still use the carbon apis anymore. (They also are threatening to take out OpenGL but who knows).</p>\n<p>I think just providing the version checks doesn't imply the existence of any particular OS apis though.</p>",
+        "id": 218043346,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1606430802
+    },
+    {
+        "content": "<p>I've <a href=\"https://gist.github.com/rylev/1efe2dffcfc088b66519b70f0cb9286f/revisions\">added</a> a few changes to address some of what has been talked about above. </p>\n<ul>\n<li>I've addressed that the versioning numbers have no semantic many beyond that more recent versions (i.e., versions which evaluate true to a <code>&gt;</code> test) are assumed to be supersets of less recent versions. </li>\n<li>I added a <code>max_target_api_version</code> to the future possibilities list which could potentially address concerns about the previous point</li>\n<li>I added a concern about <code>&gt;=</code> being new syntax</li>\n</ul>",
+        "id": 219829620,
+        "sender_full_name": "rylev",
+        "timestamp": 1607946270
+    },
+    {
+        "content": "<p>I think this is ready to post to the RFCs repo. Thoughts? <span class=\"user-mention\" data-user-id=\"132778\">@Luqman Aden</span>, <span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span> and others?</p>",
+        "id": 219829768,
+        "sender_full_name": "rylev",
+        "timestamp": 1607946379
+    },
+    {
+        "content": "<p><span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span></p>",
+        "id": 219838404,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1607951367
+    },
+    {
+        "content": "<p><span aria-label=\"ship\" class=\"emoji emoji-1f6a2\" role=\"img\" title=\"ship\">:ship:</span></p>",
+        "id": 219838418,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1607951375
+    },
+    {
+        "content": "<p>Thanks for spear heading this Ryan! Looks good to me. <span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span></p>",
+        "id": 219919503,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1607989985
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> Please CC me when you post it.</p>",
+        "id": 219925296,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1607993721
+    },
+    {
+        "content": "<p>The RFC is live! <a href=\"https://github.com/rust-lang/rfcs/pull/3036\">https://github.com/rust-lang/rfcs/pull/3036</a></p>",
+        "id": 219990304,
+        "sender_full_name": "rylev",
+        "timestamp": 1608044331
+    },
+    {
+        "content": "<p>Looks great!</p>",
+        "id": 220009079,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1608051648
+    },
+    {
+        "content": "<p>Minor typo: min_target_api_versison</p>",
+        "id": 220009110,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1608051662
+    },
+    {
+        "content": "<p>Also, in your example, you have:</p>\n<blockquote>\n<div class=\"codehilite\"><pre><span></span><code>if cfg!(min_target_api_version &gt;= &quot;6.1.7600&quot;) { // `cfg!(min_target_api_version = &quot;Windows7&quot;)` is also possible\n</code></pre></div>\n\n</blockquote>\n<p>That = in the comment should be &gt;=.</p>",
+        "id": 220009497,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1608051819
+    },
+    {
+        "content": "<p>I've quickly skimmed the discussion (very interesting!), I have a question which I think has been touched <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/%28Pre-RFC.3F%29.20target-api.2Fos-version/near/217755548\">here</a> and <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/%28Pre-RFC.3F%29.20target-api.2Fos-version/near/215758160\">here with freebsd example</a>.</p>\n<p>How would such a minimum API requirement would look for a Linux based environment? Even if the RFC leaves this for a future implementation, would it be useful to have a generic idea about it?</p>",
+        "id": 222066853,
+        "sender_full_name": "apiraino",
+        "timestamp": 1610109058
+    },
+    {
+        "content": "<p>(by \"Linux\" I generically mean other platforms that are or will be Tier 1+2)</p>",
+        "id": 222067845,
+        "sender_full_name": "apiraino",
+        "timestamp": 1610109868
+    },
+    {
+        "content": "<p>Things are a bitty tricky on the linux side since do we mean Linux kernel version or libc? There's also the fact that you can different distros that backport whole patches to older kernels which complicates things some more.</p>",
+        "id": 222674507,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1610592133
+    },
+    {
+        "content": "<p>In my head I imagined we meant libc. Can you think of an example where the kernel changes, libc stays the same and the program can change to take advantage of the new kernel?</p>",
+        "id": 222693351,
+        "sender_full_name": "rylev",
+        "timestamp": 1610615388
+    },
+    {
+        "content": "<p>Yes. New syscalls.</p>",
+        "id": 222760472,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1610648815
+    },
+    {
+        "content": "<p>Or new flags to existing syscalls.</p>",
+        "id": 222760501,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1610648825
+    },
+    {
+        "content": "<p>I think, in practice, target OS version for Linux would definitely be the kernel. The libc version is much less important.</p>",
+        "id": 222760710,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1610648910
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span> FYI: I'm working on a new RFC that supersedes the old one and is Windows specific: <code>min_windows_build_version</code>. It will mention why it is platform specific and mention how it can be expanded to other platforms (e.g., <code>min_libc_version</code> on Linux). It will also try to address the fact that this will lead to other similar cfg predicates on other platforms but how that's actually ok. Thoughts?</p>",
+        "id": 224044714,
+        "sender_full_name": "rylev",
+        "timestamp": 1611670782
+    },
+    {
+        "content": "<p>I'm also considering whether to do <code>windows_build_version(min = \"\")</code> which will allow adding a <code>max</code> field later.</p>",
+        "id": 224044885,
+        "sender_full_name": "rylev",
+        "timestamp": 1611670848
+    },
+    {
+        "content": "<p>I (and others) really badly would like this on macos/ios, it would be really nice if the solution here were not windows specific...</p>",
+        "id": 224046777,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611671594
+    },
+    {
+        "content": "<p>So the motivation for this change was the feedback from the <a href=\"https://github.com/rust-lang/rfcs/pull/3036\">current RFC</a>. It's likely not possible to come up with a mechanism that makes sense across all platforms. Now what we <em>could</em> do is change this to be platform specific but propose it for major OS's (Linux, Windows, and macOS).</p>",
+        "id": 224047151,
+        "sender_full_name": "rylev",
+        "timestamp": 1611671748
+    },
+    {
+        "content": "<p>But I'm fairly convinced we'll need to have something that is specific for each platform.</p>",
+        "id": 224047242,
+        "sender_full_name": "rylev",
+        "timestamp": 1611671778
+    },
+    {
+        "content": "<p>So I guess, the question is: would you be happy with something that addressed macOS even if it's specific to macOS?</p>",
+        "id": 224047294,
+        "sender_full_name": "rylev",
+        "timestamp": 1611671814
+    },
+    {
+        "content": "<p>macOS and iOS, but I guess if only tier 1 platforms are worth supporting (which I'd disagree with), then just macOS...</p>",
+        "id": 224047529,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611671922
+    },
+    {
+        "content": "<p>macOS/iOS/tvOS have C preprocessor macros for this stuff, and not having any way of emulating this in Rust is very painful.</p>",
+        "id": 224047612,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611671959
+    },
+    {
+        "content": "<p>(Especially because there's no <code>__attribute__((weak_import))</code> support, which is used ubiquitously on these platforms to allow conditionally using certain APIs. Without this you end up resorting to dlsym which works but requires a lot more complexity)</p>",
+        "id": 224047862,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611672066
+    },
+    {
+        "content": "<p>I'd like to separate out the fact that the mechanism I would propose could be extended to other platforms, and I don't think it's necessary we capture all platforms where this is useful in the initial RFC.</p>",
+        "id": 224048077,
+        "sender_full_name": "rylev",
+        "timestamp": 1611672139
+    },
+    {
+        "content": "<p>Yeah, that's fair, but it's frustrating to see it solved on only one platform when other platforms need it just as badly...</p>",
+        "id": 224048623,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611672374
+    },
+    {
+        "content": "<p>I totally get that though I'm not sure I'd characterize it that way. The proposal will more be like a proposal for how it will work on all platforms in general but with Windows being the first specific supported platform. But this is making me think that supporting at least 1 or 2 other platforms would be good to help people realize that</p>",
+        "id": 224049395,
+        "sender_full_name": "rylev",
+        "timestamp": 1611672682
+    },
+    {
+        "content": "<p>x86_64-apple-darwin is still tier 1 so seems worth supporting. The model for that can largely be later copied for ios/tvos/mac catalyst (ios-macabi) since they use the a similar scheme just with different numbers.</p>",
+        "id": 224049722,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611672826
+    },
+    {
+        "content": "<p>It's true that apple did eventually remove Carbon, but it had been officially deprecated for 8 years and soft-deprecated way longer than that. I also don't think this is suggesting exposing any apis, and a max-api-version proposal could be separate and later (it seems less worthwhile to me)</p>",
+        "id": 224049896,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611672888
+    },
+    {
+        "content": "<p>Does that effect your view on syntax? i.e., <code>mac_os_version(min = \"\")</code> vs <code>min_mac_os_version</code></p>",
+        "id": 224050075,
+        "sender_full_name": "rylev",
+        "timestamp": 1611672958
+    },
+    {
+        "content": "<p>Oh, i have no syntax opinions honestly.</p>",
+        "id": 224050189,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611673001
+    },
+    {
+        "content": "<p>Either of those seems fine to me.</p>",
+        "id": 224050216,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611673020
+    },
+    {
+        "content": "<p>i think the 2nd is more consistent with the current cfg syntax though, no? not that that can't/shouldn't be evolved</p>",
+        "id": 224050324,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611673065
+    },
+    {
+        "content": "<p>Yea it seems more consistent but I am a bit worried about introducing ~5-10 new cfg predicates</p>",
+        "id": 224051377,
+        "sender_full_name": "rylev",
+        "timestamp": 1611673504
+    },
+    {
+        "content": "<p>one benefit of the \"new predicates\" approach is they'd presumably be auto-duplicated to cargo build scripts under <code>CARGO_CFG_MIN_BLAH_VERSION</code> the way the other configuration options are (as described here <a href=\"https://doc.rust-lang.org/cargo/reference/environment-variables.html\">https://doc.rust-lang.org/cargo/reference/environment-variables.html</a>)</p>",
+        "id": 224052078,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611673771
+    },
+    {
+        "content": "<p>for macos at least this would allow stuff like the <code>cc</code> crate to use the right settings</p>",
+        "id": 224052240,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1611673830
+    }
+]

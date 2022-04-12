@@ -1,0 +1,254 @@
+[
+    {
+        "content": "<p>Just curious if this is the intended way to create a boxed DST?</p>\n<div class=\"codehilite\"><pre><span></span><code>#[repr(C)]\n#[derive(Debug)]\nstruct S {\n    header: usize,\n    data: [u8],\n}\n\nimpl S {\n    fn new(l: usize) -&gt; Box&lt;Self&gt; {\n        let (layout, offset) = std::alloc::Layout::new::&lt;usize&gt;()\n            .extend(std::alloc::Layout::array::&lt;u8&gt;(l).unwrap())\n            .unwrap();\n        unsafe {\n            let p: *mut u8 = std::alloc::alloc(dbg!(layout));\n            std::ptr::write(p.cast::&lt;usize&gt;(), l);\n            std::ptr::write_bytes(p.add(offset), 17, l);\n            let p: *mut [u8] = std::ptr::slice_from_raw_parts_mut(p, l);\n            Box::from_raw(p as *mut S)\n        }\n    }\n}\n\nfn main() {\n    let s = S::new(4);\n    println!(&quot;{:?}\\n{:?}&quot;, std::alloc::Layout::for_value(&amp;*s), s);\n}\n</code></pre></div>\n\n\n<p>This prints:</p>\n<div class=\"codehilite\"><pre><span></span><code>[foo.rs:14] layout = Layout {\n    size_: 12,\n    align_: 8,\n}\nLayout { size_: 16, align_: 8 }\nS { header: 4, data: [17, 17, 17, 17] }\n</code></pre></div>\n\n\n<p>Which makes me realize that the two layouts aren't the same and I'm not sure if that's problematic or not?</p>",
+        "id": 209475154,
+        "sender_full_name": "Ahmed Charles",
+        "timestamp": 1599632083
+    },
+    {
+        "content": "<p>Just <em>guessing</em> but I think the difference it boils down to alignment and packaging.</p>\n<p>I.e. S has a alignment of 8 so <code>for_value</code> treats it as having padding to have a multiple of 8 <strong>I geuss</strong>.</p>\n<p>But if you do <code>std::alloc::Layout::for_value(&amp;s.data)</code> you will see that the size is correctly encoded. And adding a bit more debugging we can also check and realize that the offset at which data starts is correct. So if I didn't overlook anything it's just the padding which can cause this \"growth\" in size.</p>\n<p>Furthermore if you do add the <code>#[repr(packed)]</code> attribute to <code>S </code> you will see that now the size is exactly what you expect (for S! we didn't add the equivalent of packed to the layout creation code) , except with align 1. </p>\n<p>While the alignment of usize doesn't need to be 8 as far as I know (I.e. I'm not sure at all) not align it to a multiple of it's size can lead to slower code on some platforms.</p>\n<p>Sadly this doesn't solve your question of weather or not it's save. As I don't know if the difference in padding can somehow load to latent undefined behavior in LLVM, it probably shouldn't but again I'm just guessing.</p>",
+        "id": 209536522,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1599669839
+    },
+    {
+        "content": "<p>From the docs of extend:</p>\n<blockquote>\n<p>Creates a layout describing the record for self followed by next, including any necessary padding to ensure that next will be properly aligned, but <em>no trailing padding</em>.</p>\n</blockquote>",
+        "id": 209536656,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1599669901
+    },
+    {
+        "content": "<p>Also from the docs:</p>\n<p>Add <code>let layout = layout.pad_to_align();</code> as a line above your unsafe block, then it all should work correct and be safe to use.</p>",
+        "id": 209537067,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1599670116
+    },
+    {
+        "content": "<p>Also note that there is a unstable  <code>extend_packed</code> for creating <code>#[repr(packed)]</code> what I did above was just to show that's most likely padding related and not safe at all (even if it somewhat works out for this simple case).</p>",
+        "id": 209537344,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1599670256
+    },
+    {
+        "content": "<p>I'll probably try to use slice-dst, which at least means that any major issues with the approach can be found communally. :)</p>",
+        "id": 209580836,
+        "sender_full_name": "Ahmed Charles",
+        "timestamp": 1599693861
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"209646\">Philipp Korber</span> <a href=\"#narrow/stream/122651-general/topic/Boxed.20DST.20creation/near/209536522\">said</a>:</p>\n<blockquote>\n<p>While the alignment of usize doesn't need to be 8 as far as I know (I.e. I'm not sure at all) not align it to a multiple of it's size can lead to slower code on some platforms.</p>\n</blockquote>\n<p>everything in rust has to be aligned. unaligned loads/stores are UB unless you use <code>read_unaligned</code>/<code>write_unaligned</code>. also, unaligned references in rust are also UB<br>\nSee: <a href=\"https://doc.rust-lang.org/beta/std/ptr/fn.read_unaligned.html#on-packed-structs\">https://doc.rust-lang.org/beta/std/ptr/fn.read_unaligned.html#on-packed-structs</a></p>",
+        "id": 209764961,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1599820787
+    },
+    {
+        "content": "<p>Thanks very good to know.</p>",
+        "id": 209765758,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1599821508
+    },
+    {
+        "content": "<p>FWIW this is also true for C/C++, the whole \"unaligned is just slower\" is a myth. unaligned reads without specifying it somehow is 100% UB</p>",
+        "id": 209780766,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1599831089
+    },
+    {
+        "content": "<p>\"unaligned is just slower\" is fairly true for hardware, but compilers are still stuck with standards formed from the days when it was more hazardous and have carried the hazards with them</p>",
+        "id": 209785928,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599833839
+    },
+    {
+        "content": "<p>IIRC, there are still arm platforms where unaligned reads are UB</p>",
+        "id": 209786017,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1599833881
+    },
+    {
+        "content": "<p>and I think x86 SIMD instructions have alignment requirements</p>",
+        "id": 209786110,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1599833909
+    },
+    {
+        "content": "<p>x86 will fault on unaligned accesses to regular variables too, if you set the #AC flag</p>",
+        "id": 209786162,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599833935
+    },
+    {
+        "content": "<p>I wonder if there is something in the ABI standard that says don't set the AC flag because it's a giant footgun because no one knows it exists</p>",
+        "id": 209786346,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599834007
+    },
+    {
+        "content": "<p>For portability it's anyway better to make references to unaligned values UB, there will probably always be some platform where it's simple not supported or very limited in the way it can be used.  Through I did wonder if it will fault if you use <code>read_unaligned</code> while the AC flag is set.  It turns out no as <code>read_unaligned</code> reads the value as bytes into a aligned on-stack value and returns that so no unaligned read happens at all  ;=)</p>",
+        "id": 209788035,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1599834731
+    },
+    {
+        "content": "<p>...unless the compiler emits a multi-byte load anyways because it does not expect the #AC flag to be set</p>",
+        "id": 209788232,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1599834832
+    },
+    {
+        "content": "<p>The compiler will 100% just emit unaligned loads anyways (I exploit this often enough, too.)</p>",
+        "id": 209794176,
+        "sender_full_name": "Braden Nelson",
+        "timestamp": 1599837578
+    },
+    {
+        "content": "<p>You'll get major performance issues if you do atomic operations on unaligned values, and there are hardware features to detect and prevent that.</p>",
+        "id": 209816783,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1599848443
+    },
+    {
+        "content": "<p>Apart from that, though, #AC is pretty much verboten, and even partially repurposed in current hardware.</p>",
+        "id": 209816868,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1599848499
+    },
+    {
+        "content": "<p>wait, it's possible to do atomic operations on unaligned memory <span aria-label=\"eyes\" class=\"emoji emoji-1f440\" role=\"img\" title=\"eyes\">:eyes:</span></p>",
+        "id": 209816876,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1599848502
+    },
+    {
+        "content": "<p>how does that possibly work?</p>",
+        "id": 209816886,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1599848506
+    },
+    {
+        "content": "<p>Search for \"split lock\".</p>",
+        "id": 209816897,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1599848514
+    },
+    {
+        "content": "<p>The processor locks the memory bus.</p>",
+        "id": 209816948,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1599848526
+    },
+    {
+        "content": "<p><a href=\"https://lwn.net/Articles/790464/\">https://lwn.net/Articles/790464/</a> looks interesting</p>",
+        "id": 209817025,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1599848565
+    },
+    {
+        "content": "<p>looks like <a href=\"https://lwn.net/Articles/790464/\">https://lwn.net/Articles/790464/</a> explains it</p>",
+        "id": 209817026,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1599848566
+    },
+    {
+        "content": "<p>That's how <em>all</em> locked operations used to work, but then the processor gained more native support for handling aligned lock operations without having to lock the bus.</p>",
+        "id": 209817027,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1599848566
+    },
+    {
+        "content": "<blockquote>\n<p>Intel's choice was to lock the whole memory bus to solve the coherency problem; the processor locks the bus for the duration of the operation, meaning that no other CPUs or devices can access it. The split lock blocks not only the CPU performing the access, but also all others in the system. Configuring the bus-locking protocol itself also adds significant overhead to the system as a whole. </p>\n</blockquote>\n<p>oh oof</p>",
+        "id": 209817113,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1599848612
+    },
+    {
+        "content": "<p>not to be confused with Arm's Split-Lock architecture</p>",
+        "id": 209817202,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1599848653
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125294\">Aaron Hill</span> <a href=\"#narrow/stream/122651-general/topic/Boxed.20DST.20creation/near/209786017\">said</a>:</p>\n<blockquote>\n<p>IIRC, there are still arm platforms where unaligned reads are UB</p>\n</blockquote>\n<p>AFAIK hardware doesn't have any concept of \"UB\". it does reads/loads and operations exactly as specified. the UB comes from languages that give \"better\" promises than the hardware if you use them correctly.</p>\n<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/122651-general/topic/Boxed.20DST.20creation/near/209785928\">said</a>:</p>\n<blockquote>\n<p>\"unaligned is just slower\" is fairly true for hardware, but compilers are still stuck with standards formed from the days when it was more hazardous and have carried the hazards with them</p>\n</blockquote>\n<p>By hardware do you mean regular loads in x86? because in RISC-V unaligned load/store will cause a trap (abort).  also x86 SIMD can trap on unaligned access: <a href=\"https://play.rust-lang.org/?gist=bf9ead2f7d21c4392ce5ae276a91e28a\">https://play.rust-lang.org/?gist=bf9ead2f7d21c4392ce5ae276a91e28a</a></p>",
+        "id": 209879398,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1599913598
+    },
+    {
+        "content": "<p>By \"fairly true\" I mean many architectures support this just fine. Almost every architecture has some unaligned load support and some explicit non-support</p>",
+        "id": 209879496,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599913789
+    },
+    {
+        "content": "<p>Hardware specifications certainly have \"UB\"</p>",
+        "id": 209879563,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599913866
+    },
+    {
+        "content": "<p>Of course if you try these operations something will happen, but they tend to be unstable with microarchitectural versions</p>",
+        "id": 209879582,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599913902
+    },
+    {
+        "content": "<p>When claiming the alignment of a pointer is higher than the actual alignment, the compiler could do arbitrary bad things. In fact I think Ionce read an article where a wrong alignment claim caused an invalid result rather than a silently working or crashing even when targeting x86.</p>",
+        "id": 209881805,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1599917733
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> Yep. that's why you should be <em>very</em> wary of language UB. you can't know how the compiler might use those assumptions</p>",
+        "id": 209881876,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1599917840
+    },
+    {
+        "content": "<p>Are you thinking of <a href=\"https://pzemtsov.github.io/2016/11/06/bug-story-alignment-on-x86.html\">https://pzemtsov.github.io/2016/11/06/bug-story-alignment-on-x86.html</a> ?</p>",
+        "id": 209882011,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599918025
+    },
+    {
+        "content": "<p>I don't think so.</p>",
+        "id": 209882092,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1599918155
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"249222\">@Elichai Turkel</span> ARM devices certainly <em>do not</em> simply \"perform the access exactly as requested\" when performing an unaligned access.</p>",
+        "id": 209883692,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1599920972
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224471\">Lokathor</span> <a href=\"#narrow/stream/122651-general/topic/Boxed.20DST.20creation/near/209883692\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"249222\">Elichai Turkel</span> ARM devices certainly <em>do not</em> simply \"perform the access exactly as requested\" when performing an unaligned access.</p>\n</blockquote>\n<p>I only claimed they do some specified thing, not that they do the \"expected thing\". but I might be wrong</p>",
+        "id": 209883742,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1599921019
+    },
+    {
+        "content": "<p>They do <em>something</em> in the sense that they're a part of the universe, but not necessarily anything that you can reason about as a programmer. With Unspecified operations you can get quite strange results depending on the CPU. On some devices the temperature of the room the device is in can even be a factor.</p>",
+        "id": 209883846,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1599921205
+    },
+    {
+        "content": "<p>In these days of microcode-driven devices and ISAs that generalize over many very different chipsets, you are never actually beyond \"language UB\" concerns :^) Even software is hardware, even hardware is software.</p>",
+        "id": 209883891,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1599921249
+    },
+    {
+        "content": "<p>There are actually a fair number of operations on ARM that <strong>are</strong> specified to be \"unaligned access tolerant\", as far as I can tell, but ARM specifically notes which are tolerant and also notes that there is no guarantee the OS on top will let you get away with one... because they are not actually saying it's a good idea, they are saying \"please don't, it slows everything down horribly, at best\". And I would not generalize this safety net across all memory accesses on ARM.</p>",
+        "id": 209884249,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1599921909
+    },
+    {
+        "content": "<p>That's assuming you're using a newer ARM device at all. The older stuff just declares it UNSPECIFIED, all caps, and hopefully you don't go therr.</p>",
+        "id": 209884688,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1599922698
+    }
+]

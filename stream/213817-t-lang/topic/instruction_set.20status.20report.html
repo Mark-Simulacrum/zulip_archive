@@ -1,0 +1,184 @@
+<html>
+<head><meta charset="utf-8"><title>instruction_set status report · t-lang · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/index.html">t-lang</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html">instruction_set status report</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="228337051"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/228337051" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#228337051">(Mar 02 2021 at 01:12)</a>:</h4>
+<p>I've been catching up on the T-lang meetings, and <code>#[instruction_set(?)]</code> has been on the agenda with no info for a month or two, apparently. Here's the story.</p>
+<p>The thing with the <code>#[instruction_set(?)]</code> attribute is that the way rustc passes this to LLVM it is that it sets or unsets a target feature attribute on the individual function (<code>thumb</code>, in the case of ARM, I'm not sure the MIPS name). This is <em>similar to</em> the <code>#[target_feature(enable="foo")]</code> attribute on a function. The primary difference is that <code>instruction_set</code> can enable or <em>disable</em> a target feature, and the normal <code>target_feature</code> attribute can only enable target features.</p>
+<p>So this brings us to all the fun with cross-feature function calls.</p>
+<ul>
+<li>LLVM <em>will not</em> inline a function across an "incompatible" target feature barrier.<ul>
+<li>If you have function <code>a()</code> that uses <code>avx</code> and function <code>s()</code> that uses <code>sse</code>, then <code>s()</code> can be inlined into <code>a()</code>, but <code>a()</code> cannot be inlined into <code>s()</code>.</li>
+<li>On ARM, having <code>thumb</code> either on <strong>or</strong> off is incompatible with the opposite state.</li>
+</ul>
+</li>
+<li>Actaully I just lied to you a bit because <code>inline(always)</code>, which maps to <code>forceinline</code> in LLVM, apparently can actually <em>force</em> the inline to happen, even across a feature barrier.</li>
+</ul>
+<p>So <em>when</em> does this matter? Well, sometimes, but not always:</p>
+<ul>
+<li>If your function body is just rust code, then that code could naturally have worked in either instruciton_set.</li>
+<li>If your funciton body is inline assembly which is written for A but then gets inlined into a funciton using T, then you're kinda hosed.</li>
+</ul>
+<p>So that's one concrete problem: <strong>instruction_set and inline assembly behave badly in the presence of inline(always)</strong></p>
+<p>(Note: of course, inline assembly is unsafe and so this isn't a <em>soundness</em> issue, it's just a <em>footgun</em> issue)</p>
+<p>But here's the other problem, which is actually possibly just as much of an issue: remember how rust has all these "zero cost" abstractions that rust loves? like iterators? and smart pointers? and stuff like that? that stuff all depends on functions that get inlined. But when <code>core</code> and the rest of the program are being compiled using one instruction set, and then your little alternate instruciton set function is being compiled using another instruction set, then your little alternate instruction set function can't inline anything into itself. Even a single volatile access is a function call to the volatile method, then the single access instrction, and then that returns. Runtime performance falls into a deep, deep hole in the ground, worse than the worst debug performance you've ever faced. Which is not... <em>wrong</em> exactly, it's not <em>unsound</em>, but it is <em>very bad</em>.</p>
+<p>And you can "fix" this by making your instruction_set function with an alternate instruction set immediately just call to whatever other fuction written in the default instruction set for the program. However, that's... rather limiting and unfortunate.</p>
+<p>So that's the other concrete problem: <strong>instruction_set has poor runtime performance in the absence of either inline(always) or inline assembly</strong></p>
+<p>And that's the status report.</p>
+
+
+
+<a name="228462321"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/228462321" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#228462321">(Mar 02 2021 at 18:39)</a>:</h4>
+<p>Thanks! i'll copy this to the planning meeting update</p>
+
+
+
+<a name="232812956"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232812956" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232812956">(Apr 01 2021 at 19:36)</a>:</h4>
+<p>it is unfortunate that the instruction_set attribute is of such minimal use. At present, you can:<br>
+, immediately jump to a default instruction set function<br>
+, immediately use inline assembly<br>
+, take a massive performance hit because you get absolutely no inlines and rust relies on inlines more than you'd think.</p>
+<p>So my proposal for a possible way to fix it is to have <code>asm!</code> and <code>instruction_set</code> both "lock" a function to only one particular instruction set, and all other functions are "any instruction set" by default. Then when inlining rustc can inline an "any" function to either specific instruction set. Does this sound reasonable?</p>
+<p>Or, maybe put another way: if a non-default instruction set function calls a default instruction set function, and the inline data is available, rustc generates llvm ir for the function twice, once with default instruction set attributes and once with the non-default instruction set attributes. This would need to happen all the way down the call stack as long as inline data is available. Then llvm's normal compilation mechanisms would be able to handle the rest.</p>
+
+
+
+<a name="232813944"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232813944" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232813944">(Apr 01 2021 at 19:44)</a>:</h4>
+<p>I'm not sure how implementable is that.</p>
+
+
+
+<a name="232814817"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232814817" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232814817">(Apr 01 2021 at 19:51)</a>:</h4>
+<p>dag</p>
+
+
+
+<a name="232815045"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232815045" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232815045">(Apr 01 2021 at 19:52)</a>:</h4>
+<p>Any <em>implementable</em> ideas on how to compensate for the current lack of inline support? Because it makes the feature nearly useless.</p>
+
+
+
+<a name="232821872"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232821872" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232821872">(Apr 01 2021 at 20:42)</a>:</h4>
+<p>Fundamentally, <code>instruction_set</code> only needs to guarantee 2 things:</p>
+<ul>
+<li>A function pointer of this function will have the low bit set/clear depending on the selected ISA.</li>
+<li>Inline asm in that function will be compiling using the given ISA.</li>
+</ul>
+
+
+
+<a name="232822145"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232822145" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232822145">(Apr 01 2021 at 20:44)</a>:</h4>
+<p>For inline assembly, we could actually do this with a flag like <code>att_syntax</code> instead of tying it to <code>instruction_set</code>.</p>
+
+
+
+<a name="232822271"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232822271" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232822271">(Apr 01 2021 at 20:45)</a>:</h4>
+<p>Hmm, actually there's a third interaction:</p>
+<ul>
+<li>Naked functions must fulfill both of the above conditions.</li>
+</ul>
+
+
+
+<a name="232822373"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232822373" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232822373">(Apr 01 2021 at 20:46)</a>:</h4>
+<p>Fundamentally, I'm happy to automatically downgrade <code>#[inline(always)]</code> to <code>#[inline]</code> for functions using <code>instruction_set</code>.</p>
+
+
+
+<a name="232822429"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232822429" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Amanieu <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232822429">(Apr 01 2021 at 20:46)</a>:</h4>
+<p><code>#[inline(always)]</code> isn't a hard guarantee anyways.</p>
+
+
+
+<a name="232828192"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232828192" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232828192">(Apr 01 2021 at 21:33)</a>:</h4>
+<p>That doesn't fix the performance problem.</p>
+<p><a href="https://rust.godbolt.org/z/fE47jT5G6">https://rust.godbolt.org/z/fE47jT5G6</a></p>
+<p>Because of insufficient inline, what should be one instruction becomes an entire function call just to do the instruction and return</p>
+
+
+
+<a name="232833846"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232833846" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232833846">(Apr 01 2021 at 22:27)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="143274">Amanieu</span> <a href="#narrow/stream/213817-t-lang/topic/instruction_set.20status.20report/near/232821872">said</a>:</p>
+<blockquote>
+<ul>
+<li>A function pointer of this function will have the low bit set/clear depending on the selected ISA.</li>
+</ul>
+</blockquote>
+<p>that sounds extremely arm-sepcific. While <code>#[instruction_set]</code> currently only supports ARM, I'm not sure that's going to always be the case.</p>
+
+
+
+<a name="232834164"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232834164" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232834164">(Apr 01 2021 at 22:30)</a>:</h4>
+<p>the problem with "any" ISA being the default is that something like</p>
+<div class="codehilite"><pre><span></span><code>fn banana() {
+    asm!(&quot;arm32 specific things&quot;, ...);
+    arm32_specific_intrinsics();
+    arm32_specific_extern_function();
+    /* some carefully optimized code sequence for ARM32 */
+    // etc
+}
+</code></pre></div>
+<p>would also become a "any". But I imagine you don't want to annotate all of the generic functions in the ecosystem with <code>#[instruction_set(any)]</code>… so idk.</p>
+
+
+
+<a name="232836164"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232836164" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232836164">(Apr 01 2021 at 22:53)</a>:</h4>
+<p>Well, my idea would be that if you have an asm block then that makes the function implicitly assigned to specifically be from the default target of the build, not from the "any instruction set" group. And if you want something else you'd have to use the attribute.</p>
+
+
+
+<a name="232836230"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/232836230" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#232836230">(Apr 01 2021 at 22:54)</a>:</h4>
+<p>so only functions without an inline asm block would be "any", but that's still nearly all functions overall</p>
+
+
+
+<a name="233411124"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/233411124" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#233411124">(Apr 07 2021 at 00:15)</a>:</h4>
+<p><span class="user-mention" data-user-id="224471">@Lokathor</span> I guess there's not much changes since before, but can you post an update to <a href="https://github.com/rust-lang/rust/issues/74727">https://github.com/rust-lang/rust/issues/74727</a> in advance of the planning meeting tomorrow at <time datetime="2021-04-07T17:00:00Z">2021-04-07T13:00:00-04:00</time>? I'm not sure whether the update you posted here ever made it on the tracking issue, for that matter. I did <a href="https://hackmd.io/BurZQXKST6i0vFVWn61Vaw?view#Questions-to-consider-for-updates">prepare some sample things to consider</a>.</p>
+
+
+
+<a name="233411808"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/233411808" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#233411808">(Apr 07 2021 at 00:23)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> yes i'll post in the issue</p>
+
+
+
+<a name="244219772"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/244219772" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#244219772">(Jun 29 2021 at 00:11)</a>:</h4>
+<p><span class="user-mention" data-user-id="224471">@Lokathor</span> is <a href="https://github.com/rust-lang/rust/issues/74727#issuecomment-814538151">https://github.com/rust-lang/rust/issues/74727#issuecomment-814538151</a> still pretty much the latest on the instruction set attribute? talking over the "doneness" of this and the relationship that has to stability might be good to file a design meeting for, but I'm not sure.</p>
+
+
+
+<a name="244224622"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/instruction_set%20status%20report/near/244224622" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/instruction_set.20status.20report.html#244224622">(Jun 29 2021 at 01:48)</a>:</h4>
+<p>No changes. Someone with compiler developer skills (eg: not me) would need to find a way to fix the problem.</p>
+<p>Technically speaking it's basically ready for stabilization, and the rest of it is quality-of-life.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

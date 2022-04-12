@@ -1,0 +1,200 @@
+[
+    {
+        "content": "<p>The most recent PR is <a href=\"https://github.com/rust-lang/rust/pull/71497\">https://github.com/rust-lang/rust/pull/71497</a> , which seems has stalled a bit.</p>",
+        "id": 200881455,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1592223787
+    },
+    {
+        "content": "<p>i'm coming back to this - don't worry. i do want to talk to somebody more experienced in llvm + compiler internals to figure out what im doing wrong in llvm to trigger all these assertion failures</p>",
+        "id": 203573760,
+        "sender_full_name": "tinaun",
+        "timestamp": 1594430417
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119491\">@tinaun</span>  <a class=\"stream\" data-stream-id=\"187780\" href=\"/#narrow/stream/187780-t-compiler.2Fwg-llvm\">#t-compiler/wg-llvm</a> maybe a good place to ask for help</p>",
+        "id": 206362650,
+        "sender_full_name": "DPC",
+        "timestamp": 1596918059
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119491\">@tinaun</span>  Was the code in the PR the latest? I can try to help debug the LLVM assertions.</p>",
+        "id": 206877877,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597356675
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132778\">@Luqman Aden</span>  yeah - theres still some obvious bugs (like not all pointers being in 32-bit rva form where needed, but its up to date with the pr)</p>",
+        "id": 207003122,
+        "sender_full_name": "tinaun",
+        "timestamp": 1597462558
+    },
+    {
+        "content": "<p><a href=\"https://gist.github.com/tinaun/743c56dcd1722d301e10788fff2e4d0d\">https://gist.github.com/tinaun/743c56dcd1722d301e10788fff2e4d0d</a> here's a gist showing the module i generate for the idata sections (this is a separate module from the rest of the compilation)</p>",
+        "id": 207003221,
+        "sender_full_name": "tinaun",
+        "timestamp": 1597462734
+    },
+    {
+        "content": "<p>Hey all. I've basically no experience with LLVM, but I'd love to help with this. Let me know if/how I can jump in</p>",
+        "id": 207016126,
+        "sender_full_name": "rylev",
+        "timestamp": 1597488214
+    },
+    {
+        "content": "<p>So one thing that wasn't clarified on the RFC or tracking issue is that I'm pretty sure emitting just .idata* sections isn't enough. Those names are just conventions and you can have an exe with imports but no idata sections.</p>",
+        "id": 207109507,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597644292
+    },
+    {
+        "content": "<p>The PE loader relies on finding the import table from an optional \"data directory\" in the file's header.</p>",
+        "id": 207109587,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597644365
+    },
+    {
+        "content": "<p><a href=\"https://docs.microsoft.com/en-us/windows/win32/debug/pe-format?redirectedfrom=MSDN#optional-header-data-directories-image-only\">https://docs.microsoft.com/en-us/windows/win32/debug/pe-format?redirectedfrom=MSDN#optional-header-data-directories-image-only</a><br>\nOffset 104/120 (PE/PE32+) should be the RVA (relative virtual address) to the image import descriptor and its size</p>",
+        "id": 207109733,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597644600
+    },
+    {
+        "content": "<p>Also, that page clarifies that the section name is more just convention:</p>\n<blockquote>\n<p>Also, do not assume that the RVAs in this table point to the beginning of a section or that the sections that contain specific tables have specific names.</p>\n</blockquote>",
+        "id": 207109790,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597644653
+    },
+    {
+        "content": "<p>AFAIK rustc doesn't deal with creating the final image (instead just emitting objects later passed to the linker) and so manipulating those headers isn't as straightforward.</p>",
+        "id": 207110060,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597645025
+    },
+    {
+        "content": "<p>What we could do instead though is create a coff import obj i.e. essentially create the import lib ourselves</p>",
+        "id": 207110085,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597645079
+    },
+    {
+        "content": "<p>To that end, this seems promising: writeImportLibrary - <a href=\"https://github.com/llvm/llvm-project/blob/master/llvm/lib/Object/COFFImportFile.cpp#L571\">https://github.com/llvm/llvm-project/blob/master/llvm/lib/Object/COFFImportFile.cpp#L571</a></p>",
+        "id": 207110134,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597645104
+    },
+    {
+        "content": "<p>So the rough process would be collect together imports specified via the raw-dylib attribute kind and generate import libs along with the normal object files, and pass them to the linker.</p>",
+        "id": 207110219,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597645243
+    },
+    {
+        "content": "<p>Oh, I guess __imp_ stubs might still need to be generated. Though, I can't remember where right now but I could've sworn I read somewhere the linker might actually just be able to synthesize those. But that relies on linker support (both link.exe and lld) and uh, citation needed :P</p>",
+        "id": 207110374,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597645450
+    },
+    {
+        "content": "<p>Ok, reading more I'm inclined to say we don't need to generate a stub here. We already mark dylib extern symbols with the dllimport attribute which makes llvm instead use an indirect call via __imp_foo. Once we generate the import lib, it should contain such a symbol that will point to the the Import Address Table (IAT) that gets filled with the real address at runtime by the PE loader. A stub is only necessary for the non-dllimport case and in fact I think the linker handles that case anyways.</p>",
+        "id": 207116518,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597651491
+    },
+    {
+        "content": "<p>that makes sense - i wanted to generate the lib files directly at first, but <span class=\"user-mention\" data-user-id=\"125267\">@Peter Rabbit</span> said that i should try to find a different way to not have to depend on link.exe, but if lld supports them it doesn't really matter - its a lot simpler this way </p>\n<p>a older version of the pr had the __imp_ stubs being generated, but they stopped being generated somewhere along the line (i think a privacy change?)</p>",
+        "id": 207210634,
+        "sender_full_name": "tinaun",
+        "timestamp": 1597708696
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"132778\">Luqman Aden</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/Tracking.20raw_dylib.20progress.2E/near/207110085\">said</a>:</p>\n<blockquote>\n<p>What we could do instead though is create a coff import obj i.e. essentially create the import lib ourselves</p>\n</blockquote>\n<p>The whole point of raw-dylib is that we are effectively emitting our own import library instead of relying on external import libraries. It's purely an implementation detail of whether it is a separate <code>.lib</code> import library or included directly inside the rlib.</p>",
+        "id": 207210963,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1597709019
+    },
+    {
+        "content": "<p>In an import library <code>__imp_foo</code> is a static containing the address of the dynamically loaded foo whose value is updated during the relocation process at runtime, while <code>foo</code> is a stub function which does nothing more than <code>jmp __imp_foo</code>. The former is used directly by code when <code>dllimport</code> was used, while the latter exists for compatibility with code that forgot to use <code>dllimport</code>.</p>",
+        "id": 207211145,
+        "sender_full_name": "Peter Rabbit",
+        "timestamp": 1597709170
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125267\">Peter Rabbit</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/Tracking.20raw_dylib.20progress.2E/near/207210963\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"132778\">Luqman Aden</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/Tracking.20raw_dylib.20progress.2E/near/207110085\">said</a>:</p>\n<blockquote>\n<p>What we could do instead though is create a coff import obj i.e. essentially create the import lib ourselves</p>\n</blockquote>\n<p>The whole point of raw-dylib is that we are effectively emitting our own import library instead of relying on external import libraries. It's purely an implementation detail of whether it is a separate <code>.lib</code> import library or included directly inside the rlib.</p>\n</blockquote>\n<p>Sure, yea it was more a comment on implementation.</p>",
+        "id": 207211912,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1597710002
+    },
+    {
+        "content": "<p>i got a bors notification saying that my pr finally broke, so im going to try to redo it and generate a lib instead of a llvm module (most of the pr remains pretty much the same though)</p>",
+        "id": 207218932,
+        "sender_full_name": "tinaun",
+        "timestamp": 1597719240
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"132778\">Luqman Aden</span> <a href=\"#narrow/stream/242869-t-compiler.2Fwindows/topic/Tracking.20raw_dylib.20progress.2E/near/207109587\">said</a>:</p>\n<blockquote>\n<p>The PE loader relies on finding the import table from an optional \"data directory\" in the file's header.</p>\n</blockquote>\n<p>Isn't this directory built by the linker? From the document you linked:</p>\n<blockquote>\n<p>Every image file has an optional header that provides information to the loader. This header is optional in the sense that some files (specifically, object files) do not have it. For image files, this header is required. An object file can have an optional header, but generally this header has no function in an object file except to increase its size.</p>\n</blockquote>",
+        "id": 210650151,
+        "sender_full_name": "est31",
+        "timestamp": 1600579021
+    },
+    {
+        "content": "<p>Sure, reading back I think my point there was that just emitting sections named .idata$n by itself wouldn't actually work.</p>",
+        "id": 210693128,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1600648866
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132778\">@Luqman Aden</span> what else would be needed beyond those idata sections? rustc does not emit an exe file itself, it's created by the linker.</p>",
+        "id": 211003178,
+        "sender_full_name": "est31",
+        "timestamp": 1600868133
+    },
+    {
+        "content": "<p>you would need to generate a .lib file following the specifications in here - <a href=\"https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#archive-library-file-format\">https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#archive-library-file-format</a> (the \"short import\" format specifically) and then pass it to the linker</p>",
+        "id": 211401598,
+        "sender_full_name": "tinaun",
+        "timestamp": 1601188473
+    },
+    {
+        "content": "<p>Hey, folks. I'm interested in contributing to this work. Is anyone still actively working on this?  If not, should I pick up @tinaun's PR and continue work on it?</p>",
+        "id": 215523898,
+        "sender_full_name": "Arlie Davis",
+        "timestamp": 1604445976
+    },
+    {
+        "content": "<p>Hey I’d still like to work on this pr, but could use some help.</p>\n<p>I’d love to talk more tomorrow</p>",
+        "id": 215534678,
+        "sender_full_name": "tinaun",
+        "timestamp": 1604456606
+    },
+    {
+        "content": "<p>I believe <span class=\"user-mention\" data-user-id=\"132778\">@Luqman Aden</span> was also helping out.</p>",
+        "id": 215583498,
+        "sender_full_name": "rylev",
+        "timestamp": 1604498419
+    },
+    {
+        "content": "<p>I mostly just quoted docs about how the feature should work and offered help with any LLVM issues</p>",
+        "id": 215606404,
+        "sender_full_name": "Luqman Aden",
+        "timestamp": 1604507530
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119491\">@tinaun</span> What is the current status of your Draft PR? I would love to help, but have neither experience with LLVM nor with the low-level details of linking on Windows.</p>",
+        "id": 217523022,
+        "sender_full_name": "Clemens Wasser",
+        "timestamp": 1605998894
+    },
+    {
+        "content": "<p>my pr is out of date and really old (from before the great std/librustc_* -&gt; compiler/rustc_* migration), i reapplied my commits on a new branch and am working on a version that generates .lib files to give to the linker instead of going through llvm (see the comments above) - i have the lib generation done but i haven't threaded it through the backend to actually write the files anywhere - im probably just gonna hard code some stuff and test if it works manually first</p>",
+        "id": 217530805,
+        "sender_full_name": "tinaun",
+        "timestamp": 1606013427
+    },
+    {
+        "content": "<p>Hey @tinaun, how is this coming? I was thinking of picking this work up, myself.</p>",
+        "id": 217939298,
+        "sender_full_name": "Arlie Davis",
+        "timestamp": 1606338300
+    }
+]

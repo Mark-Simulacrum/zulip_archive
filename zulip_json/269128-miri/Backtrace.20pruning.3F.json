@@ -1,0 +1,152 @@
+[
+    {
+        "content": "<p>I want to add backtrace pruning to Miri, in the style of RUST_BACKTRACE=1 instead of what it currently uses which is like RUST_BACKTRACE=full. The current situation is extremely silly, when running <code>cargo miri test</code> fully half my screen is taken up by the useless part of the backtrace.</p>\n<p>I'm just a bit lost in the code, and I can't figure out where backtraces get printed. Can anyone point me to the right place?</p>",
+        "id": 272565633,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645332097
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/blob/a6fe969541d14ad8ba286c47416e6d3f58a1c9a4/compiler/rustc_const_eval/src/interpret/eval_context.rs#L958\">https://github.com/rust-lang/rust/blob/a6fe969541d14ad8ba286c47416e6d3f58a1c9a4/compiler/rustc_const_eval/src/interpret/eval_context.rs#L958</a> is where the backtrace is generated. Tho you may want to filter at the call site in miri as in CTFE we don't have any of the noise</p>",
+        "id": 272580647,
+        "sender_full_name": "oli",
+        "timestamp": 1645350690
+    },
+    {
+        "content": "<p>the miri side of this is at <a href=\"https://github.com/rust-lang/miri/blob/0db40903769f38669936c5ebb0b882b18c27f449/src/diagnostics.rs#L235\">https://github.com/rust-lang/miri/blob/0db40903769f38669936c5ebb0b882b18c27f449/src/diagnostics.rs#L235</a></p>",
+        "id": 272602060,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645374588
+    },
+    {
+        "content": "<p>Oh interesting, that's why Miri is sometimes missing spans. Maybe I'll look into that too later.</p>",
+        "id": 272602498,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645375068
+    },
+    {
+        "content": "<p>Ah! My complaint about that <code>DefId::is_local</code> call is that it kinda leaves you guessing when the stack trace points into a dependency. For example, all the information about why this code is invalid is being omitted here:</p>\n<div class=\"codehilite\"><pre><span></span><code> error: Undefined Behavior: trying to reborrow for Unique at alloc77278, but parent tag &lt;209828&gt; does not have an appropriate item in the borrow stack\n    --&gt; /opt/rustwide/rustup-home/toolchains/nightly-2022-01-27-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/raw.rs:130:14\n     |\n 130 |     unsafe { &amp;mut *ptr::slice_from_raw_parts_mut(data, len) }\n     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ trying to reborrow for Unique at alloc77278, but parent tag &lt;209828&gt; does not have an appropriate item in the borrow stack\n     |\n     = help: this indicates a potential bug in the program: it performed an invalid operation, but the rules it violated are still experimental\n     = help: see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md for further information\n     = note: inside `std::slice::from_raw_parts_mut::&lt;cipher::generic_array::GenericArray&lt;u8, cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UTerm, cipher::consts::B1&gt;, cipher::consts::B0&gt;, cipher::consts::B0&gt;, cipher::consts::B0&gt;, cipher::consts::B0&gt;&gt;&gt;` at /opt/rustwide/rustup-home/toolchains/nightly-2022-01-27-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/raw.rs:130:14     = note: inside `block_modes::utils::to_blocks::&lt;cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UInt&lt;cipher::generic_array::typenum::UTerm, cipher::consts::B1&gt;, cipher::consts::B0&gt;, cipher::consts::B0&gt;, cipher::consts::B0&gt;, cipher::consts::B0&gt;&gt;` at /opt/rustwide/workdir/src/utils.rs:28:9     = note: inside `&lt;block_modes::Cbc&lt;aes::Aes128, block_modes::block_padding::NoPadding&gt; as block_modes::BlockMode&lt;aes::Aes128, block_modes::block_padding::NoPadding&gt;&gt;::encrypt_vec` at /opt/rustwide/workdir/src/traits.rs:93:29 note: inside `cbc_aes128` at tests/lib.rs:32:16\n    --&gt; tests/lib.rs:32:16\n     |\n 32  |     assert_eq!(mode.encrypt_vec(plaintext), &amp;ciphertext[..]);\n     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n note: inside closure at tests/lib.rs:25:1\n    --&gt; tests/lib.rs:25:1\n     |\n 24  |   #[test]\n     |   ------- in this procedural macro expansion\n 25  | / fn cbc_aes128() {\n 26  | |     let key = include_bytes!(&quot;data/aes128.key.bin&quot;);\n 27  | |     let iv = include_bytes!(&quot;data/aes128.iv.bin&quot;);\n 28  | |     let plaintext = include_bytes!(&quot;data/aes128.plaintext.bin&quot;);\n ...   |\n 35  | |     assert_eq!(mode.decrypt_vec(ciphertext).unwrap(), &amp;plaintext[..]);\n 36  | | }\n     | |_^\n</code></pre></div>\n<p>If I delete the <code>is_local</code> check for printing spans, this span appears, which explains everything:</p>\n<div class=\"codehilite\"><pre><span></span><code>   --&gt; /tmp/block-modes-0.8.1/src/utils.rs:28:9\n    |\n28  |         slice::from_raw_parts_mut(data.as_ptr() as *mut GenericArray&lt;u8, N&gt;, data.len() / n)\n    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n</code></pre></div>\n<p>But also two useless spans related to the test harness appear at the bottom <span aria-label=\"weary\" class=\"emoji emoji-1f629\" role=\"img\" title=\"weary\">:weary:</span></p>",
+        "id": 272605754,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645378634
+    },
+    {
+        "content": "<p>Is this comment accurate? I can't find any check of the CTFE backtrace setting <a href=\"https://github.com/rust-lang/miri/blob/0db40903769f38669936c5ebb0b882b18c27f449/src/bin/miri.rs#L183\">https://github.com/rust-lang/miri/blob/0db40903769f38669936c5ebb0b882b18c27f449/src/bin/miri.rs#L183</a></p>",
+        "id": 272608531,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645381942
+    },
+    {
+        "content": "<p>This probably refers to configuration of <code>sess.ctfe_backtrace</code> based on <code>RUSTC_CTFE_BACKTRACE</code> implemented in <code>rustc_session</code> crate.</p>",
+        "id": 272610071,
+        "sender_full_name": "tm",
+        "timestamp": 1645383777
+    },
+    {
+        "content": "<p>Yeah but I can't find a check of the current value anywhere</p>",
+        "id": 272617069,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645391806
+    },
+    {
+        "content": "<p>the relevant use of that value is here:<br>\n<a href=\"https://github.com/rust-lang/rust/blob/56b7d5fc494639ad58111a73028dcee965df7246/compiler/rustc_middle/src/mir/interpret/error.rs#L110\">https://github.com/rust-lang/rust/blob/56b7d5fc494639ad58111a73028dcee965df7246/compiler/rustc_middle/src/mir/interpret/error.rs#L110</a></p>",
+        "id": 272724205,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645469854
+    },
+    {
+        "content": "<p>however, the \"and <code>RUSTC_CTFE_BACKTRACE</code> is not\" part of the comment does not seem to be accurate any more</p>",
+        "id": 272724309,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645469931
+    },
+    {
+        "content": "<blockquote>\n<p>Ah! My complaint about that DefId::is_local call is that it kinda leaves you guessing when the stack trace points into a dependency. For example, all the information about why this code is invalid is being omitted here:</p>\n</blockquote>\n<p>Is it? It points at where the mutable reference is created, so that seems to be the key thing.<br>\nhowever it is odd that it doesn't mention the <code>encrypt_vec</code> function? but then something is wrong with that error you showed anyway; we always have an empty line after the <code>help</code> and before the stacktrace starts.</p>",
+        "id": 272724752,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645470139
+    },
+    {
+        "content": "<p>They key is <em>why</em> the mutable reference can't be created. I have no idea what happened to the missing newline, perhaps some jank with copying from a terminal. I edited the message by re-pasting and it seems to include the newline now.</p>\n<p>You can reproduce this situation if you want with</p>\n<div class=\"codehilite\"><pre><span></span><code>cargo download -x block-modes=0.8.1\ncd block-modes-0.8.1\nMIRIFLAGS=&quot;-Zmiri-tag-raw-pointers -Zmiri-track-pointer-tag=203435&quot; cargo miri test\n</code></pre></div>",
+        "id": 272743741,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645485200
+    },
+    {
+        "content": "<p>hm, I have no idea why that other span explains why the reference cannot be created^^</p>",
+        "id": 272967760,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645631683
+    },
+    {
+        "content": "<p>It's an attempt to construct a mutable slice using a pointer from <code>as_ptr()</code> which is documented to not be valid for mutation. Ergo, the fix is to call <code>.as_mut_ptr()</code>. This is a pretty common mistake across the ecosystem.</p>",
+        "id": 272968633,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645632018
+    },
+    {
+        "content": "<p>but isnt it pure luck that the <code>as_ptr</code> is on the same line as the <code>from_raw_parts_mut</code> call?</p>",
+        "id": 272969942,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645632458
+    },
+    {
+        "content": "<p>and furthermore seems like that line is not in the local crate so it is not even the current crate's author's fault?</p>",
+        "id": 272970107,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645632504
+    },
+    {
+        "content": "<p>I agree that this is pure luck.</p>\n<p>The offending code is in the current crate; the path in the error message is correct.</p>\n<p>But moreover, I don't think it's always right to not show context outside of the current crate. There are crates organized in workspaces where the testing is very tightly coupled between the crates. I know that <code>futures</code> and <code>tokio</code> for example are not tested by crater anymore on account of this pattern.</p>",
+        "id": 272973286,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645633891
+    },
+    {
+        "content": "<p>Now the fact that this is actually in the local crate has me really confused.</p>",
+        "id": 272974719,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645634505
+    },
+    {
+        "content": "<blockquote>\n<p>I know that <code>futures</code> and <code>tokio</code> for example are not tested by crater anymore on account of this pattern.</p>\n</blockquote>\n<p>Huh, I didn't know that. I would expect that a <code>cargo test --all-features</code> would work just fine in Tokio without the rest of its workspace, though it's true that this wouldn't run all the tests. (I'm a Tokio maintainer)</p>",
+        "id": 272977021,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1645635458
+    },
+    {
+        "content": "<p>You simulate the crater experience by running <code>cargo download -x tokio</code> then trying to run <code>cargo test</code> in the downloaded directory. (this is the same process I've been doing, just with <code>cargo miri test</code>)</p>\n<p>I prompted the maintainer of <code>time</code> because it was failing crater due to a non-packaged file, and they eventually opened this stream: <a href=\"#narrow/stream/242791-t-infra/topic/providing.20flags.20for.20crater/near/268769632\">https://rust-lang.zulipchat.com/#narrow/stream/242791-t-infra/topic/providing.20flags.20for.20crater/near/268769632</a> maybe t-infra or that stream is a good place to discuss this?</p>",
+        "id": 272980968,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645636955
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120827\">Ben Kimock (Saethlin)</span> <a href=\"#narrow/stream/269128-miri/topic/Backtrace.20pruning.3F/near/272974719\">said</a>:</p>\n<blockquote>\n<p>Now the fact that this is actually in the local crate has me really confused.</p>\n</blockquote>\n<p>yes that seems odd</p>",
+        "id": 272990281,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645640250
+    },
+    {
+        "content": "<p>well, not showing the span for non-local frames was a simple heuristic to prevent the backtrace from exploding into the unreadable. I am open for other suggestions :)</p>",
+        "id": 272990336,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645640278
+    },
+    {
+        "content": "<p>e.g. we could always show the span of the top N frames, for some suitably chosen value of N</p>",
+        "id": 272990393,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645640290
+    },
+    {
+        "content": "<p>Maybe this is too clever, but perhaps we could show frames for the local crate + any frame where the span occurs inside <code>unsafe</code>? I'd have to implement a prototype then try running it on a few examples to see what that reveals.</p>",
+        "id": 272991505,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1645640791
+    },
+    {
+        "content": "<p>hm, I worry in large backtraces that go through 3rd party crates this might show too much internal unsafety that is entirely irrelevant</p>",
+        "id": 272991795,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1645640915
+    }
+]

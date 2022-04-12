@@ -1,0 +1,1312 @@
+<html>
+<head><meta charset="utf-8"><title>Result is not FFI safe ? · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html">Result is not FFI safe ?</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="253400895"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253400895" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253400895">(Sep 15 2021 at 11:56)</a>:</h4>
+<p>I am wrapping the following C library, which has an API like this:</p>
+<div class="codehilite"><pre><span></span><code>enum ErrorKind: uint32_t {
+    SUCCESS = 0,
+    ERROR0 = 1,
+    ERROR1 = 2,
+    ...,
+}
+ErrorKind func();
+</code></pre></div>
+<p>And I want to wrap it as:</p>
+<div class="codehilite"><pre><span></span><code>#[repr(u32)]
+#[non_exhaustive]
+enum ErrorKind {
+    Error0 = 1,
+    Error1 = 2,
+    ...,
+}
+
+type Result&lt;T&gt; = Result&lt;(), ErrorKind&gt;;
+
+extern &quot;C&quot; {
+    fn func() -&gt; Result&lt;()&gt;;
+}
+</code></pre></div>
+<p>but I am getting an error saying that <code>Result</code> is not FFI safe.</p>
+<p>I've added some tests (alignment, size using transmute, etc.) and my Result has the same size, alignment, etc. as ErrorKind, and they both have the same size, alignment, etc. as the C enum.</p>
+
+
+
+<a name="253400963"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253400963" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253400963">(Sep 15 2021 at 11:57)</a>:</h4>
+<p>The only thing that could be different is the "call ABI", but I've looked at the assembly and they both appear to use the same calling convention (one 32-bit register).</p>
+
+
+
+<a name="253401042"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253401042" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253401042">(Sep 15 2021 at 11:58)</a>:</h4>
+<p>Is this a bug in the FFI-safe lint and is it ok to use result like this? </p>
+<p>And if not, what's the problem and how do I fix it.</p>
+
+
+
+<a name="253403582"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253403582" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253403582">(Sep 15 2021 at 12:18)</a>:</h4>
+<p>I want to say that because Result isn't annotated with <code>#[repr(C)]</code> then it is not FFI safe, but that's not true,<br>
+<code>Opion&lt;&amp;T&gt;</code> is FFI safe a guaranteed to have the safe layout of a pointer, even though Option is not annotated with <code>#[repr(C)]</code></p>
+<p>Even if Result was FFI safe then:</p>
+<ol>
+<li>there's no gurantee that <code>Ok(())</code> will be represented by the value 0 (actually if you try to transmute it you'll see you usually get the last variant + 1)</li>
+<li><code>non_exhusative</code> doesn't solve the UB of having a variant that isn't defined.</li>
+</ol>
+<p>so by current compiler you'll have to define all 1..2^32-1 cases in the enum for this to work as expected.</p>
+<p>but in short AFAIK <code>Result</code> isn't FFI safe exactly because it can't currently promise things like that as it tries to optimize as much as possible</p>
+
+
+
+<a name="253407074"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253407074" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253407074">(Sep 15 2021 at 12:48)</a>:</h4>
+<p>I can probably use <code>#[rustc_valid_range_start(1)]</code> to make <code>ErrorKind</code> only have a niche at 0</p>
+
+
+
+<a name="253407150"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253407150" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253407150">(Sep 15 2021 at 12:49)</a>:</h4>
+<p>Is <code>Result&lt;(), NonZeroU32&gt;</code> FFI safe ?</p>
+
+
+
+<a name="253407360"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253407360" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253407360">(Sep 15 2021 at 12:50)</a>:</h4>
+<p>I don't really see what <code>non_exhaustive</code> has to do with anything. AFAIK it does not impact layout in any way, and I am not trying to use it in that way, so I don't know what would be the point.</p>
+
+
+
+<a name="253410423"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253410423" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253410423">(Sep 15 2021 at 13:12)</a>:</h4>
+<p>Result is not an FFI-safe type regardless of the type parameters it's instantiated with; you shouldn't use it for FFI signatures</p>
+
+
+
+<a name="253410548"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253410548" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253410548">(Sep 15 2021 at 13:13)</a>:</h4>
+<p>Generally the way to go here is to define the extern function as returning an FFI safe type and then wrap it in a function that converts to a Rust type like Result. In theory, if the two types have a 1:1 relationship, this should be free, but is also safe if they don't.</p>
+
+
+
+<a name="253410636"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253410636" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253410636">(Sep 15 2021 at 13:13)</a>:</h4>
+<p><code>Result&lt;(), NonZeroU32&gt;</code> naturally must be FFI safe because of the pidgeonhole principle</p>
+
+
+
+<a name="253410897"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253410897" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253410897">(Sep 15 2021 at 13:15)</a>:</h4>
+<p>If a type is not repr(C) and there's not an explicit definition making it FFI safe, it is not guaranteed to keep that layout. Of course, you can depend on undocumented rules, but that's sort of always true (and in that case talking about ffi safety isn't really too reasonable)</p>
+
+
+
+<a name="253412595"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253412595" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thom Chiovoloni <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253412595">(Sep 15 2021 at 13:27)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="224471">Lokathor</span> <a href="#narrow/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F/near/253410636">said</a>:</p>
+<blockquote>
+<p><code>Result&lt;(), NonZeroU32&gt;</code> naturally must be FFI safe because of the pidgeonhole principle</p>
+</blockquote>
+<p>it's probably still legal to represent this as <code>{is_ok: bool, value: MaybeUninit&lt;NonZeroU32&gt;}</code></p>
+
+
+
+<a name="253413375"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413375" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413375">(Sep 15 2021 at 13:31)</a>:</h4>
+<p>I'm not asking for portability across toolchains.</p>
+
+
+
+<a name="253413492"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413492" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413492">(Sep 15 2021 at 13:32)</a>:</h4>
+<p>Not sure if there is a way to test for the <code>call ABI</code> from Rust code, but I can test for <code>size</code>, <code>alignment</code>, and the niches being on the right place.</p>
+
+
+
+<a name="253413569"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413569" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413569">(Sep 15 2021 at 13:32)</a>:</h4>
+<p>There's no way to test niches in sound Rust code that I know of</p>
+
+
+
+<a name="253413584"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413584" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413584">(Sep 15 2021 at 13:32)</a>:</h4>
+<p>(curious to hear more, though).</p>
+
+
+
+<a name="253413656"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413656" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413656">(Sep 15 2021 at 13:33)</a>:</h4>
+<p><code>Option&lt;NonZeroU32&gt;</code> is FFI safe</p>
+
+
+
+<a name="253413720"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413720" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413720">(Sep 15 2021 at 13:33)</a>:</h4>
+<p>and <code>Result&lt;(), NonZeroU32&gt;</code> has the same size, and alignment as <code>Option&lt;NonZeroU32&gt;</code></p>
+
+
+
+<a name="253413856"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413856" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413856">(Sep 15 2021 at 13:34)</a>:</h4>
+<p>Building a <code>Result&lt;(), NonZeroU32&gt;::Ok</code> and transmuting that into an <code>Option&lt;NonZeroU32&gt;</code> produces an option with value <code>None</code></p>
+
+
+
+<a name="253413929"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413929" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413929">(Sep 15 2021 at 13:34)</a>:</h4>
+<p>AFAICT, that proves that the niche of <code>Result&lt;(), NonZeroU32&gt;::Ok</code> is the same as that of <code>Option&lt;NonZeroU32&gt;</code></p>
+
+
+
+<a name="253413973"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413973" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413973">(Sep 15 2021 at 13:34)</a>:</h4>
+<p>I'm not sure there's any documentation that suggests <code>Option&lt;NonZeroU32&gt;</code> is FFI safe. It's probably <em>currently true</em>, and is unlikely to change, but you can't really rely on it...</p>
+
+
+
+<a name="253413991"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253413991" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253413991">(Sep 15 2021 at 13:35)</a>:</h4>
+<p>given their size in bits, they both can only have 1 bit pattern for the niche, and is the same.</p>
+
+
+
+<a name="253414033"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414033" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414033">(Sep 15 2021 at 13:35)</a>:</h4>
+<p>I found those docs in the docs for <code>Box</code>, using <code>Option&lt;Box&gt;</code> in FFI is documented as safe</p>
+
+
+
+<a name="253414096"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414096" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414096">(Sep 15 2021 at 13:35)</a>:</h4>
+<p>not sure if that extends to other types like <code>Option&lt;NonZeroU32&gt;</code></p>
+
+
+
+<a name="253414103"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414103" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414103">(Sep 15 2021 at 13:35)</a>:</h4>
+<p>like, you're not "wrong" in the sense that this is unlikely to be wrong, but it isn't well defined.</p>
+<p>Option&lt;Box&lt;...&gt;&gt; and Option&lt;NonZeroU32&gt; are different types</p>
+
+
+
+<a name="253414412"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414412" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414412">(Sep 15 2021 at 13:37)</a>:</h4>
+<p>given that the size of <code>Result&lt;(), NonZeroU32&gt;</code> is the same as that of <code>Option&lt;NonZeroU32&gt;</code> and <code>NonZeroU32</code>, and that's 32-bit, and <code>NonZeroU32</code> uses 2^32 - 1 bit patterns, only one is free for the niche and that's the 0x0 bitpattern. I can test for all this, e.g., by transmuting <code>Result&lt;(), NonZeroU32&gt;</code> to <code>u32</code> , and the same for <code>Option&lt;NonZeroU32&gt;</code> , and checking the value of that <code>u32</code></p>
+
+
+
+<a name="253414431"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414431" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414431">(Sep 15 2021 at 13:37)</a>:</h4>
+<p>AFAICT those tests are safe</p>
+
+
+
+<a name="253414521"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414521" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414521">(Sep 15 2021 at 13:38)</a>:</h4>
+<p>Also, I can pass a <code>&amp;NonZeroU32</code> around, and it doesn't matter whether that points to a type in an option or a result</p>
+
+
+
+<a name="253414579"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414579" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414579">(Sep 15 2021 at 13:38)</a>:</h4>
+<p>size and alignment is not the only indicator necessary for the ABI to be the same, though.</p>
+
+
+
+<a name="253414594"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414594" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414594">(Sep 15 2021 at 13:38)</a>:</h4>
+<p>So as long as the size of <code>Result&lt;(), NonZeroU32&gt;</code> and <code>NonZeroU32</code> are the same, that means that the <code>Result::Ok</code> variant is encoded as <code>0x0</code></p>
+
+
+
+<a name="253414632"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414632" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414632">(Sep 15 2021 at 13:38)</a>:</h4>
+<p>the compiler could very well be passing the state of the enum around as a flag in the flags register for example, or something similarly weird.</p>
+
+
+
+<a name="253414641"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414641" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414641">(Sep 15 2021 at 13:38)</a>:</h4>
+<blockquote>
+<p>size and alignment is not the only indicator necessary for the ABI to be the same, though</p>
+</blockquote>
+<p>I mentioned that above, and that I don't know of a way to test the <code>call ABI</code> in Rust</p>
+
+
+
+<a name="253414688"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414688" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414688">(Sep 15 2021 at 13:39)</a>:</h4>
+<p>what i do is roundtrip to C and back and verify the value, for all 32-bit patterns</p>
+
+
+
+<a name="253414709"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414709" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414709">(Sep 15 2021 at 13:39)</a>:</h4>
+<p>this test takes 5 seconds</p>
+
+
+
+<a name="253414791"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253414791" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253414791">(Sep 15 2021 at 13:39)</a>:</h4>
+<p>I would prefer to avoid doing this, and  have something that could be implemented as an static-assert</p>
+
+
+
+<a name="253415023"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415023" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415023">(Sep 15 2021 at 13:40)</a>:</h4>
+<p>tbh this result type is 1 32-bit register, so while this is technically an aggregate, passing it by memory would be nuts, given that we already do the register optimization for scalar pairs as well</p>
+
+
+
+<a name="253415154"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415154" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415154">(Sep 15 2021 at 13:41)</a>:</h4>
+<p>There's no way to assert two types have the same representation or call ABI today. Even that test doesn't really verify that, just tests a particular instance (we could in theory have different call ABIs for different functions for repr(rust) types if we wanted to, to my knowledge).</p>
+
+
+
+<a name="253415205"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415205" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415205">(Sep 15 2021 at 13:42)</a>:</h4>
+<p>Not saying we <em>would</em> do that</p>
+
+
+
+<a name="253415358"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415358" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415358">(Sep 15 2021 at 13:42)</a>:</h4>
+<p>but we could, in theory, and so I at least wouldn't rely on this in my code</p>
+
+
+
+<a name="253415375"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415375" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415375">(Sep 15 2021 at 13:42)</a>:</h4>
+<p>So my tests currently cover:</p>
+<ul>
+<li>size and alignment of Result&lt;(), NonZeroU32&gt; which matches <code>NonZeroU32</code></li>
+<li>value of <code>Result&lt;(), NonZeroU32&gt;::Ok</code> which matches <code>0x0</code>, which is the only possible niche given the size</li>
+<li>round trip test through the C ABI for all 2^32 bit-patterns to test the call ABI</li>
+</ul>
+
+
+
+<a name="253415488"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415488" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415488">(Sep 15 2021 at 13:43)</a>:</h4>
+<p>Looking at LLVM IR might be a valid way to verify that the ABI looks okay for the specific compilation with the specific source code, flags, and the build of the toolchain. I'm not entirely sure if testing values exhaustively is the right way to go about this either.</p>
+
+
+
+<a name="253415508"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415508" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415508">(Sep 15 2021 at 13:43)</a>:</h4>
+<p>If we remove the niche optimization for result, then all of this breaks, and the tests catch this at compile time.</p>
+<p>If we change the call ABI, the runtime test catches it (hopefully, fingers crossed I guess).</p>
+
+
+
+<a name="253415682"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415682" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415682">(Sep 15 2021 at 13:44)</a>:</h4>
+<p>I wish we would just guarantee same call ABI, layout, alignment, niches, etc. for <code>Result&lt;(), T&gt;</code> and <code>Option&lt;T&gt;</code></p>
+
+
+
+<a name="253415792"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415792" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415792">(Sep 15 2021 at 13:45)</a>:</h4>
+<p>And then guarantee that if <code>Option&lt;T&gt;</code> is FFI safe, so is <code>Result&lt;(), T&gt;</code>.</p>
+
+
+
+<a name="253415845"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253415845" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253415845">(Sep 15 2021 at 13:45)</a>:</h4>
+<p>Not sure what the value is in not doing this.</p>
+
+
+
+<a name="253416008"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253416008" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253416008">(Sep 15 2021 at 13:46)</a>:</h4>
+<p>From looking at the <code>Result&lt;(), NonZeroU32&gt;</code> example, I can't see any optimization that we aren't already doing, and I don't see why we would ever want to do something worse here. We can't do better than having same size and alignment and call ABI as NonZeroU32 here. And there is only 1 niche that we can use here anyways.</p>
+
+
+
+<a name="253416207"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253416207" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253416207">(Sep 15 2021 at 13:47)</a>:</h4>
+<p>There are so many C APIs that return <code>-&gt; int</code> with <code>0 == success</code> otherwise error code, and using Result here directly is just so nice.</p>
+
+
+
+<a name="253416244"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253416244" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253416244">(Sep 15 2021 at 13:47)</a>:</h4>
+<p>It makes "<code>unsafe</code> C FFI" much easier to use.</p>
+
+
+
+<a name="253416431"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253416431" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253416431">(Sep 15 2021 at 13:48)</a>:</h4>
+<blockquote>
+<p>Even that test doesn't really verify that, just tests a particular instance (we could in theory have different call ABIs for different functions for repr(rust) types if we wanted to, to my knowledge).</p>
+</blockquote>
+<p>I just need the guarantee for <code>extern "C"</code></p>
+
+
+
+<a name="253416506"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253416506" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253416506">(Sep 15 2021 at 13:49)</a>:</h4>
+<p>When this is passed across <code>repr(Rust)</code>, all my <code>repr(Rust)</code> functions use the same type, so that should work independently of the call ABI used there.</p>
+
+
+
+<a name="253418162"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253418162" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253418162">(Sep 15 2021 at 13:58)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="409057">hannahE2</span> <a href="#narrow/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F/near/253415682">said</a>:</p>
+<blockquote>
+<p>I wish we would just guarantee same call ABI, layout, alignment, niches, etc. for <code>Result&lt;(), T&gt;</code> and <code>Option&lt;T&gt;</code></p>
+</blockquote>
+<p>At most, I would guarantee that <code>Result&lt;(),T&gt;</code> has the same layout as <code>Option&lt;T&gt;</code> if <code>T</code> is one of the guaranteed-niche optimized types (<code>&amp;U</code>, <code>&amp;mut U</code>, <code>NonNull&lt;U&gt;</code>, <code>NonZero*</code>, and <code>Box&lt;U&gt;</code> or a transparent wrapper arround such). However, even then I'd be hesistent to guarantee that.</p>
+
+
+
+<a name="253419291"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253419291" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253419291">(Sep 15 2021 at 14:04)</a>:</h4>
+<p>For example: "<code>Result&lt;(),T&gt;</code> has the same layout as <code>Option&lt;T&gt;</code> if <code>T</code> has a niche." We don't really have to say where the niche of <code>T</code> comes from.</p>
+
+
+
+<a name="253426114"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253426114" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253426114">(Sep 15 2021 at 14:44)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="409057">hannahE2</span> <a href="#narrow/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F/near/253415023">said</a>:</p>
+<blockquote>
+<p>tbh this result type is 1 32-bit register, so while this is technically an aggregate, passing it by memory would be nuts, given that we already do the register optimization for scalar pairs as well</p>
+</blockquote>
+<p>On certain calling conventions any struct is passed on the stack, even if it only contains a single scalar field that fits in a register.</p>
+
+
+
+<a name="253430931"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253430931" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253430931">(Sep 15 2021 at 15:13)</a>:</h4>
+<p>which of the <code>extern "C"</code> ones work like this?</p>
+
+
+
+<a name="253431997"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253431997" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253431997">(Sep 15 2021 at 15:19)</a>:</h4>
+<p>I think this applies to the following targets:</p>
+<p>amdgpu: <a href="https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/amdgpu.rs#L17">https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/amdgpu.rs#L17</a><br>
+avr: <a href="https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/avr.rs#L43">https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/avr.rs#L43</a><br>
+bpf: <a href="https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/bpf.rs#L14">https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/bpf.rs#L14</a><br>
+powerpc: <a href="https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/powerpc.rs#L13">https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/powerpc.rs#L13</a><br>
+wasm32-unknown-unknown: <a href="https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/wasm.rs#L81">https://github.com/rust-lang/rust/blob/e846f9c44f1e17cac66d7b75e2ca099c87a2dfcb/compiler/rustc_target/src/abi/call/wasm.rs#L81</a></p>
+
+
+
+<a name="253432047"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253432047" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Gary Guo <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253432047">(Sep 15 2021 at 15:19)</a>:</h4>
+<p>I wonder if we can fuzz abi in -Zrandomize-layout as well</p>
+
+
+
+<a name="253432269"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253432269" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Gary Guo <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253432269">(Sep 15 2021 at 15:21)</a>:</h4>
+<p>Like sometimes make non-ffi-safe types be aggregate while it could be scalar.</p>
+
+
+
+<a name="253435258"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435258" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435258">(Sep 15 2021 at 15:39)</a>:</h4>
+<p>Thanks bjorn, so i think if we guarantee the same layout as option, and therefore <code>repr(transparent)</code>, then on those targets, these <code>Result</code> types would either need to be passed as scalars, or you could not use them in C FFI where a <code>u32</code> is expected.</p>
+
+
+
+<a name="253435542"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435542" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435542">(Sep 15 2021 at 15:41)</a>:</h4>
+<p>I suppose <code>Option&lt;Box&lt;T: Sized&gt;&gt;</code> does not get passed as an aggregate on those, since we guarantee that you can put it where C expects a raw pointer.</p>
+
+
+
+<a name="253435545"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435545" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435545">(Sep 15 2021 at 15:41)</a>:</h4>
+<p>that's descriptivist reasoning. the issue is that compiler optimizations are written by prescriptivists. "is there anything in the standard forbidding this?" - "no" - "ok, let's do crazy thing X"</p>
+
+
+
+<a name="253435592"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435592" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435592">(Sep 15 2021 at 15:41)</a>:</h4>
+<p>Its not, it's just a consequence of matching the layout of <code>Option</code>.</p>
+
+
+
+<a name="253435729"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435729" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435729">(Sep 15 2021 at 15:42)</a>:</h4>
+<p>If we say that we want <code>Result&lt;(), T&gt;</code> to match the layout of <code>Option&lt;T&gt;</code> when <code>T</code> has a niche, then a change in the call ABI to match option is just a consequence of that.</p>
+
+
+
+<a name="253435768"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435768" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435768">(Sep 15 2021 at 15:42)</a>:</h4>
+<p>Except that this is about ABI, not just layout. And result isn't <code>repr(transparent)</code> anyway.</p>
+
+
+
+<a name="253435790"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435790" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435790">(Sep 15 2021 at 15:42)</a>:</h4>
+<p>ABI is part of Layout in Rust</p>
+
+
+
+<a name="253435882"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435882" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435882">(Sep 15 2021 at 15:43)</a>:</h4>
+<p>Matching <code>Option&lt;T&gt;</code> layout includes matching its <code>call ABI</code> by definition.</p>
+
+
+
+<a name="253435885"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435885" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435885">(Sep 15 2021 at 15:43)</a>:</h4>
+<p>ehh, maybe from the backend perspective. not when transmutes are concerned for example.</p>
+
+
+
+<a name="253435927"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435927" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435927">(Sep 15 2021 at 15:43)</a>:</h4>
+<p>transmutes are just memcpy, so they don't interact with call ABI at all</p>
+
+
+
+<a name="253435989"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253435989" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253435989">(Sep 15 2021 at 15:43)</a>:</h4>
+<p>they don't interact with niches either</p>
+
+
+
+<a name="253436034"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436034" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436034">(Sep 15 2021 at 15:44)</a>:</h4>
+<p>or even alignment</p>
+
+
+
+<a name="253436103"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436103" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436103">(Sep 15 2021 at 15:44)</a>:</h4>
+<p>I'm saying that "layout" as considered by transmutes is different than what function calls consider</p>
+
+
+
+<a name="253436133"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436133" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436133">(Sep 15 2021 at 15:44)</a>:</h4>
+<p>transmutes do not consider layout, only "size'</p>
+
+
+
+<a name="253436164"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436164" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436164">(Sep 15 2021 at 15:44)</a>:</h4>
+<p>which is one of the many things that make a layout</p>
+
+
+
+<a name="253436307"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436307" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436307">(Sep 15 2021 at 15:45)</a>:</h4>
+<p><a href="https://doc.rust-lang.org/stable/std/alloc/struct.Layout.html">https://doc.rust-lang.org/stable/std/alloc/struct.Layout.html</a></p>
+
+
+
+<a name="253436333"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436333" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436333">(Sep 15 2021 at 15:45)</a>:</h4>
+<p>fsvo layout. this kind of layout is just size and alignment.</p>
+
+
+
+<a name="253436392"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436392" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436392">(Sep 15 2021 at 15:46)</a>:</h4>
+<p>that a standard library type called layout that does not match the meaning of layout in rust, the language</p>
+
+
+
+<a name="253436448"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436448" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436448">(Sep 15 2021 at 15:46)</a>:</h4>
+<p>yes, that's my point. different definitions of the same word.</p>
+
+
+
+<a name="253436488"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436488" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436488">(Sep 15 2021 at 15:46)</a>:</h4>
+<p>so you have to be careful when saying "same layout"</p>
+
+
+
+<a name="253436492"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436492" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436492">(Sep 15 2021 at 15:46)</a>:</h4>
+<p>i'm talking about Rust, the language</p>
+
+
+
+<a name="253436524"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436524" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436524">(Sep 15 2021 at 15:46)</a>:</h4>
+<p>when I mean layout, i mean _layout_ in Rust, the language</p>
+
+
+
+<a name="253436579"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436579" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436579">(Sep 15 2021 at 15:47)</a>:</h4>
+<p>I can create a <code>enum Layout { }</code> inhabited type, yet I'm not referring to that here</p>
+
+
+
+<a name="253436741"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436741" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436741">(Sep 15 2021 at 15:48)</a>:</h4>
+<p>From the <em>Rust language reference</em>:</p>
+<blockquote>
+<p>Structs and enums with this representation have the same layout and ABI as the single non-zero sized field.</p>
+</blockquote>
+<p>Layout and ABI are considered distinct concepts..</p>
+
+
+
+<a name="253436865"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253436865" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253436865">(Sep 15 2021 at 15:49)</a>:</h4>
+<p>that looks like a bug in the docs</p>
+
+
+
+<a name="253438453"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253438453" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253438453">(Sep 15 2021 at 15:57)</a>:</h4>
+<p>Often people only care about the bit representation to match so they can transmute. So ABI matches don't fall out of that automatically.</p>
+
+
+
+<a name="253438679"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253438679" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253438679">(Sep 15 2021 at 15:58)</a>:</h4>
+<p>This is not true, since the whole point of this guarantee, both for <code>Option&lt;T&gt;</code> (which we already guarantee) and in this case also for <code>Result&lt;(), T&gt;</code> is to allow its use in C FFI.</p>
+
+
+
+<a name="253438767"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253438767" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253438767">(Sep 15 2021 at 15:59)</a>:</h4>
+<p>Our docs explicitly say so.</p>
+
+
+
+<a name="253438856"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253438856" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253438856">(Sep 15 2021 at 15:59)</a>:</h4>
+<p>See <a href="https://doc.rust-lang.org/std/boxed/index.html#memory-layout">https://doc.rust-lang.org/std/boxed/index.html#memory-layout</a>  , and how we include there the ABI in the meaning of layout in this context.</p>
+
+
+
+<a name="253439086"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253439086" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253439086">(Sep 15 2021 at 16:00)</a>:</h4>
+<blockquote>
+<p>So long as T: Sized, a Box&lt;T&gt; is guaranteed to be represented as a single pointer and is also ABI-compatible with C pointers (i.e. the C type T<em>). This means that if you have extern “C” Rust functions that will be called from C, you can define those Rust functions using Box&lt;T&gt; types, and use T</em> as corresponding type on the C side.</p>
+</blockquote>
+
+
+
+<a name="253439165"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253439165" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253439165">(Sep 15 2021 at 16:01)</a>:</h4>
+<blockquote>
+<p>Note also that the nullable argument to foo_delete is represented in Rust as Option&lt;Box&lt;Foo&gt;&gt;, since Box&lt;Foo&gt; cannot be null.</p>
+</blockquote>
+
+
+
+<a name="253439382"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253439382" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253439382">(Sep 15 2021 at 16:01)</a>:</h4>
+<p>Yes, that's an existing guarantee for Option. I mean that if someone happened to define somewhere that you can transmute an <code>Option&lt;T&gt;</code> into <code>Result&lt;(), T&gt;</code> the same guarantee for FFI-safety wouldn't automatically fall out of it. It would require something more explicit.</p>
+
+
+
+<a name="253439490"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253439490" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253439490">(Sep 15 2021 at 16:02)</a>:</h4>
+<p>Nobody is arguing about that.</p>
+
+
+
+<a name="253439556"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253439556" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253439556">(Sep 15 2021 at 16:02)</a>:</h4>
+<p>Nobody is suggesting to define that you can transmute one into the other either.</p>
+
+
+
+<a name="253439593"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253439593" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253439593">(Sep 15 2021 at 16:02)</a>:</h4>
+<p>So I don't really know who you are replying to in this particular thread.</p>
+
+
+
+<a name="253439635"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253439635" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253439635">(Sep 15 2021 at 16:03)</a>:</h4>
+<p>You would be right, if the strawman you are building were not a strawman.</p>
+
+
+
+<a name="253439851"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253439851" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253439851">(Sep 15 2021 at 16:04)</a>:</h4>
+<p>Anyways, just muted you, so i can't see anything else you write, cause you don't seem to let it go, and keep going back to this thread with the same issue, that has already been resolved, adding noise.</p>
+<p>AFAICT, this comment properly addresses your concern about what it is meant by layout in this particular thread: <a href="#narrow/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F/near/253435729">https://rust-lang.zulipchat.com/#narrow/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F/near/253435729</a></p>
+
+
+
+<a name="253440033"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253440033" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253440033">(Sep 15 2021 at 16:05)</a>:</h4>
+<p><span aria-label="angry" class="emoji emoji-1f620" role="img" title="angry">:angry:</span></p>
+
+
+
+<a name="253440087"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253440087" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> hannahE2 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253440087">(Sep 15 2021 at 16:05)</a>:</h4>
+<p>Hypothetical situations in which we mean something else by layout are out of scope for this discussion AFAICT.</p>
+
+
+
+<a name="253440634"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253440634" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253440634">(Sep 15 2021 at 16:08)</a>:</h4>
+<p>Anyway, for other observers... I disagree with "nobody is arguing that" since earlier arguments sortof looked like "tests show bit representation are the same, therefore this should be safe" and further used "layout" as argument even though layout can mean many things. I wanted to press for precise language.</p>
+
+
+
+<a name="253468034"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253468034" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253468034">(Sep 15 2021 at 18:53)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116122">simulacrum</span> <a href="#narrow/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F/near/253413973">said</a>:</p>
+<blockquote>
+<p>I'm not sure there's any documentation that suggests <code>Option&lt;NonZeroU32&gt;</code> is FFI safe. It's probably <em>currently true</em>, and is unlikely to change, but you can't really rely on it...</p>
+</blockquote>
+<p>The enum optimization in question is part of the language semantics, and it's something people can rely on, ust like <code>Option&lt;&amp;X&gt;</code> using NULL for None.</p>
+
+
+
+<a name="253468194"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253468194" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253468194">(Sep 15 2021 at 18:54)</a>:</h4>
+<p>That's separate from whether any given type is declared as FFI-safe.</p>
+
+
+
+<a name="253468378"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253468378" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253468378">(Sep 15 2021 at 18:55)</a>:</h4>
+<p>Independently from that, there's the question of what niche will get used. <a href="https://github.com/rust-lang/rust/pull/87794">https://github.com/rust-lang/rust/pull/87794</a> just made the change to use the zero niche when available, but that PR didn't make it a language guarantee, just something we do.</p>
+
+
+
+<a name="253468409"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253468409" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253468409">(Sep 15 2021 at 18:55)</a>:</h4>
+<p>It'd be worth considering whether that <em>should</em> be a language guarantee.</p>
+
+
+
+<a name="253468606"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253468606" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253468606">(Sep 15 2021 at 18:57)</a>:</h4>
+<p>I think it'd be perfectly reasonable for <code>Result&lt;(), NonZeroU32&gt;</code> or similar to be declared FFI-safe. And if we made the use of the zero niche guaranteed, then we could also make <code>Result&lt;(), SomeReprCEnumWithNoZero&gt;</code> FFI-safe.</p>
+
+
+
+<a name="253476750"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253476750" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253476750">(Sep 15 2021 at 19:51)</a>:</h4>
+<p>The <code>Option</code> variants are language items, the <code>Result</code> variants aren't.</p>
+
+
+
+<a name="253476912"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253476912" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253476912">(Sep 15 2021 at 19:52)</a>:</h4>
+<p>EDIT: Okay, I was wrong, both are special. Ignore me.</p>
+
+
+
+<a name="253478085"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253478085" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253478085">(Sep 15 2021 at 20:01)</a>:</h4>
+<p>If this were to be guaranteed it should be done so for all enums that match the shape of option/result. They shouldn't have special assurances an otherwise equivalent user type doesn't also get.</p>
+
+
+
+<a name="253478158"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253478158" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253478158">(Sep 15 2021 at 20:01)</a>:</h4>
+<p>I believe all enums with a similar shape to <code>Option</code> are defined as having this niche filling optimization.</p>
+
+
+
+<a name="253480702"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253480702" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253480702">(Sep 15 2021 at 20:17)</a>:</h4>
+<p>I don't think this is precisely spelled out anywhere except for Option. Even the UCG call it non-normative because the boundaries of the niche optimization aren't specified anywhere, it's more a documentation of current behavior.</p>
+
+
+
+<a name="253484073"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253484073" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253484073">(Sep 15 2021 at 20:39)</a>:</h4>
+<p>I would like to keep it non-normative, or at least, the guaranteed set less than what rustc does. For example, I wouldn't want to see <code>Option&lt;Option&lt;&amp;Align2&gt;&gt;</code> guaranteed to use <code>1</code> as a None, and <code>0</code> as <code>Some(None)</code>.  <br>
+However, my opinion is that it would be fine and reasonable if <code>Result&lt;(),NonZeroU8&gt;</code> were guaranteed. <br>
+Though my question would be whether it should only apply to <code>T=()</code>, <code>E=GuaranteedNicheType</code>, or if it should also apply to <code>T=GuaranteedNicheType</code>, <code>E=()</code>.</p>
+
+
+
+<a name="253484233"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253484233" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253484233">(Sep 15 2021 at 20:40)</a>:</h4>
+<p>That may be significantly more complex to specify, though I wouldn't necessarily have any issues with that either.</p>
+
+
+
+<a name="253501003"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253501003" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253501003">(Sep 15 2021 at 22:59)</a>:</h4>
+<p>The only thing I'd be inclined to specify explicitly, for now, would be that if you have <code>Option&lt;T&gt;</code> or <code>Result&lt;(), T&gt;</code> where T has a niche of <code>0</code> available, <code>None</code> or <code>Ok(())</code> will be <code>0</code>, and that those types are FFI-safe if <code>T</code> is.</p>
+
+
+
+<a name="253502152"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253502152" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253502152">(Sep 15 2021 at 23:10)</a>:</h4>
+<p><span class="user-mention" data-user-id="239881">@Josh Triplett</span> That's specifically with <code>Option</code>, not just option-like?</p>
+
+
+
+<a name="253502295"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253502295" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253502295">(Sep 15 2021 at 23:11)</a>:</h4>
+<p>An example of a function with <code>Result&lt;T, ()&gt;</code>-like behavior is <code>malloc</code></p>
+
+
+
+<a name="253502564"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253502564" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253502564">(Sep 15 2021 at 23:13)</a>:</h4>
+<p>Or better yet <code>Result&lt;T, AllocErr&gt;</code> where <code>AllocErr</code> is a ZST</p>
+
+
+
+<a name="253504317"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253504317" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253504317">(Sep 15 2021 at 23:30)</a>:</h4>
+<p><span class="user-mention" data-user-id="271719">@Mario Carneiro</span> I'd be comfortable making the size and 0 guarantee about any similar type. I would have to think harder about the implications of declaring any similar type FFI-safe.</p>
+
+
+
+<a name="253504633"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253504633" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253504633">(Sep 15 2021 at 23:34)</a>:</h4>
+<p>That makes sense. You should at least need some kind of <code>repr</code> to opt in to FFI safety, but I guess that <code>repr(C)</code> is exactly the wrong thing here since it will remove the niche optimization</p>
+
+
+
+<a name="253513054"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253513054" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253513054">(Sep 16 2021 at 01:11)</a>:</h4>
+<p>I think the question would be of what "has a niche of <code>0</code> available" means. Is it exactly the text currently present for <code>Option</code>, or would it include Enums that don't have the discriminant zero applied.</p>
+<p>For example, in the <a href="https://hackmd.io/@wSaA8OrrSQ2SlegMvA6e6A/SJ1TeE0y_#reprRust-enums">lcrust abi</a> (used and defined for lccc's rust frontend), the latter currently would not fall under that specification, it specifies that the first Niche of an enum's discrimant type (and thus the enum) is the maximum discriminant+1, and doesn't consider the minimum discriminant at all (of course, in the compiler itself, the <code>nonzero</code> xir scalar attribute exists separately from min/max attributes, and is preferred over the latter, so it would merely be a wording change from my side - I wouldn't anticipate any issues in implementing it).</p>
+
+
+
+<a name="253514872"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253514872" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253514872">(Sep 16 2021 at 01:35)</a>:</h4>
+<p>I think that...</p>
+<ul>
+<li>Any repr(rust) option-like type should have the guarantee, including Result&lt;T, ZST&gt; and Result&lt;ZST, T&gt;, as well as any similar user defined type.</li>
+<li>Any repr(rust) ZST should be equivalent to specifically using ().</li>
+<li>To start, this can apply to <strong>only</strong> the standard library "0 is forbidden" types (&amp;T, &amp;mut T, NonNull&lt;T&gt;, NonZeroInt) as well as any repr(transparent) wrapper over said types. The non-payload case would always specifically be 0, even if other niche's might exist (as is the case with &amp;T and &amp;mut T if the alignment of T is more than 1).</li>
+</ul>
+<p>Particularly, it shouldn't matter if it's Result&lt;T, ZST&gt; or Result&lt;ZST, T&gt;. The compiler shouldn't know that one side or the other of Result is a "success" outcome and the other is an "error" outcome. At least not for this layout stuff it shouldn't.</p>
+
+
+
+<a name="253515214"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253515214" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253515214">(Sep 16 2021 at 01:39)</a>:</h4>
+<p>Should it be any ZST or just 1-ZSTs?</p>
+
+
+
+<a name="253515672"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253515672" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253515672">(Sep 16 2021 at 01:44)</a>:</h4>
+<p>Excellent question. I think in the long term a ZST with an alignment &lt;= the alignment of the "payload" type should probably all be the same, but starting with only 1-ZST would be sufficient.</p>
+<p>I highly suspect that greater aligned ZSTs are extremely rare, so if they exist they can probably wait a bit.</p>
+
+
+
+<a name="253515893"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253515893" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253515893">(Sep 16 2021 at 01:47)</a>:</h4>
+<p>Also, there is a question about the order of the variants (I believe that the <code>Err</code> variant is second in rustc's defintion, as the <code>Some</code> variant is likewise, which is where the special-casing comes, rather than <code>Result</code> knowing the "sideness" of Result. In theory, this could be significant in the implementation of Niche-optimization.</p>
+
+
+
+<a name="253516000"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253516000" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253516000">(Sep 16 2021 at 01:48)</a>:</h4>
+<p>(Both leave the discrimant value equal to the bytes of the entire value, which could be used by the implementation)</p>
+
+
+
+<a name="253516029"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253516029" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253516029">(Sep 16 2021 at 01:49)</a>:</h4>
+<p>well, if we take option-like to mean</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">enum</span> <span class="nc">OptionLike</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">NoPayload</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">Payload</span><span class="p">(</span><span class="n">T</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>then the order than you write down those two variants shouldn't matter. And if you have a Result-like type with either side as a ZST, then it becomes option-like.</p>
+
+
+
+<a name="253516072"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253516072" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253516072">(Sep 16 2021 at 01:49)</a>:</h4>
+<p>Like if we say that option-like enums get this property, but <em>only if</em> you write it down in the order we expect, that's super footgun</p>
+
+
+
+<a name="253516138"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253516138" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253516138">(Sep 16 2021 at 01:50)</a>:</h4>
+<p>The order could matter, though, is what I'm saying, in what is currently a valid implementation of niche-optimization.</p>
+
+
+
+<a name="253516240"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253516240" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253516240">(Sep 16 2021 at 01:51)</a>:</h4>
+<p>Because it could implement it by laying it out as</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[repr(C)]</span><span class="w"></span>
+<span class="k">union</span> <span class="nc">OptionLike</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="p">{</span><span class="w"></span>
+<span class="w">     </span><span class="n">discriminant_none</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">     </span><span class="nb">Some</span>: <span class="nc">T</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>where discriminant_none is written with <code>discriminant::&lt;Option&lt;T&gt;&gt;(&amp;None)</code></p>
+
+
+
+<a name="253516313"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253516313" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253516313">(Sep 16 2021 at 01:52)</a>:</h4>
+<p>(I don't know of any implementations that do this, or would do this, but it is currently a valid implementation and may have advantages, particularily in complexity)</p>
+
+
+
+<a name="253516550"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253516550" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253516550">(Sep 16 2021 at 01:56)</a>:</h4>
+<p>did you really mean usize there? like what if T is a u8?</p>
+
+
+
+<a name="253516595"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253516595" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253516595">(Sep 16 2021 at 01:56)</a>:</h4>
+<p>sorry, a NonZeroU8</p>
+
+
+
+<a name="253516982"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253516982" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253516982">(Sep 16 2021 at 02:00)</a>:</h4>
+<p>The <code>usize</code> applies to the nullable pointers and NonZeroUSize. For other mandatory-niche types, it would use the appropriately sized discriminant type.</p>
+
+
+
+<a name="253518928"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253518928" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253518928">(Sep 16 2021 at 02:26)</a>:</h4>
+<p>Okay, well if my suggestion of making it order-agnostic were to become accepted, the implementation would simply be required to sort the NoPayload discriminant to be 0, and then it could still use the union thing.</p>
+
+
+
+<a name="253519432"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253519432" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253519432">(Sep 16 2021 at 02:33)</a>:</h4>
+<p>can discriminants be reordered like that?</p>
+
+
+
+<a name="253519480"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253519480" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253519480">(Sep 16 2021 at 02:34)</a>:</h4>
+<p>I thought they had to go sequentially</p>
+
+
+
+<a name="253520232"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253520232" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253520232">(Sep 16 2021 at 02:45)</a>:</h4>
+<p>I believe the default is yes (unless the user sets discriminant values explicitly)</p>
+
+
+
+<a name="253520757"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253520757" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thom Chiovoloni <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253520757">(Sep 16 2021 at 02:53)</a>:</h4>
+<p>definitely c-style enums cant be implicitly reordered (unless they keep their <code>as &lt;int&gt;</code> values)</p>
+
+
+
+<a name="253526588"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253526588" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253526588">(Sep 16 2021 at 04:16)</a>:</h4>
+<p>Connor is correct for repr(rust), and Thom is correct for repr(C).</p>
+<p>In this case, "option-like optimization" would have to be assuming that the enum is repr(rust).</p>
+
+
+
+<a name="253526912"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253526912" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253526912">(Sep 16 2021 at 04:21)</a>:</h4>
+<p>Would it be possible to have a niche optimization for <code>Result&lt;&amp;T, ()&gt;</code> and similar types such that the null variant is stored as zero but it still has <code>Discriminant(1)</code>? Even if it's not guaranteed to be stable I think that it is valuable to keep the ordering sane when at all possible</p>
+
+
+
+<a name="253527158"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253527158" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253527158">(Sep 16 2021 at 04:25)</a>:</h4>
+<p>More generally, I think the <code>std::mem::discriminant()</code> function should always return the same discriminant values you would get for <code>_ as usize</code> on an equivalent repr(C) enum if you removed the payloads</p>
+
+
+
+<a name="253527667"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253527667" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253527667">(Sep 16 2021 at 04:34)</a>:</h4>
+<p>By the way, I was just surprised to learn that <code>mem::size_of::&lt;Discriminant&lt;Option&lt;NonZeroU8&gt;&gt;&gt;() == 8</code></p>
+
+
+
+<a name="253557523"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253557523" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253557523">(Sep 16 2021 at 10:14)</a>:</h4>
+<blockquote>
+<p>Would it be possible to have a niche optimization for <code>Result&lt;&amp;T, ()&gt;</code> and similar types such that the null variant is stored as the all-zero bit pattern but it still has <code>Discriminant(1)</code>? Even if it's not guaranteed to be stable I think that it is valuable to keep the ordering sane when at all possible</p>
+</blockquote>
+<p>Sure, I don't see a reason it couldn't be implemented (in fact, the abi I linked previously mandates it, and I believe current rustc does it that way). My main point is that it is currently a valid implementation of the required niche-optimizations (tbh we need a better name, since it's no longer an optimization when it's mandatory - I think I've heard and used discriminant elision), that is order sensitive, and that such an implementation could be reasonable, or even beneficial (note: to be clear, my intention is this is more of a persuasive argument then a "don't rule this implementation out" argument).</p>
+
+
+
+<a name="253581030"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253581030" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253581030">(Sep 16 2021 at 13:26)</a>:</h4>
+<p>i think <code>std::mem::discriminant</code> should match with <code>val as usize</code>, but if the enum is repr rust I don't think either of them should necessarily be any particular ordering of tag values.</p>
+<p>If you want a specific ordering you must say so to the compiler in some way.</p>
+
+
+
+<a name="253630418"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253630418" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253630418">(Sep 16 2021 at 18:44)</a>:</h4>
+<p>I think saying "so and so is FFI safe" is a fairly weighty guarantee and we should be very careful about exposing anything but <code>#[repr(C)]</code> to FFI, especially when we are currently not even warning on explicit ABI violations: <a href="https://github.com/rust-lang/rust/issues/89003">https://github.com/rust-lang/rust/issues/89003</a></p>
+
+
+
+<a name="253632728"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253632728" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253632728">(Sep 16 2021 at 18:59)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F/near/253519432">said</a>:</p>
+<blockquote>
+<p>can discriminants be reordered like that?</p>
+</blockquote>
+<p>If it is a typical repr(Rust) enum? Yes, part of the reason it's considered naughty to depend on vagaries of layout for most repr(Rust) types is that reordering like this is totally permitted.</p>
+
+
+
+<a name="253633763"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253633763" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253633763">(Sep 16 2021 at 19:05)</a>:</h4>
+<p>I understand why we don't want to promise this, but I don't see a compelling reason to not follow the usual C enum discriminant rules for determining what <code>discriminant()</code> and <code>_ as usize</code> do, in the same way that <code>struct A { a: Foo, b: Bar }</code> and  <code>struct B { a: Foo, b: Bar }</code> should have the same layout because there isn't any compelling reason not to, even though this isn't a stable guarantee by any means</p>
+
+
+
+<a name="253634648"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253634648" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253634648">(Sep 16 2021 at 19:10)</a>:</h4>
+<p>There is a difference between the tag/niche and the discriminant. The latter follows the C rules AFAIK and is what is directly exposed to the user. The former concerns the representation in memory and is <strong>not</strong> guaranteed to match the discriminant except in case of <code>#[repr(C)]</code>. Currently in case of a tag it does match I think, but in case of niches it doesn't always match.</p>
+
+
+
+<a name="253635170"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253635170" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253635170">(Sep 16 2021 at 19:14)</a>:</h4>
+<p>For reference in case of a tagged enum layout there is a an int (the tag) indicating which variant you have followed by the actual data. In case of niche filling the data of one of the variants has one or more "niches". If at the location of the niches one of the niche values is used, the enum is the corresponding variant. If not, it is the variant whose data contains the niches.</p>
+
+
+
+<a name="253635512"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253635512" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253635512">(Sep 16 2021 at 19:16)</a>:</h4>
+<p>Right. I'm talking about the <em>discriminant</em>, which has to be extracted by some function from the actual bits (the <em>niche</em>) anyway, so there isn't that much difference, code-wise, between having the discriminant corresponding to the all-zero niche be 1 or 0 (I guess it would be something like a <code>load</code> and <code>setnz</code> vs <code>load</code> and <code>setz</code>) for option-like enums</p>
+
+
+
+<a name="253635629"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253635629" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253635629">(Sep 16 2021 at 19:17)</a>:</h4>
+<p>so I would imagine that for <code>Result&lt;(), T&gt;</code> and <code>Option&lt;T&gt;</code> the zero niche would have discriminant 0 and in <code>Result&lt;T, ()&gt;</code> it would have discriminant 1</p>
+
+
+
+<a name="253635907"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253635907" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253635907">(Sep 16 2021 at 19:19)</a>:</h4>
+<p>It could depend on the target.</p>
+
+
+
+<a name="253636042"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636042" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636042">(Sep 16 2021 at 19:20)</a>:</h4>
+<p>Turning a bunch of zeroes into a bunch of zeroes is more generally easy w/o branches.</p>
+
+
+
+<a name="253636061"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636061" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636061">(Sep 16 2021 at 19:20)</a>:</h4>
+<p>It could. I'd really rather it didn't</p>
+
+
+
+<a name="253636105"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636105" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636105">(Sep 16 2021 at 19:20)</a>:</h4>
+<p>not as a user level promise, again, just as a compiler predictability thing</p>
+
+
+
+<a name="253636133"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636133" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636133">(Sep 16 2021 at 19:21)</a>:</h4>
+<p>What a CPU can do easily inherently is CPU dependant.</p>
+
+
+
+<a name="253636169"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636169" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636169">(Sep 16 2021 at 19:21)</a>:</h4>
+<p><code>discriminant()</code> is user-visible</p>
+
+
+
+<a name="253636225"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636225" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636225">(Sep 16 2021 at 19:21)</a>:</h4>
+<p>Well, the result of discriminant isn't. Doesn't it return an opaque type?</p>
+
+
+
+<a name="253636289"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636289" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636289">(Sep 16 2021 at 19:22)</a>:</h4>
+<p>I just tested, and what I described appears to match reality (on my machine, at least)</p>
+
+
+
+<a name="253636320"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636320" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636320">(Sep 16 2021 at 19:22)</a>:</h4>
+<p>you can debug print it</p>
+
+
+
+<a name="253636338"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636338" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636338">(Sep 16 2021 at 19:22)</a>:</h4>
+<p>Debug isn't stable.</p>
+
+
+
+<a name="253636348"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636348" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636348">(Sep 16 2021 at 19:22)</a>:</h4>
+<p>I know</p>
+
+
+
+<a name="253636360"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636360" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636360">(Sep 16 2021 at 19:22)</a>:</h4>
+<p>I never said anything about stability</p>
+
+
+
+<a name="253636400"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636400" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636400">(Sep 16 2021 at 19:22)</a>:</h4>
+<p>What I had described previously was a valid, simple implementation, in which order does matter.</p>
+
+
+
+<a name="253636590"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636590" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636590">(Sep 16 2021 at 19:24)</a>:</h4>
+<p>It's not any existing implementation as far as I know, but it's presently valid, and there might be a legitimate reason to use it.</p>
+
+
+
+<a name="253636639"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636639" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636639">(Sep 16 2021 at 19:24)</a>:</h4>
+<p>I think we're talking past each other. I'm aware this is in no way a stable guarantee, but I think that unless there is a very good reason (e.g. some weird CPU that takes lots of extra cycles for the discriminant implementation) it should not differ from this simple, predictable rule for discriminant labeling</p>
+
+
+
+<a name="253636857"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636857" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636857">(Sep 16 2021 at 19:26)</a>:</h4>
+<p>Plus, it looks like this is what we do currently: <code>Result&lt;&amp;u8, ()&gt;</code> is niche-optimized, and has a discriminant of 1 for the all-zero niche</p>
+
+
+
+<a name="253636879"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253636879" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253636879">(Sep 16 2021 at 19:26)</a>:</h4>
+<p>I do agree there, especially a simple implementation would not do anything fancy, but it would preclude using the 1 discriminant for niches because it either stores the discrimant, or the niche-collapsed variant (note: in the particular implementation).</p>
+
+
+
+<a name="253637130"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637130" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637130">(Sep 16 2021 at 19:28)</a>:</h4>
+<p>plus the discriminant is not even the same size as the niche-optimized type (see the example above where the discriminant of <code>Option&lt;NonZeroU8&gt;</code> is 8 bytes)</p>
+
+
+
+<a name="253637186"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637186" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637186">(Sep 16 2021 at 19:28)</a>:</h4>
+<p>zx is typically easy.</p>
+
+
+
+<a name="253637216"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637216" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637216">(Sep 16 2021 at 19:28)</a>:</h4>
+<p>it's not zero extend though?</p>
+
+
+
+<a name="253637234"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637234" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637234">(Sep 16 2021 at 19:28)</a>:</h4>
+<p>it's setz</p>
+
+
+
+<a name="253637250"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637250" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637250">(Sep 16 2021 at 19:28)</a>:</h4>
+<p>On x86 sure.</p>
+
+
+
+<a name="253637279"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637279" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637279">(Sep 16 2021 at 19:29)</a>:</h4>
+<p>I mean, it's not like you are taking a bit out of the type</p>
+
+
+
+<a name="253637290"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637290" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637290">(Sep 16 2021 at 19:29)</a>:</h4>
+<p>But fundamentally, turning a u8 into a usize is a zero extension.</p>
+
+
+
+<a name="253637335"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637335" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637335">(Sep 16 2021 at 19:29)</a>:</h4>
+<p>you are taking a niche out of the type, which requires a zero test</p>
+
+
+
+<a name="253637378"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637378" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637378">(Sep 16 2021 at 19:30)</a>:</h4>
+<p><em>inserts branch</em></p>
+
+
+
+<a name="253637503"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637503" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637503">(Sep 16 2021 at 19:30)</a>:</h4>
+<p>and after the branch, set reg to x or to y</p>
+
+
+
+<a name="253637528"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637528" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637528">(Sep 16 2021 at 19:30)</a>:</h4>
+<p>and the values of x and y are basically unconstrained</p>
+
+
+
+<a name="253637623"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637623" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637623">(Sep 16 2021 at 19:31)</a>:</h4>
+<p>Except that I can save cycles by not setting the register.</p>
+
+
+
+<a name="253637709"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637709" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637709">(Sep 16 2021 at 19:32)</a>:</h4>
+<p>you have to set the register on at least one branch</p>
+
+
+
+<a name="253637783"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637783" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637783">(Sep 16 2021 at 19:32)</a>:</h4>
+<p>On w65, for example, I'd have to load into the register I'd use anyways (though I then have to store to memory because <code>usize</code> is 4 bytes because why). If the value is zero and the discriminant is zero, I don't have to lda imm, which is 3 saved cycles</p>
+
+
+
+<a name="253637884"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253637884" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253637884">(Sep 16 2021 at 19:33)</a>:</h4>
+<p>On the nonzero path, I'd have to, yes, but swapping them means I always lose those cycles.</p>
+
+
+
+<a name="253638272"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253638272" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253638272">(Sep 16 2021 at 19:36)</a>:</h4>
+<p>you can also xor 1, I have no idea if that is faster</p>
+
+
+
+<a name="253638309"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253638309" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253638309">(Sep 16 2021 at 19:36)</a>:</h4>
+<p>xor is 3 cycles as well.</p>
+
+
+
+<a name="253638396"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253638396" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253638396">(Sep 16 2021 at 19:37)</a>:</h4>
+<p>but it seems a bit too hypothetical for me. Most of the time this will be in a branch anyway and then you can orient the comparisons however you like (the discriminant probably won't even be materialized)</p>
+
+
+
+<a name="253638469"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253638469" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253638469">(Sep 16 2021 at 19:37)</a>:</h4>
+<p>(Yes, I care about being able to save 3 cycles - 3 cycles are 3 cycles, that's like, just over 1/20th of a scanline)</p>
+
+
+
+<a name="253638596"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253638596" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253638596">(Sep 16 2021 at 19:38)</a>:</h4>
+<p>how often are you using <code>discriminant()</code> for niche optimized enums though?</p>
+
+
+
+<a name="253638639"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253638639" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253638639">(Sep 16 2021 at 19:38)</a>:</h4>
+<p>probably you would use <code>is_some()</code> or <code>is_none()</code> instead and then your hand is forced</p>
+
+
+
+<a name="253638660"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253638660" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253638660">(Sep 16 2021 at 19:38)</a>:</h4>
+<p><span aria-label="shrug" class="emoji emoji-1f937" role="img" title="shrug">:shrug:</span></p>
+
+
+
+<a name="253638902"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253638902" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253638902">(Sep 16 2021 at 19:40)</a>:</h4>
+<p>honestly, if I found myself writing for such a ridiculously constrained platform I would just use assembly</p>
+
+
+
+<a name="253638961"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253638961" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253638961">(Sep 16 2021 at 19:40)</a>:</h4>
+<p>but you do you</p>
+
+
+
+<a name="253639644"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253639644" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253639644">(Sep 16 2021 at 19:45)</a>:</h4>
+<p>This isn't necessarily a necessary optimization, but I'd rather save 3 cycles in some cases than not save 3 cycles.</p>
+
+
+
+<a name="253639933"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253639933" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253639933">(Sep 16 2021 at 19:47)</a>:</h4>
+<p>(It's not memset using <code>,X</code> vs. <code>jsl __add_int32</code>)</p>
+
+
+
+<a name="253640121"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253640121" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253640121">(Sep 16 2021 at 19:48)</a>:</h4>
+<p>One way you could desugar it is that <code>discriminant()</code> is a pattern matching function like</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">match</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">None</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nb">Some</span><span class="p">(</span><span class="n">_</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>and it's not an especially privileged one (the user could also write a similar function themselves, with different numbers). Some choices of numbers will optimize better than others, but that's all there is to it</p>
+
+
+
+<a name="253645294"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253645294" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253645294">(Sep 16 2021 at 20:25)</a>:</h4>
+<p>hmmm, possibly I misspoke?</p>
+
+
+
+<a name="253660063"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253660063" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thom Chiovoloni <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253660063">(Sep 16 2021 at 22:22)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="224471">Lokathor</span> <a href="#narrow/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F/near/253526588">said</a>:</p>
+<blockquote>
+<p>Connor is correct for repr(rust), and Thom is correct for repr(C).</p>
+</blockquote>
+<p>I mean enums with no data (that's what I meant by C-style enums). I believe I'm correct for repr(Rust) and repr(C) (and repr(int)). In</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">enum</span> <span class="nc">Foo</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">Bar</span><span class="p">,</span><span class="w"> </span><span class="n">Baz</span><span class="p">,</span><span class="w"> </span><span class="n">Quux</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>the value of <code>Foo::Bar as usize</code> is well defined, even though it's not specified in the source. I <em>strongly</em> believe this would be a breaking change (of entirely safe code) to adjust, so even if it's not specified anywhere (and I suspect it <em>is</em>, or it's an oversight if it is not) it cannot be changed.</p>
+
+
+
+<a name="253674770"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253674770" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253674770">(Sep 17 2021 at 01:12)</a>:</h4>
+<p>Yes, this is <a href="https://doc.rust-lang.org/stable/reference/items/enumerations.html#custom-discriminant-values-for-fieldless-enumerations">fully documented in the reference</a> for "C-style" (fieldless) enums.<br>
+To be precise, their exact repr is actually still somewhat ambiguous as the compiler is allowed to use "whatever works" (tho it can't use bigger than an isize without a specific repr) but the <code>as</code> cast is well-defined.</p>
+
+
+
+<a name="253674889"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253674889" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253674889">(Sep 17 2021 at 01:14)</a>:</h4>
+<p>A truly demonic interpretation of the reference may allow e.g. writing the current discriminant in ASCII if a specific <code>repr</code> is not attached to the enum, but it would still have to convert correctly under the <code>as</code> cast.</p>
+
+
+
+<a name="253675321"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Result%20is%20not%20FFI%20safe%20%3F/near/253675321" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Result.20is.20not.20FFI.20safe.20.3F.html#253675321">(Sep 17 2021 at 01:20)</a>:</h4>
+<p>so, don't leave fieldless enums underspecified if the thought of the compiler notating them in EBCDIC or whatever gives you the heebie jeebies, but you can at least type-convert it reliably.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

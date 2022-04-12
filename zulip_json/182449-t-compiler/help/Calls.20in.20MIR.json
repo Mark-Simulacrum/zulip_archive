@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>Hi everyone,</p>\n<p>I have some questions about calls in MIR which I've been unable to tease out from the compiler source code.</p>\n<p>I'm looking at a call site in the optimised MIR of a program. The call  target is a <code>TyKind::FnDef</code>, which is expressed as a <code>DefId</code> and a <code>SubstsRef</code>. Using <code>println</code> debugging, I've determined that the <code>DefId</code> in question is never code-genned. That's likely because the callee in question is a trait function with no default implementation. The function does have a concrete implementation elsewhere (in the same crate) though.</p>\n<p>Nonetheless I was quite surprised that a dynamic call to a trait function is a <code>TyKind::FnDef</code>. I thought that these kinds of calls would be distinguished from normal static calls via another variant (perhaps <code>TyKind::FnPtr</code>?).</p>\n<p>So are calls to trait functions indistinguishable from normal static calls at the MIR level? It occurs to me that the trait  in question has only one implementation. I wonder if that has something to do with it? Perhaps the compiler \"promotes\" the dynamic call to a static call?</p>\n<p>Next, supposing there's a way to know if any given call is to a trait function, is there a way (inside the compiler) to enumerate the potential callees?</p>\n<p>Context: I'm working on something which requires the ability to be able to distinguish a function with no MIR from a function which is a \"stub\" (no default impl)  in a trait.</p>\n<p>Thanks!</p>",
+        "id": 181812247,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574681176
+    },
+    {
+        "content": "<p>Virtual calls (<code>&lt;dyn Trait as Trait&gt;::method</code>) are turned into a  reading a function pointer from the vtable and then calling it.</p>",
+        "id": 181818129,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1574685536
+    },
+    {
+        "content": "<p>Other trait methods are codegened with the DefId from the impl, while in MIR the may use the DefId from the trait item.</p>",
+        "id": 181818299,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1574685648
+    },
+    {
+        "content": "<p>What do you mean by a function with no mir? One where it isn't available? Or one where it never existed on the first place?</p>",
+        "id": 181818466,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1574685780
+    },
+    {
+        "content": "<p>Hi Matthew,</p>\n<blockquote>\n<p>Other trait methods are codegened with the DefId from the impl, while in MIR the may use the DefId from the trait item.</p>\n</blockquote>\n<p>Right, so I suppose I'm seeing the latter. At least, I see no <code>TyKind::FnPtr</code> in the target.</p>\n<p>Is there a way to identify if a call is to a trait item, and if so, enumerate its impls? That'd be very useful.</p>\n<blockquote>\n<p>What do you mean by a function with no mir?</p>\n</blockquote>\n<p>In my case, it's functions where <code>tcx.is_mir_available()</code> returns true after all passes have run, and right before the codegen.</p>\n<p>Thanks</p>",
+        "id": 181820981,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574687840
+    },
+    {
+        "content": "<blockquote>\n<p>while in MIR the may use the DefId from the trait item.</p>\n</blockquote>\n<p>And I guess, is there a way to resolve the call to a concrete function?</p>",
+        "id": 181822195,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574688777
+    },
+    {
+        "content": "<blockquote>\n<blockquote>\n<p>while in MIR the may use the DefId from the trait item.</p>\n</blockquote>\n<p>And I guess, is there a way to resolve the call to a concrete function?</p>\n</blockquote>\n<p>ty::Instance::resolve</p>",
+        "id": 181824882,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1574690951
+    },
+    {
+        "content": "<p>Well, that requires running during monomorphization.</p>",
+        "id": 181825031,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1574691025
+    },
+    {
+        "content": "<p>I've already experimented with <code>Instance::resolve()</code>, but figured it wasn't right due to:</p>\n<div class=\"codehilite\"><pre><span></span>error: internal compiler error: src/librustc/traits/codegen/mod.rs:53: Encountered error `Unimplemented`\nselecting `Binder(&lt;F as std::ops::Fn&lt;(f64,)&gt;&gt;)` during codegen\n</pre></div>\n\n\n<p>I also tried <code>tcx.subst_and_normalize_erasing_regions()</code>. Whilst this didn't crash, it didn't resolve the DefId in <code>question</code> either.</p>\n<blockquote>\n<p>Well, that requires running during monomorphization.</p>\n</blockquote>\n<p>Can you tell me more about this?</p>",
+        "id": 181826422,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574691994
+    },
+    {
+        "content": "<p>By the way, I just realised that I am actually running my code <em>after</em> codegen, not before (in case that changes anything).</p>\n<p>I run after:</p>\n<div class=\"codehilite\"><pre><span></span>codegen_backend.codegen_crate(...)\n</pre></div>",
+        "id": 181831018,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574694711
+    },
+    {
+        "content": "<blockquote>\n<p>Well, that requires running during monomorphization.</p>\n</blockquote>\n<p>I guess this relates to:</p>\n<div class=\"codehilite\"><pre><span></span>error: internal compiler error: src/librustc/traits/codegen/mod.rs:127: Encountered errors `[FulfillmentE\nrror(Obligation(predicate=Binder(TraitPredicate(&lt;R as std::marker::Sized&gt;)), depth=1),Unimplemented)]` re\nsolving bounds after type-checking\n</pre></div>\n\n\n<p>i.e. I'm <code>resolve()</code>ing too late :(</p>",
+        "id": 181839495,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574699959
+    },
+    {
+        "content": "<blockquote>\n<p>Hi Matthew,</p>\n<blockquote>\n<p>Other trait methods are codegened with the DefId from the impl, while in MIR the may use the DefId from the trait item.</p>\n</blockquote>\n<p>Right, so I suppose I'm seeing the latter. At least, I see no <code>TyKind::FnPtr</code> in the target.</p>\n<p>Is there a way to identify if a call is to a trait item, and if so, enumerate its impls? That'd be very useful.</p>\n<blockquote>\n<p>What do you mean by a function with no mir?</p>\n</blockquote>\n<p>In my case, it's functions where <code>tcx.is_mir_available()</code> returns true after all passes have run, and right before the codegen.</p>\n<p>Thanks</p>\n</blockquote>\n<p>You can list all impls with <code>tcx.trait_of_item</code> and <code>tcx.all_impls</code>. Then <code>tcx.associated_items</code> will give an iterator over the associated items for each impl. Which can then be filters by ident and kind. (See <a href=\"https://github.com/rust-lang/rust/blob/781866f3a95da0e4a35151cc24523f186ce19c79/src/librustc/traits/specialize/specialization_graph.rs#L440\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/781866f3a95da0e4a35151cc24523f186ce19c79/src/librustc/traits/specialize/specialization_graph.rs#L440\">https://github.com/rust-lang/rust/blob/781866f3a95da0e4a35151cc24523f186ce19c79/src/librustc/traits/specialize/specialization_graph.rs#L440</a>)</p>",
+        "id": 181857839,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1574712389
+    },
+    {
+        "content": "<p>Thanks Matthew. I'll have a play around and see if this works for me.</p>\n<p>Thanks so much for the pointers.</p>",
+        "id": 181913593,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574769235
+    },
+    {
+        "content": "<p>Hi Matthew,</p>\n<p>I was able to enumerate the associated items of the trait, so thanks for this :)</p>\n<p>Just to be clear: there's no way of knowing which of the candidates will actually be called without \"being the codegen\"?</p>",
+        "id": 181938940,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574785927
+    },
+    {
+        "content": "<p>It's actually <code>rustc_mir::monomorphize::collector</code> that does this. You could probably copy the implementation there if the <code>collect_and_partition_mono_items</code> query isn't providing enough information.</p>",
+        "id": 181962838,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1574801682
+    },
+    {
+        "content": "<blockquote>\n<p>It's actually rustc_mir::monomorphize::collector that does this.</p>\n</blockquote>\n<p>The function responsible for resolving the call sites in the collector is <code>visit_fn_use()</code>. I changed it to cache the results of resolutions into a hashmap keyed by instance (in the <code>tcx</code>. yeah, I know, gross). That way I can access them later.</p>\n<p>So the function now looks like this:</p>\n<div class=\"codehilite\"><pre><span></span>fn visit_fn_use&lt;&#39;tcx&gt;(\n    tcx: TyCtxt&lt;&#39;tcx&gt;,\n    ty: Ty&lt;&#39;tcx&gt;,\n    is_direct_call: bool,\n    output: &amp;mut Vec&lt;MonoItem&lt;&#39;tcx&gt;&gt;,\n) {\n    if let ty::FnDef(def_id, substs) = ty.kind {\n        let resolver = if is_direct_call {\n            ty::Instance::resolve\n        } else {\n            ty::Instance::resolve_for_fn_ptr\n        };\n        let instance = resolver(tcx, ty::ParamEnv::reveal_all(), def_id, substs).unwrap();\n\n        let mut resolutions = tcx.call_resolution_map.borrow_mut();\n        if resolutions.is_none() {\n            *resolutions = Some(FxHashMap::default());\n        }\n        let pre_inst = Instance::new(def_id, substs);\n\n        if tcx.def_path_str(def_id).contains(&quot;stop_tracing&quot;) {\n            dbg!(&amp;pre_inst);\n            dbg!(instance);\n        }\n\n        resolutions.as_mut().unwrap().insert(pre_inst, instance);\n\n        visit_instance_use(tcx, instance, is_direct_call, output);\n    }\n}\n</pre></div>\n\n\n<p>And as you can see, I have some <code>dbg!</code> in there so I can see how my problem call-site is being resolved.</p>\n<div class=\"codehilite\"><pre><span></span>[src/librustc_mir/monomorphize/collector.rs:738] &amp;pre_inst = Instance {\n    def: Item(\n        DefId(0:156 ~ yktrace[72ea]::ThreadTracerImpl[0]::stop_tracing[0]),\n    ),\n    substs: [\n        dyn ThreadTracerImpl,\n    ],\n}\n[src/librustc_mir/monomorphize/collector.rs:739] instance = Instance {\n    def: Virtual(\n        DefId(0:156 ~ yktrace[72ea]::ThreadTracerImpl[0]::stop_tracing[0]),\n        0,\n    ),\n    substs: [\n        dyn ThreadTracerImpl,\n    ],\n}\n</pre></div>\n\n\n<p>Seems that the call remains unresolved? I was expecting <code>substs</code> to be empty after resolution. But if that were always the case, <code>resolve()</code> would return only a <code>DefId</code>. Seems I'm missing something...</p>\n<p>I think this has something to do with <code>codegen_call_terminator()</code> in <code>src/librustc_codegen_ssa/mir/block.rs</code> where there appears to a second layer of resolution?</p>",
+        "id": 182013610,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574857601
+    },
+    {
+        "content": "<p>Oh, it's an actual virtual call. The concrete method gets  recorded through a path like coerce to trait object (\"unsize coercion\") -&gt; vtable -&gt; method.</p>",
+        "id": 182014343,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1574858320
+    },
+    {
+        "content": "<blockquote>\n<p>Oh, it's an actual virtual call. The concrete method gets recorded through a path like coerce to trait object (\"unsize coercion\") -&gt; vtable -&gt; method.</p>\n</blockquote>\n<p>So the target is only decided at runtime, right?</p>",
+        "id": 182018215,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574861114
+    },
+    {
+        "content": "<p>Yes</p>",
+        "id": 182019800,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1574862340
+    },
+    {
+        "content": "<p>Great!</p>\n<p>Thanks for your patience with this. I have much to learn :)</p>",
+        "id": 182038584,
+        "sender_full_name": "Edd Barrett",
+        "timestamp": 1574874427
+    },
+    {
+        "content": "<p>Edit: didn't read your comment completely.</p>",
+        "id": 182350814,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1575297426
+    }
+]

@@ -1,0 +1,140 @@
+[
+    {
+        "content": "<p>On a new M1 and noticed this: <code>rustc --print cfg -Ctarget-cpu=native</code> does a worse job at figuring out the supported flags than <code>rustc --print cfg</code> (e.g. with no other options):  <a href=\"https://gist.github.com/thomcc/a505f793a7d30f1fa071777034c91db5\">https://gist.github.com/thomcc/a505f793a7d30f1fa071777034c91db5</a> </p>\n<p>Anybody know the deal here? Seems like we should fix this using whatever method is used for the default cfg values (or just checking <code>sysctl -a hw.optional</code> -- i'm not sure how specific the semantics of <code>-Ctarget-cpu=native</code> are that, and if that'd be allowed or if it'd be <em>too</em> specific to the local cpu)</p>\n<p>(My wild speculation for why this is happening is that somehow it's related to the fact that system <code>clang</code> seems to outright forbid <code>-march=native</code> on aarch64-apple-darwin: \"error: the clang compiler does not support '-march=native'\" uh-huh, yeah, sure you don't)</p>",
+        "id": 271485835,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644523099
+    },
+    {
+        "content": "<p>It looks like cpu detection on arm is only implemented for linux: <a href=\"https://github.com/llvm/llvm-project/blob/6b1e844b69f15bb7dffaf9365cd2b355d2eb7579/llvm/lib/Support/Host.cpp#L1271\">https://github.com/llvm/llvm-project/blob/6b1e844b69f15bb7dffaf9365cd2b355d2eb7579/llvm/lib/Support/Host.cpp#L1271</a><br>\nedit: it is supported. it is hard coded to cyclone for aarch64 though: <a href=\"https://github.com/llvm/llvm-project/blob/6b1e844b69f15bb7dffaf9365cd2b355d2eb7579/llvm/lib/Support/Host.cpp#L1304\">https://github.com/llvm/llvm-project/blob/6b1e844b69f15bb7dffaf9365cd2b355d2eb7579/llvm/lib/Support/Host.cpp#L1304</a></p>",
+        "id": 271490394,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1644525265
+    },
+    {
+        "content": "<p>I would guess cyclone is a lot older than the m1 (which rustc defaults to on aarch64 macos) and thus disables target features.</p>",
+        "id": 271490569,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1644525369
+    },
+    {
+        "content": "<p>it looks like llvm detects cpus rather than individual target features.</p>",
+        "id": 271490605,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1644525393
+    },
+    {
+        "content": "<p>Interesting. So fixing this requires an LLVM patch?</p>",
+        "id": 271490718,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644525455
+    },
+    {
+        "content": "<p>I dont actually know how you'd do CPU detection, only feature detection</p>",
+        "id": 271490749,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644525471
+    },
+    {
+        "content": "<p>maybe there's a sysctl</p>",
+        "id": 271490756,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644525476
+    },
+    {
+        "content": "<p>there is. <code>sysctl hw.cpufamily</code> spits out a number, and while theres likely a better place, it could be compared against the defines <a href=\"https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/machine.h#L411-L443\">https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/machine.h#L411-L443</a> however the comment directly above it says explicitly not to use it for this:</p>\n<blockquote>\n<p>you should never try to deduce whether or not some feature is available based on the family. Use feature flags (eg, hw.optional.altivec) to test for optional functionality.</p>\n</blockquote>",
+        "id": 271491307,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644525789
+    },
+    {
+        "content": "<p>also, oddly enough the value I have is behind that <code>#ifdef</code>: <code>hw.cpufamily: 0x1b588bb3</code> and <code>hw.cpusubfamily: 0x00000005</code>. So that makes me even less optimistic that they should be used. I think at a minimum we should configure features under <code>-Ctarget-cpu=...</code> the same way we configure them without then. and IMO it would be reasonable to check <code>sysctl -a hw.optional</code> too, (although I don't care that much since the default seems to have the full feature set)</p>",
+        "id": 271491804,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644526049
+    },
+    {
+        "content": "<p>fixing this in llvm tho... sounds too painful to be honest</p>",
+        "id": 271491879,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644526082
+    },
+    {
+        "content": "<p>but maybe you'd prefer it be upto the codegen backend to determine such things? that seems like it would just make more work for you, but idk</p>",
+        "id": 271492019,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644526156
+    },
+    {
+        "content": "<p><code>-Ctarget-cpu</code> doesn't just influence target features, but also instruction scheduling and other cost models. It would be impossible to do that without the codegen backend knowing the exact cpu to optimize for.</p>",
+        "id": 271492587,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1644526425
+    },
+    {
+        "content": "<p>Huh, I thought that was influenced by <code>-Ztune-cpu</code></p>",
+        "id": 271498048,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644528947
+    },
+    {
+        "content": "<p>and that target-cpu was more naive about such things.</p>",
+        "id": 271498073,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644528961
+    },
+    {
+        "content": "<p>Really, the question of the exact cpu is in some sense quite clear -- \"this one\". but i understand that this is not the sort of input instruction scheduling wants...</p>",
+        "id": 271498235,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644529028
+    },
+    {
+        "content": "<p>the fact that <code>clang</code> refuses to accept native as a target cpu (or tune cpu) on aarch64-apple-darwin makes me think this isn't going to have a clean solution (perhaps apple are planning on having the feature sets vary for nominally equivalent cpus. or perhaps they want to avoid something they found undesirable about feature testing on intel). i have to imagine that it's deliberate, given how much sway apple has over clang</p>",
+        "id": 271498543,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644529187
+    },
+    {
+        "content": "<p><code>-Ztune-cpu</code> is <code>-Ctarget-cpu</code> without preventing the program to run on older cpus afaik.</p>",
+        "id": 271504057,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1644531699
+    },
+    {
+        "content": "<p>oh</p>",
+        "id": 271507352,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644533931
+    },
+    {
+        "content": "<p>yeah my bad, i thought it did something different</p>",
+        "id": 271507393,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644533967
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"209168\">@Thom Chiovoloni</span> It might be good to file an issue about this, as it seems surprising.</p>\n<blockquote>\n<p>bjorn3: I would guess cyclone is a lot older than the m1 (which rustc defaults to on aarch64 macos) and thus disables target features.</p>\n</blockquote>\n<p><span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> Unless I'm looking at the wrong thing, it seems like aarch64-apple-darwin defaults to <code>apple-a14</code>.  It looks like that was chosen because m1 isn't supported in LLVM 12.  I think it was added in LLVM 13.</p>",
+        "id": 271507620,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1644534070
+    },
+    {
+        "content": "<p>yep, i'm going to file one after work. i'll link it here when i do</p>",
+        "id": 271507652,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644534095
+    },
+    {
+        "content": "<p>On the rustc side it does, but <code>-Ctarget-cpu=native</code> defaults to cyclone on the LLVM side it seems.</p>",
+        "id": 271507718,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1644534125
+    },
+    {
+        "content": "<p>Filed as <a href=\"https://github.com/rust-lang/rust/issues/93889\">https://github.com/rust-lang/rust/issues/93889</a></p>",
+        "id": 271526787,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1644550094
+    }
+]

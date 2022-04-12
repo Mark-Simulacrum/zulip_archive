@@ -1,0 +1,50 @@
+[
+    {
+        "content": "<p>I was reading the gist <a href=\"https://gist.github.com/nikomatsakis/7a07b265dc12f5c3b3bd0422018fa660\">https://gist.github.com/nikomatsakis/7a07b265dc12f5c3b3bd0422018fa660</a> . I want to create my implementation proposal as a thinking exercise. Review comments are very welcome!</p>\n<p>In rust type system, at least in the user-facing parts, the subtyping relations are very strict. Currently, a prerequisite is that the <code>TyKind</code>s(including stuff like <code>AdtDef</code>) needs to be the same. If it's changing significantly, it has to be a coercion.</p>\n<p>In common plt theories, though, bottom types has the subtyping relations that  <code>Bottom &lt;: AnyType</code>. I think it's clear that <code>!</code> could not represent the bottom type well. Instead, it's just a simple uninhabited type with some compiler magic.  For example, <code>! &lt;: ()</code> doesn't hold.</p>\n<h1>Proposal</h1>\n<p>So my proposal here is:</p>\n<ol>\n<li>introduce a compiler internal <code>{diverging}</code> type to represent the real bottom type.  It acts a little like <code>{integer}</code> and cannot be specified by user directly.</li>\n<li>support the coercion <code>! -&gt; {diverging}</code>. (maybe extend to other uninhabited types in the future?)</li>\n<li>support the subtyping treatment of <code>{diverging} &lt;: Any type variable</code> in obligation processing.</li>\n<li>For type checking fallback, replace all inferred occurances of <code>{diverging}</code> with <code>!</code>  (since <code>{diverging} &lt;: !</code>), to make them user-facing. </li>\n<li>replace all remaining uninferred type variables with <code>()</code>.</li>\n</ol>\n<h1>Does this conform to bug 66173?</h1>\n<p>I think so, </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">something</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pattern1</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"nb\">Default</span>::<span class=\"n\">default</span><span class=\"p\">(),</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pattern2</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"fm\">panic!</span><span class=\"p\">(</span><span class=\"s\">\"...\"</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"p\">};</span><span class=\"w\"></span>\n</code></pre></div>\n<p>The coercion relationships:</p>\n<div class=\"codehilite\"><pre><span></span><code>?T -&gt; ?M\n! -&gt; ?M\n</code></pre></div>\n<p>leads to:<code> ?T &lt;: ?M,    ! coerces to {diverging}, {diverging} &lt;: ?M</code><br>\nSince the third sentence is trivial from rule, We will no longer solve <code>?M</code> with <code>{diverging}</code>, instead, we'll rely on fallback to solve <code>?M</code> and <code>?T</code> with <code>()</code>.</p>\n<h1>Does this conform to bug 66757?</h1>\n<p>I think so.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">E</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"nb\">From</span><span class=\"o\">&lt;!&gt;</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">E</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">from</span><span class=\"p\">(</span><span class=\"n\">_</span>: <span class=\"o\">!</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nc\">E</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">E</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"cp\">#[allow(unreachable_code)]</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">(</span><span class=\"n\">never</span>: <span class=\"o\">!</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">&lt;</span><span class=\"n\">E</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"nb\">From</span><span class=\"o\">&lt;!&gt;&gt;</span>::<span class=\"n\">from</span><span class=\"p\">(</span><span class=\"n\">never</span><span class=\"p\">);</span><span class=\"w\">  </span><span class=\"c1\">// Ok</span>\n<span class=\"w\">    </span><span class=\"o\">&lt;</span><span class=\"n\">E</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"nb\">From</span><span class=\"o\">&lt;</span><span class=\"n\">_</span><span class=\"o\">&gt;&gt;</span>::<span class=\"n\">from</span><span class=\"p\">(</span><span class=\"n\">never</span><span class=\"p\">);</span><span class=\"w\">  </span><span class=\"c1\">// Inference fails here</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Since generics \"suppresses\" coercions, and <code>never</code> has type <code>!</code> here, the <code>! -&gt; {diverging}</code> coercion won't happen, then  I think the inference will succeed.</p>\n<h1>Disadvantages</h1>\n<ul>\n<li>Complexities from new compiler builtin type</li>\n<li>Complexities from extending subtyping rules.</li>\n</ul>\n<p>I wonder what people think about this. Did i make any reasoning mistakes? <span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> <span class=\"user-mention\" data-user-id=\"116122\">@simulacrum</span> <span class=\"user-mention\" data-user-id=\"125270\">@scottmcm</span></p>",
+        "id": 250202532,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1629530320
+    },
+    {
+        "content": "<p>I think this is indeed quite similar to what I proposed</p>",
+        "id": 250399427,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629746664
+    },
+    {
+        "content": "<p>I'm not 100% sure if it's <em>exactly</em> the same, do you think it is?</p>",
+        "id": 250399440,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629746672
+    },
+    {
+        "content": "<p>I think it's a little bit different in principle. Basically the only difference is to make <code>{diverging}</code> a real type instead of a property of the type variable itself.</p>",
+        "id": 250607210,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1629891033
+    },
+    {
+        "content": "<p>That's also the difference I understood, where Niko's tries to unify to another type (<code>!</code> or <code>()</code>) Charles's keeps <code>{diverging}</code> as an internal \"bottom\" type, which I think allows it to address 66757 \"easier\"</p>",
+        "id": 250643609,
+        "sender_full_name": "Jeremiah Senkpiel",
+        "timestamp": 1629908751
+    },
+    {
+        "content": "<p>Yeah. I'm more wondering, does it behave differently, and if so, on what examples?</p>",
+        "id": 250666387,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629918500
+    },
+    {
+        "content": "<p>I... I think i cannot finish this comparison only by brain prediction. If i've got time maybe i'll see whether i can implement this on my fork as a prototype to compare. Let's just leave this as an potential idea for now.</p>",
+        "id": 250750538,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1629973157
+    },
+    {
+        "content": "<p>I like it, in any case :)</p>",
+        "id": 250780396,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629988015
+    }
+]

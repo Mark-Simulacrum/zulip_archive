@@ -1,0 +1,170 @@
+[
+    {
+        "content": "<p>soo I've been thinking about the old problem of identities for TypeRefs again.</p>\n<p>right now our hir_def layer (which is actually pretty close to a traditional AST?) has two approaches for its various parts:</p>\n<ul>\n<li>\n<p>Exprs and Pats (and items) are stored in Arenas, with each node having its own ID. E.g. if we have the expression <code>1 + 1</code>, we have two expressions <code>1</code> with separate IDs.<br>\n   This allows us e.g. to have diagnostics pointing to specific expressions by their IDs.</p>\n</li>\n<li>\n<p>Paths, TypeRefs etc. are just a simple tree structure using boxes or interned pointers.<br>\n   They don't have identities, so in a type <code>(Foo, Foo)</code> both <code>Foo</code> could potentially be represented by the same <code>TypeRef</code> (except we don't intern them right now).<br>\n   This makes lots of things simpler, but makes it hard to point to specific types or paths.<br>\n   This is for example a problem for <code>impl Trait</code>, where we kind of need to uniquely identify each separate <code>impl Trait</code> (if you have <code>fn foo(x: (impl Trait, impl Trait))</code>, those two tuple elements are different types!). Also, now that we're adding more diagnostics, it would be good to be able to point to specific types.</p>\n</li>\n</ul>\n<p>Note that TypeRefs, Paths and Exprs are quite interleaved:<br>\nOne kind of TypeRef is of course a path (<code>some::Type</code>);<br>\npaths can be qualified, referring to a type (<code>&lt;(u32, bool)&gt;::bar</code>);<br>\npaths can contain const parameters, which are expressions (<code>foo::&lt;{ 1 + 2 }&gt;</code>);<br>\nexpressions can of course contain paths and types.</p>\n<p>This means that even in the current state, where exprs have identity and paths don't, we would actually need to have an arena (of exprs) when dealing with paths. We only avoid this because we don't lower const params yet; I expect <span class=\"user-mention\" data-user-id=\"401078\">@hkalbasi</span> has run into this problem by now.<br>\nThis also means that paths will have a 'tiny bit' of identity, just not 'fully', since they will need to refer to expressions:<br>\ntwo instances of <code>foo::&lt;{1 + 2}&gt;</code> have to be distinguished by the identities of the expressions.</p>\n<p>Soo my conclusion is that we should probably just bite the bullet and at least bring <code>TypeRef</code> on the same level as <code>Expr</code>, i.e. give them identity and store them in an arena, and have some common 'store' for the arenas of TypeRefs, Exprs and Pats (one per item probably).<br>\nMaybe we don't need identities for Paths since they'll just be part of some TypeRef or Expr (or Pat).</p>\n<p>Any thoughts or comments?<br>\n<span class=\"user-mention\" data-user-id=\"401078\">@hkalbasi</span> how far along are you with lowering const exprs? I don't want to start working on this if it will just lead to giant conflicts with your work.</p>",
+        "id": 278313786,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649428791
+    },
+    {
+        "content": "<blockquote>\n<p>Maybe we don't need identities for Paths since they'll just be part of some TypeRef or Expr (or Pat).</p>\n</blockquote>\n<p>on that note, not sure how relevant but it would be great if we didn't have to re-resolve paths in the IDE layer :) <a href=\"https://github.com/rust-analyzer/rust-analyzer/issues/3407\">r-a#3407</a></p>",
+        "id": 278314426,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1649429090
+    },
+    {
+        "content": "<blockquote>\n<p>Soo my conclusion is that we should probably just bite the bullet and at least bring TypeRef on the same level as Expr, i.e. give them identity and store them in an arena, and have some common 'store' for the arenas of TypeRefs, Exprs and Pats (one per item probably).</p>\n</blockquote>\n<p>general <span aria-label=\"thumbs up\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"thumbs up\">:thumbs_up:</span> from me though</p>",
+        "id": 278314589,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1649429166
+    },
+    {
+        "content": "<p>yeah. I think some re-resolving might be necessary though since we probably don't want to store every partial resolution. It'd be a great start if at least the IDE / HIR layer didn't replicate a lot of resolution logic (e.g. looking at <code>resolve_hir_path_</code> in source_analyzer)</p>",
+        "id": 278314751,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649429232
+    },
+    {
+        "content": "<blockquote>\n<p>It'd be a great start if at least the IDE / HIR layer didn't replicate a lot of resolution logic (e.g. looking at resolve_hir_path_ in source_analyzer)</p>\n</blockquote>\n<p>Ye certainly, that also reminds me of <a href=\"https://github.com/rust-analyzer/rust-analyzer/issues/9694\">https://github.com/rust-analyzer/rust-analyzer/issues/9694</a> which fails since we don't re-implement that part either (and didn't need to so far since we used the results from inference otherwise). I remember looking into that trying to lift out some duplication from <code>hir_ty</code> but I failed with that. Can't quite remember why.</p>",
+        "id": 278315270,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1649429442
+    },
+    {
+        "content": "<p>maybe also an interesting difference to note is that expression macros get expanded while lowering from AST to <code>Expr</code>, while type macros get expanded while lowering from <code>TypeRef</code> to <code>Ty</code>. not sure whether there's a reason why we can't expand while lowering to <code>TypeRef</code></p>",
+        "id": 278315339,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649429477
+    },
+    {
+        "content": "<p>When do we lower <code>Pattern</code> macros? I think there were also some oddities around those if I remember correctly/</p>",
+        "id": 278315521,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1649429532
+    },
+    {
+        "content": "<p>patterns are generally handled the same as <code>Expr</code>s, so also during body lowering</p>",
+        "id": 278315641,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649429577
+    },
+    {
+        "content": "<p>I think it would be nice to have a uniform approach to <code>Expr</code>, <code>Pat</code> and <code>TypeRef</code></p>",
+        "id": 278315696,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649429599
+    },
+    {
+        "content": "<p>Ye definitely</p>",
+        "id": 278315966,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1649429704
+    },
+    {
+        "content": "<p>Bringing <code>TypeRef</code> at the level of <code>Expr</code> was my idea as well, it will lead to many changes in many places. What I currently have is a total mess, no where near a working state, and I wanted to declare my give up even before your message. So feel free to start working on this <span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span></p>",
+        "id": 278317671,
+        "sender_full_name": "hkalbasi",
+        "timestamp": 1649430397
+    },
+    {
+        "content": "<p>old resolve vs record architercute issue about that: <a href=\"https://github.com/rust-analyzer/rust-analyzer/issues/3407\">https://github.com/rust-analyzer/rust-analyzer/issues/3407</a></p>",
+        "id": 278320080,
+        "sender_full_name": "matklad",
+        "timestamp": 1649431521
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"129457\">Florian Diebold</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/identities.20for.20TypeRefs.2C.20Paths.2C.20Exprs/near/278315339\">said</a>:</p>\n<blockquote>\n<p>maybe also an interesting difference to note is that expression macros get expanded while lowering from AST to <code>Expr</code>, while type macros get expanded while lowering from <code>TypeRef</code> to <code>Ty</code>. not sure whether there's a reason why we can't expand while lowering to <code>TypeRef</code></p>\n</blockquote>\n<p>well, I found the reason -- <code>ItemTree</code> uses <code>TypeRef</code>s and is pre-expansion <span aria-label=\"confounded\" class=\"emoji emoji-1f616\" role=\"img\" title=\"confounded\">:confounded:</span></p>",
+        "id": 278427033,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649533361
+    },
+    {
+        "content": "<p>I think we might end up needing another TypeRef IR <span aria-label=\"grimacing\" class=\"emoji emoji-1f62c\" role=\"img\" title=\"grimacing\">:grimacing:</span></p>",
+        "id": 278427716,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649534330
+    },
+    {
+        "content": "<p><span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span> I wonder if anyone wants to spend a weekend prototyping salsa-based compiler where everything has global, tree-shaped IDs?</p>",
+        "id": 278430041,
+        "sender_full_name": "matklad",
+        "timestamp": 1649537637
+    },
+    {
+        "content": "<p>Seems it'll be much easier if we said that <strong>everything</strong> is identified by an <code>u32</code></p>",
+        "id": 278430099,
+        "sender_full_name": "matklad",
+        "timestamp": 1649537696
+    },
+    {
+        "content": "<p>In other words, fp with its \"everything is a value\" is just a giant scam in compiler land -- everything needs to be an object with identity, with a potential exception of syntax trees</p>",
+        "id": 278430137,
+        "sender_full_name": "matklad",
+        "timestamp": 1649537758
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"129457\">Florian Diebold</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/identities.20for.20TypeRefs.2C.20Paths.2C.20Exprs/near/278427033\">said</a>:</p>\n<blockquote>\n<p>well, I found the reason -- <code>ItemTree</code> uses <code>TypeRef</code>s and is pre-expansion <span aria-label=\"confounded\" class=\"emoji emoji-1f616\" role=\"img\" title=\"confounded\">:confounded:</span></p>\n</blockquote>\n<p>hmm this of course also means we need a pre-expansion IR for expressions (e.g. if we have <code>fn foo() -&gt; [u32; { 1 + some_macro!() }]</code> how do we represent that in the ItemTree?)</p>\n<p>one idea I had was to use a common polymorphic enum to represent the pre- and post-expansion IRs -- e.g. we'd have</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">Expr</span><span class=\"o\">&lt;</span><span class=\"n\">M</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">..</span><span class=\"p\">.,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">MacroCall</span><span class=\"p\">(</span><span class=\"n\">M</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">type</span> <span class=\"nc\">PreExpansionExpr</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Expr</span><span class=\"o\">&lt;</span><span class=\"n\">AstId</span><span class=\"o\">&lt;</span><span class=\"n\">ast</span>::<span class=\"n\">MacroCall</span><span class=\"o\">&gt;&gt;</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">type</span> <span class=\"nc\">PostExpansionExpr</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Expr</span><span class=\"o\">&lt;!&gt;</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>not sure if that's overengineered (the other options would be just using the same enum and assuming at runtime there are no macro calls post expansion, or using fully separate enums)</p>",
+        "id": 278474219,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649604936
+    },
+    {
+        "content": "<p>another option would be to do full* name resolution while we're expanding macros, like I think rustc does <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span> </p>\n<p>(* except for type-based resolution, of course)</p>",
+        "id": 278474421,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649605190
+    },
+    {
+        "content": "<p>Isn't this gonna cost us a bunch of memory again? <span aria-label=\"sweat\" class=\"emoji emoji-1f613\" role=\"img\" title=\"sweat\">:sweat:</span></p>",
+        "id": 278475095,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1649606074
+    },
+    {
+        "content": "<blockquote>\n<p>if we have fn foo() -&gt; [u32; { 1 + some_macro!() }] how do we represent that in the ItemTree?</p>\n</blockquote>\n<p>If the macro call isn't on the item level its not directly stored in the item tree. So that would only be part of the <code>TypeRef</code> stored for the return type I imagine</p>",
+        "id": 278475179,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1649606168
+    },
+    {
+        "content": "<p>well, yes. but the TypeRef is in the item tree, and the expression is part of the TypeRef</p>",
+        "id": 278475291,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649606321
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"300586\">Lukas Wirth</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/identities.20for.20TypeRefs.2C.20Paths.2C.20Exprs/near/278475095\">said</a>:</p>\n<blockquote>\n<p>Isn't this gonna cost us a bunch of memory again? <span aria-label=\"sweat\" class=\"emoji emoji-1f613\" role=\"img\" title=\"sweat\">:sweat:</span></p>\n</blockquote>\n<p>it's probably going to cost some memory, but we don't necessarily need to cache all these IRs</p>",
+        "id": 278475317,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649606385
+    },
+    {
+        "content": "<blockquote>\n<p>another option would be to do full* name resolution while we're expanding macros, like I think rustc does <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>\n</blockquote>\n<p>Aren't we doing this already?</p>",
+        "id": 278475463,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1649606497
+    },
+    {
+        "content": "<p>well for TypeRefs we're doing both at the same time right now, but for expressions we're expanding macros when we lower to Expr but resolve other names during type inference</p>",
+        "id": 278475515,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649606554
+    },
+    {
+        "content": "<p>Doesn't rustc only do name resolution for macros during expansion?</p>",
+        "id": 278480392,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1649612359
+    },
+    {
+        "content": "<p>I may very likely be misremembering</p>",
+        "id": 278482298,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1649614759
+    },
+    {
+        "content": "<p>rustc does run a pass to resolve <em>everything</em>, I believe, after early name resolution and macro expansion is done</p>",
+        "id": 278546686,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1649680586
+    }
+]

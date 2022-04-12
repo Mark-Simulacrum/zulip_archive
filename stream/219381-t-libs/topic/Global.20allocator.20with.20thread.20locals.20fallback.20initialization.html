@@ -1,0 +1,201 @@
+<html>
+<head><meta charset="utf-8"><title>Global allocator with thread locals fallback initialization · t-libs · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/index.html">t-libs</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html">Global allocator with thread locals fallback initialization</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="278097066"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278097066" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278097066">(Apr 06 2022 at 22:56)</a>:</h4>
+<p>I'm trying to implement a <code>#[global allocator]</code> that allocates from a <code>thread_local!</code> data structure. The thread local needs a drop implementation to return memory to a global heap on thread exit. This works fine on x86-64 linux when I run <code>cargo test</code>. However, when I run miri, I seem to hit recursive initialization. Specifically, accessing the thread local the first time tries to register it's destructor, but registering the destructor allocates (using the global allocator).</p>
+<p>I'm using a <code>const</code> initialized thread local, which is implemented here: <a href="https://doc.rust-lang.org/src/std/thread/local.rs.html#195-248">https://doc.rust-lang.org/src/std/thread/local.rs.html#195-248</a></p>
+<p>There is a <code>#[thread_local] static mut VAL: ...</code> which is the actual thread local, and a <code>#[thread_local] static mut STATE: ...</code> to keep track of whether the destructor has been/is currently being registered. Eventually, it calls <a href="https://doc.rust-lang.org/src/std/thread/local.rs.html#233-236"><code>register_dtor</code></a> which is <a href="https://github.com/rust-lang/rust/blob/master/library/std/src/sys/unix/thread_local_dtor.rs#L20-L44">this</a> on my platform</p>
+<p><code>register_dtor</code> looks for a weak <code>__cxa_thread_atexit_impl</code> symbol which it uses if present; otherwise, it calls <a href="https://github.com/rust-lang/rust/blob/master/library/std/src/sys_common/thread_local_dtor.rs#L19-L49"><code>register_dtor_fallback</code></a>. I'm assuming this symbol is present when building for debug/test/release, but is not under miri (or it is shim'ed). <code>register_dtor_fallback</code> allocates a <code>Box&lt;Vec&lt;_&gt;&gt;</code>, which may also allocate when the vector gets pushed to, using the global allocator (this <code>Box&lt;Vec&lt;_&gt;&gt;</code> is a list of destructor functions that will be called on thread exit)</p>
+<p>So the following happens (when running under miri):</p>
+<ol>
+<li>global allocator gets called</li>
+<li>global allocator tries to access the thread local heap</li>
+<li>standard library tries to register the destructor</li>
+<li>registering the destructor allocates</li>
+<li>global allocator is called recursively</li>
+</ol>
+<p>I've been stuck on this for a while; I can't see how one can implement a general purpose global allocator using thread locals if registering a thread local destructor allocates. If someone has an idea how to avoid this, I'd love to hear. Alternatively (a big "alternatively"), I believe it should be possible to implement <code>register_dtor_fallback</code> so it doesn't need a box or a vector. And for this use, it would be nice if the standard library could guarantee that registering the destructor never allocates; otherwise such a global allocator implemented in rust would not be portable</p>
+<p>As for the "alternative", roughly speaking, each thread local defined through <code>thread_local!</code> already has a <code>#[thread_local] static mut STATE</code>. That macro could also define something like a</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">DtorFallback</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">t</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">dtor</span>: <span class="nc">extern</span><span class="w"> </span><span class="s">"C"</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="k">fn</span><span class="p">(</span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">next</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="bp">Self</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>and pass/thread it through to <code>register_dtor_fallback</code>, which can maintain an intrusive linked list of these destructors. (This was just an idea I had; I'm not sure if there are larger problems)</p>
+<p>If anyone has any ideas what I can do it would be greatly appreciated!</p>
+
+
+
+<a name="278097775"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278097775" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278097775">(Apr 06 2022 at 23:03)</a>:</h4>
+<p>If the type you store in a thread local doesn't require drop glue I believe libstd skips register_dtor_fallback in the current implementation.</p>
+
+
+
+<a name="278097902"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278097902" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278097902">(Apr 06 2022 at 23:04)</a>:</h4>
+<p>I don't think register_dtor_fallback can be implemented without allocating. Where would it store the destructor otherwise?</p>
+
+
+
+<a name="278099603"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278099603" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278099603">(Apr 06 2022 at 23:23)</a>:</h4>
+<p>I'm using the drop glue to return memory from the dying thread to the global heap. Otherwise, is there a way to implement it so the memory doesn't get lost/can be reclaimed?</p>
+
+
+
+<a name="278100039"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278100039" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278100039">(Apr 06 2022 at 23:28)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization/near/278097902">said</a>:</p>
+<blockquote>
+<p>I don't think register_dtor_fallback can be implemented without allocating. Where would it store the destructor otherwise?</p>
+</blockquote>
+<p>Each thread local declared with <code>thread_local!</code> basically needs additional storage (another <code>#[thread_local]</code> which is const initialized and doesn't run drop) which <code>register_dtor_fallback</code> can use as an intrusive linked list containing all the destructors from thread locals declared with <code>thread_local!</code>. Note that <code>thread_local!</code> already creates a <code>#[thread_local] static mut STATE</code> to keep track of the destructor state, so requiring/creating additional storage isn't unprecedented. But the linked list of <code>#[thread_local] static</code> items might be sketchy...</p>
+
+
+
+<a name="278101083"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278101083" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278101083">(Apr 06 2022 at 23:42)</a>:</h4>
+<p>I gave an example definition for the additional storage at the bottom of my original post</p>
+
+
+
+<a name="278119114"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278119114" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278119114">(Apr 07 2022 at 05:29)</a>:</h4>
+<p>One thing you could do is add a thread local bool that signals that you are currently initializing the thread local allocator and should thus forward all allocations to the real global allocator</p>
+
+
+
+<a name="278119417"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278119417" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278119417">(Apr 07 2022 at 05:35)</a>:</h4>
+<p>The problem I'm not sure doing that is that at least naively, when deallocating the memory you don't know whether it came from the real global allocator (e.g. malloc) or custom allocator. Extra bookkeeping is possible, but doesn't seem ideal</p>
+
+
+
+<a name="278119581"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278119581" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278119581">(Apr 07 2022 at 05:38)</a>:</h4>
+<p>Hmm... dropping the thread local dtor alloc happens after calling the dtor, so you can set the thread local bool again to use the real global alloc</p>
+
+
+
+<a name="278119590"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278119590" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278119590">(Apr 07 2022 at 05:39)</a>:</h4>
+<p>But yea, any alloc and dealloc will now first go through the thread local bool</p>
+
+
+
+<a name="278120110"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278120110" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278120110">(Apr 07 2022 at 05:50)</a>:</h4>
+<p>Hmmm I may have misunderstood. I was imagining something this:</p>
+<ul>
+<li><code>#[thread_local] static mut REENTRANT: bool = false</code></li>
+<li>call to <code>Global.allocate</code></li>
+<li>see that <code>REENTRANT</code> is false, set it to true for future calls (set it to false before return)</li>
+<li>access the thread local heap with <code>THREAD_LOCAL.with(|local| ...)</code></li>
+<li>standard library registers the dtor, allocating with the global allocator<br>
+    - reentrant call to <code>Global.allocate</code><br>
+    - see that <code>REENTRANT</code> is true<br>
+    - instead of allocating with <code>THREAD_LOCAL.with(|local| ...)</code> (which will try registering the dtor again because it hasn't completed the first time), call <code>System.allocate</code></li>
+<li>standard library finishes registering the dtor</li>
+<li>do the original allocation with <code>THREAD_LOCAL</code>, set <code>REENTRANT</code> to false before returning</li>
+</ul>
+<p>But later given a pointer in <code>Global.deallocate</code>, how do I know whether it was allocated with the system allocator or my allocator?</p>
+
+
+
+<a name="278120209"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278120209" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278120209">(Apr 07 2022 at 05:52)</a>:</h4>
+<p>As in whether it came from the reentrant call or non-reentrant call</p>
+
+
+
+<a name="278123743"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278123743" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278123743">(Apr 07 2022 at 06:55)</a>:</h4>
+<p>You don't know</p>
+
+
+
+<a name="278123804"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278123804" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278123804">(Apr 07 2022 at 06:56)</a>:</h4>
+<p>You just set it up in a way that alloc/dealloc happens with the reentrant flag set correctly</p>
+
+
+
+<a name="278123851"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278123851" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278123851">(Apr 07 2022 at 06:57)</a>:</h4>
+<p>You set the flag to false within the <code>with</code> closure and <code>true</code> otherwise</p>
+
+
+
+<a name="278123875"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278123875" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278123875">(Apr 07 2022 at 06:57)</a>:</h4>
+<p>And to true in the dtor</p>
+
+
+
+<a name="278123890"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278123890" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278123890">(Apr 07 2022 at 06:57)</a>:</h4>
+<p>After the dtor, it doesn't matter anyway, as nothing will use the thread local allocator</p>
+
+
+
+<a name="278123938"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278123938" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278123938">(Apr 07 2022 at 06:58)</a>:</h4>
+<p>Tho...</p>
+
+
+
+<a name="278123953"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278123953" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278123953">(Apr 07 2022 at 06:58)</a>:</h4>
+<p>Unless you stored things in another thread local</p>
+
+
+
+<a name="278123978"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278123978" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278123978">(Apr 07 2022 at 06:58)</a>:</h4>
+<p>And... not sure how you would migrate things from the thread local to the global one in the dtor at all</p>
+
+
+
+<a name="278127209"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278127209" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278127209">(Apr 07 2022 at 07:39)</a>:</h4>
+<p>Oh I think I see, are you saying it works because the allocations for setting up the dtor (with the reentrant flag set correctly) will be freed in the dtor (with the reentrant flag set correctly)? Hmmm, is it not a problem though that other unrelated thread locals with dtors get pushed on to the vec which then allocates and deallocates non-reentrantly when it grows?</p>
+
+
+
+<a name="278127475"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278127475" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278127475">(Apr 07 2022 at 07:42)</a>:</h4>
+<p>Also, are there any problems with my idea of making <code>registor_dtor_fallback</code> not allocate by using a linked list of <code>#[thread_local] static</code> items per <code>thread_local!</code> variable/declaration? At least naively, I don't see any drawbacks, and if it's just needing an implementation/proof of concept, I'm willing to give it a shot</p>
+
+
+
+<a name="278137281"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278137281" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278137281">(Apr 07 2022 at 09:24)</a>:</h4>
+<p>Idk, let's open a separate thread in  <a class="stream" data-stream-id="131828" href="/#narrow/stream/131828-t-compiler">#t-compiler</a> and see if people have opinions on it</p>
+
+
+
+<a name="278432320"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278432320" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Raekye <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278432320">(Apr 09 2022 at 21:38)</a>:</h4>
+<p>I <a href="#narrow/stream/131828-t-compiler/topic/Making.20register_dtor_fallback.20for.20thread.20locals.20not.20allocate">made a thread</a> but haven't gotten any opinions... I'm not sure how to feel about it :s I think it would be a useful change and wouldn't even mind trying to implement it (something more concrete than just an idea), but I wouldn't want to submit a PR and also get no response</p>
+
+
+
+<a name="278432845"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/Global%20allocator%20with%20thread%20locals%20fallback%20initialization/near/278432845" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/Global.20allocator.20with.20thread.20locals.20fallback.20initialization.html#278432845">(Apr 09 2022 at 21:52)</a>:</h4>
+<p>Things are slower over the weekend.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

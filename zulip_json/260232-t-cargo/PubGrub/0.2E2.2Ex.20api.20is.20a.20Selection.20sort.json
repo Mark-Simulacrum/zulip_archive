@@ -1,0 +1,86 @@
+[
+    {
+        "content": "<p>I was continuing the experiments with the Cargo-&gt;Pubgrub script. It is a lot faster with the proposed 0.2.1 release. But it still has bean running for over and hour. Giving me lots of time to think.  The profiling data claims that we are dominated by <code>choose_package_version</code>. Staring at my implementation, wondering if an allocation here or there was the problem, I realized that our API requires us to do a Selection sort on the <code>potential_packages</code>.  Before each decision we need to call <code>choose_package_version</code> to tell us witch to pick and each call needs to look at all <code>potential_packages</code>. So the \"look at\" code is called <code>~ (#decisions ^ 2) / 2</code> times. I'd like to consider changing this for <code>0.3</code>. What are your thoughts?</p>",
+        "id": 237973002,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1620496043
+    },
+    {
+        "content": "<p>I have not thought too much about that yet, and not sure what you mean by \"changing this\". In theory, we don't need to look at all potential packages, we could simply pick the first one. But as you explained in the guide, picking the one with the lowest amount of available versions is the cause of the \"look at\" each potential package but also provides a huge perf gain.</p>",
+        "id": 238153576,
+        "sender_full_name": "Matthieu Pizenberg",
+        "timestamp": 1620657778
+    },
+    {
+        "content": "<p>Once a new package is selected, all its dependencies that have not been selected yet become a \"potential package\". This also mean that maybe, a better heuristic would also take into account the number of dependencies a package has, not only the number of potential versions to take a decision. This would lower the number of <code>potential_packages</code> for all the following decisions. Of course, depending on a given version, the number of dependencies may change, but a simple heuristic could just consider the most likely version to be chosen (newest / oldest). Maybe the tradeoff between more computation for one decision (need to check the number of dependencies of each package) and reducing the number of accumulated \"potential packages\" during the search is worth it.</p>",
+        "id": 238154360,
+        "sender_full_name": "Matthieu Pizenberg",
+        "timestamp": 1620658031
+    },
+    {
+        "content": "<p>I'm not following where the \"^2\" is coming from. I'd say the \"look at\" code is called roughly <code>#decisions * mean#potential_packages</code></p>",
+        "id": 238155203,
+        "sender_full_name": "Matthieu Pizenberg",
+        "timestamp": 1620658298
+    },
+    {
+        "content": "<p>Each <code>potential_package</code> will become a <code>decision</code> in some later iteration. So <code>mean#potential_packages</code> ~= <code>#decisions / 2</code>.<br>\nAs to \"changing this\" I do want to keep that it is up to the user. And I have not figured it all out yet. I am thinking about having a priority queue, so the user provides a method <code>prioritize&lt;Priority: Ord&gt;(package: P, range: Range&lt;V&gt;) -&gt; (Priority, Option&lt;V&gt;)</code>. When we add a <code>potential_package</code> or change the range for a package we call <code>prioritize</code>, and put it in the queue. When we need to make a decision, we pop from the queue.</p>",
+        "id": 238169729,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1620663451
+    },
+    {
+        "content": "<p>As a proof of concept <a href=\"https://github.com/pubgrub-rs/pubgrub/tree/priority-queue\">https://github.com/pubgrub-rs/pubgrub/tree/priority-queue</a><br>\nLooks like (as implemented) it scales better, but does more Hashes of P.<br>\nSo <code>elm</code> is ~5% slower as the cases are simple and str hash is not free.<br>\n<code>large_case</code> is unchanged as it is simple and <code>u16</code> hash is basically free.<br>\n<code>zuse</code> is ~21% faster as it has more complicated cases.</p>",
+        "id": 238939790,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1621129221
+    },
+    {
+        "content": "<p>I built a stand alone file based on the <code>hobo</code> crate. When I tried to benchmark it with the <code>0.2.1</code> candidate I got:</p>\n<blockquote>\n<p>Benchmarking large_cases/hobo_str_SemanticVersion.ron: Collecting 100 samples in estimated 8161.2 s</p>\n</blockquote>\n<p>when I ran with this branch I got:</p>\n<blockquote>\n<p>Benchmarking large_cases/hobo_str_SemanticVersion.ron: Collecting 100 samples in estimated 712.05 s</p>\n</blockquote>\n<p>So there exist real inputs for witch this is a ~91% improvement.</p>",
+        "id": 239644355,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1621538028
+    },
+    {
+        "content": "<blockquote>\n<p>8161.2s</p>\n</blockquote>\n<p>That must have been quite painful! ^^</p>",
+        "id": 239773699,
+        "sender_full_name": "Matthieu Pizenberg",
+        "timestamp": 1621612763
+    },
+    {
+        "content": "<p>If you have time, could you also try the rather simple change of heuristic consisting in choosing the next package that has the lowest <code>number_of_versions + number_of_new_dependencies</code> or <code>number_of_versions * (1+number_of_new_dependencies)</code>?</p>",
+        "id": 239774334,
+        "sender_full_name": "Matthieu Pizenberg",
+        "timestamp": 1621612992
+    },
+    {
+        "content": "<p>I have a feeling that this simple heuristic change could result in dramatic improvements of worst case scenarios because it has the following effects:</p>\n<ul>\n<li>lower number of incompatibilities</li>\n<li>lower number of potential packages</li>\n<li>lower number of packages in the incompatibility buffer while doing unit propagation</li>\n</ul>",
+        "id": 239774688,
+        "sender_full_name": "Matthieu Pizenberg",
+        "timestamp": 1621613156
+    },
+    {
+        "content": "<blockquote>\n<p>number_of_versions + number_of_dependencies</p>\n</blockquote>\n<p>where <code>number_of_new_dependencies</code> here would be the number of new dependencies of the version that would be chosen if that package was picked. This implies that we would most likely want to cache that information (dependencies of that package at this version) to avoid re-fetching it when that package is eventually picked.</p>",
+        "id": 239775439,
+        "sender_full_name": "Matthieu Pizenberg",
+        "timestamp": 1621613368
+    },
+    {
+        "content": "<blockquote>\n<p>8161.2s</p>\n</blockquote>\n<p>To be clear I did not actually let the benchmark run for ether of them. I thought the runtime estimate was more than enough to demonstrate the point. :-P</p>",
+        "id": 239799912,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1621624596
+    },
+    {
+        "content": "<p>I will be happy to try different heuristics! I would love to find a better one! But even if it is better, I don't think it will change the improvements from having to evaluate the heuristic less often.</p>",
+        "id": 239800367,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1621624816
+    },
+    {
+        "content": "<p>Indeed those are two orthogonal things</p>",
+        "id": 239800602,
+        "sender_full_name": "Matthieu Pizenberg",
+        "timestamp": 1621624918
+    }
+]

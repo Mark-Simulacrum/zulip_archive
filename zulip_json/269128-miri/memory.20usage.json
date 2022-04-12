@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>cc <span class=\"user-mention\" data-user-id=\"120827\">@Ben Kimock (Saethlin)</span> </p>\n<p>we've been talking about miri's memory usage and how sometimes stacked borrows just creates more and more data that will never be relevant</p>",
+        "id": 276493720,
+        "sender_full_name": "oli",
+        "timestamp": 1648136305
+    },
+    {
+        "content": "<p>Yes, hi. The best demonstration of this is running <code>MIRIFLAGS=-Zmiri-tag-raw-pointers cargo miri test</code> on <code>regex</code>. There are actually multiple stages of memory growth in the test suite, but eventually it exceeds 125 GB. As far as a I can tell, this is primarily due to a single allocation.</p>\n<p>I have had theories from time to time about what exactly is causing it, but what strikes me is that the memory growth is pretty fast and I haven't been able to cook up an example that reproduces it.</p>",
+        "id": 276494654,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1648136632
+    },
+    {
+        "content": "<p>I think we have talked about this on and off from time to time, but I think the only way out of this is to do some kind of garbage collection of <code>Item</code>s or <code>SbTag</code>. And doing that effectively requires _somehow_ communicating to the stacked borrows implementation about ptr-int casts (because we can't remove the associated tag), as well as information about what pointers/references exist in the program at all.</p>\n<p>Doing this by reference counting <code>Item</code> or <code>SbTag</code> is tricky because the obvious implementation makes <code>Pointer</code> and <code>Place</code> not <code>Copy</code>, which is a total mess for all of CTFE. Doing it with a tracing GC would fix that issue, but I do not have the skill to even start implementing a tracing GC so I don't know if there are other worse problems down that road.</p>",
+        "id": 276497469,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1648137633
+    },
+    {
+        "content": "<p>For what it's worth, I tried changing the implementation of a <code>Stack</code> and <code>RangeMap</code> to reference count the common chunk of a range in a <code>RangeMap</code> when it gets split. My implementation is in this poorly-named branch: <a href=\"https://github.com/saethlin/miri/tree/optimize-sb-2\">https://github.com/saethlin/miri/tree/optimize-sb-2</a>. As far as I can tell, it has no/negligible impact on the total memory usage. I suspect this is because the common stack segments that benefit from the reference counting are very small.</p>",
+        "id": 276498029,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1648137842
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120827\">Ben Kimock (Saethlin)</span> <a href=\"#narrow/stream/269128-miri/topic/memory.20usage/near/276497469\">said</a>:</p>\n<blockquote>\n<p>Doing it with a tracing GC would fix that issue, but I do not have the skill to even start implementing a tracing GC so I don't know if there are other worse problems down that road.</p>\n</blockquote>\n<p>(knowing nothing about SB, I'll just leave this here <a href=\"https://github.com/mmtk/mmtk-core\">https://github.com/mmtk/mmtk-core</a> in case you end up wanting to start implementing a tracing GC :)</p>",
+        "id": 276498738,
+        "sender_full_name": "lqd",
+        "timestamp": 1648138117
+    },
+    {
+        "content": "<blockquote>\n<p>And doing that effectively requires _somehow_ communicating to the stacked borrows implementation about ptr-int casts (because we can't remove the associated tag)</p>\n</blockquote>\n<p>you have been running with raw ptr tagging anyway so I am surprised by this statement. ints cannot be cats back to usable pointers then anyway.<br>\nwithout raw ptr tagging, those tags are easy to recognize: they are <code>Untagged</code>.</p>",
+        "id": 276626781,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648218656
+    },
+    {
+        "content": "<p>I'm trying to be accommodating of both variants, though I appreciate that you see my bias <span aria-label=\"stuck out tongue\" class=\"emoji emoji-1f61b\" role=\"img\" title=\"stuck out tongue\">:stuck_out_tongue:</span> </p>\n<p>I thought there was a problem in SB without raw pointer tagging. But I guess thinking over it again, the base tag without raw pointer tagging is Untagged, right? So there's no issue about being overzealous with the GC?</p>",
+        "id": 276627607,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1648218974
+    },
+    {
+        "content": "<p>you mean 'base tag' for an allocation? depends on the allocation</p>",
+        "id": 276627743,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648219056
+    },
+    {
+        "content": "<p>so the key GC challenge is a situation where there are many tags that would still be valid but most of them are unnecessary because no ptr carries them any more?</p>",
+        "id": 276627939,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648219129
+    },
+    {
+        "content": "<p>This is what I am assuming, but I have not collected data on it yet</p>",
+        "id": 276628206,
+        "sender_full_name": "oli",
+        "timestamp": 1648219248
+    },
+    {
+        "content": "<p>The extremely crude thing that I hacked together about a \"busy allocation\" uses the <code>current_span</code> to emit a NonHaltingDiagnostic when the <code>AllocHistory.creations</code> reaches a certain length. It wouldn't be that hard to revive the work later today. Though what we probably want to know is the sum of the allocated size of the <code>Stacks</code> for the allocation.</p>",
+        "id": 276629214,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1648219671
+    },
+    {
+        "content": "<p>It also might suffice to log each AllocId and the total capacity of its Stacks when it is deallocated?</p>",
+        "id": 276629422,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1648219742
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120827\">@Ben Kimock (Saethlin)</span> so for that bad case in regex it would be good to get some stats so we have concrete data, even if it is just a single sample</p>",
+        "id": 276629657,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648219856
+    },
+    {
+        "content": "<p>like, what actually does that huge borrow stack look like? is it one big stack (maybe for many locations, via <code>RangeMap</code>) or many smaller stacks? which permissions are in there (Unique/SRO/SRW)?</p>",
+        "id": 276629744,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648219893
+    },
+    {
+        "content": "<p>my guess is, it might be <em>tons</em> of shared references that are all valid for the exact same memory range</p>",
+        "id": 276629778,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648219902
+    },
+    {
+        "content": "<p>and I wonder if they really all need a unique tag, or if we can make many shared refs all use the same tag</p>",
+        "id": 276629819,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648219916
+    },
+    {
+        "content": "<p>Ooh, like instead of pushing a new shared ref on the stack, we just grab the top one if the top tag is a shared one?</p>",
+        "id": 276637538,
+        "sender_full_name": "oli",
+        "timestamp": 1648222915
+    },
+    {
+        "content": "<p>well something like that but in a way that is sound and complete ;)</p>",
+        "id": 276676669,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648241097
+    }
+]

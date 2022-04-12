@@ -1,0 +1,248 @@
+[
+    {
+        "content": "<p>What I read from this is that you can have an allocation <code>a..b</code>, use <code>wrapping_offset</code> to produce an out of bounds pointer and apply ptr2int to get value <code>c</code>, then later apply <code>int2ptr(d)</code> and get a pointer with access over <code>a..b</code>, where all of <code>a, c, d</code> are not related to each other in any way.</p>\n<p>Even C/C++, which has the \"roundtrip rule\" and PNVI-ae-udi, does not allow anything like this kind of lack of spacial locality due to other rules in the standard: because pointers have to be inbounds at all times, we can say that <code>c</code> and <code>d</code> are both in <code>a..=b</code>, and AFAICT the roundtrip rule actually requires <code>c == d</code> as well:</p>\n<p><a href=\"https://eel.is/c++draft/expr.reinterpret.cast#5\">https://eel.is/c++draft/expr.reinterpret.cast#5</a></p>\n<blockquote>\n<p>A value of integral type or enumeration type can be explicitly converted to a pointer. A pointer converted to an integer of sufficient size (if any such exists on the implementation) and back to the same pointer type will have its original value; mappings between pointers and integers are otherwise implementation-defined.</p>\n</blockquote>",
+        "id": 278109752,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649297349
+    },
+    {
+        "content": "<p>It isn't completely a loss for static/dynamic analyzers, since you could say that each int2ptr constructs a new variable in the analyzer representing the provenance that was picked up, initially unconstrained, and then on first use almost all possible provenances are excluded (i.e. if you take the <code>int2ptr(d)</code> from above and offset it to <code>e</code> before reading from it, then you can deduce that <code>e</code> is in <code>a..b</code>).</p>\n<p>There is one special case: if no pointers have ever been exposed then <code>int2ptr(d)</code> is UB on its own, even if you just discard the value. That is an undesirable property if you don't want false negatives in an analyzer, since it is hard to tell if exposed pointers have been created in the past if you can't see all the startup code and so on. It is also an optimization issue since then you can't lift it past if statements. An easy fix here is to say that <code>int2ptr</code> is <em>also</em> allowed to act like <code>invalid</code> (as one of its nondeterministic options), so that if no pointers have been exposed then it is just equivalent to <code>invalid</code>.</p>",
+        "id": 278110393,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649298150
+    },
+    {
+        "content": "<blockquote>\n<p>There is one special case: if no pointers have ever been exposed then int2ptr(d) is UB on its own, even if you just discard the value.</p>\n</blockquote>\n<p>Surely <code>int2ptr</code> in this situation would just result in a pointer with invalid provenance and not be UB.</p>",
+        "id": 278127411,
+        "sender_full_name": "Alice Ryhl",
+        "timestamp": 1649317320
+    },
+    {
+        "content": "<p>That's what I would suggest as well. I'm calling it out explicitly as part of the working model for this stuff</p>",
+        "id": 278157607,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649335276
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"218683\">Alice Ryhl</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20ptr2int.20-.3E.20int2ptr.20have.20to.20match.20integer.20values.3F/near/278127411\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>There is one special case: if no pointers have ever been exposed then int2ptr(d) is UB on its own, even if you just discard the value.</p>\n</blockquote>\n<p>Surely <code>int2ptr</code> in this situation would just result in a pointer with invalid provenance and not be UB.</p>\n</blockquote>\n<p>hm, yeah we probably want that. a naive implementation of angelic nondeterminism would do something odd here; we can just say that the invalid provenance is always 'exposed' and hence avoid that pitfall. (i.e., exactly what <span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span> said.)</p>",
+        "id": 278198306,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649352258
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span> I am sorry the docs were not clear; it was definitely my intent for this to be <em>any</em> (exposed) provenance. that is a very easy to describe model, and relatively straight-forward to describe formally as well.<br>\nAs far as I am concerned, if you use <code>from_exposed_addr</code> you opted out of proper checking, so I dont mind that.</p>",
+        "id": 278198433,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649352322
+    },
+    {
+        "content": "<p>if we ignore stacked borrows, it is also not that hard to check actually, in a style similar to PNVI-ae-udi: for each <code>from_exposed_addr</code>, create a fresh \"symbolic\" provenance. the AM state carries a table mapping symbolic provenance to possible <code>AllocId</code>s. each time a pointer with this provenance has to be in-bounds of some allocation, narrow down that set in the table appropriately. if the set ever becomes empty, we have UB.</p>",
+        "id": 278198689,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649352456
+    },
+    {
+        "content": "<p>with SB it becomes a total disaster, but honestly I think it's a disaster even if we limited it to inside one allocation so <span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span></p>",
+        "id": 278198717,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649352467
+    },
+    {
+        "content": "<p>static analyses should just treat <code>ptr2int</code> as giving the pointer away to arbitrary unknown code (something they have to support anyway) and int2ptr as obtaining an unknown pointer from unknown code. this is sound even under my \"can pick up any provenance\" model.</p>",
+        "id": 278199067,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649352627
+    },
+    {
+        "content": "<p>the roundtrip rule requires <code>c==d</code>, yes, but I think that's unrealistic. casting to an int, doing arithmetic there, and casting back is something people would expect to work, so we should make it work. most C/C++ programmers will think this is okay, so it is allowed in \"de-facto C\".</p>",
+        "id": 278199133,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649352668
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20ptr2int.20-.3E.20int2ptr.20have.20to.20match.20integer.20values.3F/near/278198717\">said</a>:</p>\n<blockquote>\n<p>with SB it becomes a total disaster, but honestly I think it's a disaster even if we limited it to inside one allocation so <span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span></p>\n</blockquote>\n<p>Yes, I'm worried about SB + weak provenance, as that <em>is</em> the working model. I think it is not a total disaster if you restrict to c==d, since then the set of previous ptr2ints on that exact location will probably be quite small and possibly in a nontrivial fraction of cases there will be only one possibility, meaning that a naive tree search approach can probably work.</p>",
+        "id": 278202421,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649354115
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20ptr2int.20-.3E.20int2ptr.20have.20to.20match.20integer.20values.3F/near/278199133\">said</a>:</p>\n<blockquote>\n<p>the roundtrip rule requires <code>c==d</code>, yes, but I think that's unrealistic. casting to an int, doing arithmetic there, and casting back is something people would expect to work, so we should make it work. most C/C++ programmers will think this is okay, so it is allowed in \"de-facto C\".</p>\n</blockquote>\n<p>I know it's a hard ask, but I would <em>really</em> like to see some evidence that this is really a bridge too far, given that C/C++ seem to have gotten away with it. Because this is a rule that could make or break a Miri-like tool, so it's unusual to see you on the other side of the fence on this one.</p>",
+        "id": 278202799,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649354267
+    },
+    {
+        "content": "<p>Do any LLVM passes assume a pointer must point to only one allocation?</p>",
+        "id": 278202908,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649354305
+    },
+    {
+        "content": "<p>It's in the spec, but I assume you mean actual \"miscompilation\"?</p>",
+        "id": 278203053,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649354375
+    },
+    {
+        "content": "<p>Either or would be helpful.</p>",
+        "id": 278203261,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649354437
+    },
+    {
+        "content": "<p><a href=\"https://llvm.org/docs/LangRef.html#pointeraliasing\">https://llvm.org/docs/LangRef.html#pointeraliasing</a> uses the term \"a pointer is associated with an address range\" for this, but based on the definition there it is clear that every pointer is associated with exactly one range (or the empty set) of addresses</p>",
+        "id": 278204126,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649354838
+    },
+    {
+        "content": "<p>I have no idea if any real optimization exploits this, but an example optimization that uses convexity would be that if you observe a read at <code>p</code> and <code>p+99</code> then you can deduce <code>dereferenceable(100) p</code></p>",
+        "id": 278205363,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649355481
+    },
+    {
+        "content": "<p>Right, I guess universal provenance would be weaker than the FFI cast model, so we do need UDI after all. </p>\n<p>I don't think supporting arbitrary values is difficult though, because of one past the end pointers you still have to disambiguate when the user performs a load.</p>\n<p>And even under strict roundtrip rules, you don't get any help in SB differentiating a pointer to the first element vs to the array versus which tag you're using exactly.</p>",
+        "id": 278205508,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649355543
+    },
+    {
+        "content": "<p>that's true, but it's still a small bounded number of options, limited by the things in the borrow stack at the first read through the new pointer, and restricted further to values which were exposed at the location you picked up the wild pointer if you use the <code>c==d</code> rule</p>",
+        "id": 278205946,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649355789
+    },
+    {
+        "content": "<p>if it's possible to reduce the possibilities to just 1 in most cases then that's a huge win, because it means you can keep doing the miri thing with no branching</p>",
+        "id": 278205995,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1649355817
+    },
+    {
+        "content": "<p>I used to think this liberal reading of <code>from_exposed_addr</code> was terrible for CHERI. But actually, if <code>with_addr</code> / <code>wrapping_offset</code> are unsupported in favor of <code>with_addr_inbounds</code>, and additionally we specify that the _source pointer_ is inside or just past the object, then things stay good. We can look up a capability when the address corresponds to an exposed capability, and make an invalid pointer otherwise.</p>",
+        "id": 278240053,
+        "sender_full_name": "Bram Geron",
+        "timestamp": 1649374593
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20ptr2int.20-.3E.20int2ptr.20have.20to.20match.20integer.20values.3F/near/278202799\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20ptr2int.20-.3E.20int2ptr.20have.20to.20match.20integer.20values.3F/near/278199133\">said</a>:</p>\n<blockquote>\n<p>the roundtrip rule requires <code>c==d</code>, yes, but I think that's unrealistic. casting to an int, doing arithmetic there, and casting back is something people would expect to work, so we should make it work. most C/C++ programmers will think this is okay, so it is allowed in \"de-facto C\".</p>\n</blockquote>\n<p>I know it's a hard ask, but I would <em>really</em> like to see some evidence that this is really a bridge too far, given that C/C++ seem to have gotten away with it. Because this is a rule that could make or break a Miri-like tool, so it's unusual to see you on the other side of the fence on this one.</p>\n</blockquote>\n<p>I dont think C/C++ are getting away with it. compilers support this in practice -- IOW, in \"de-facto C\", roundtrips with <code>c != d</code> are definitely allowed. this is just a case of the C/C++ spec not having much to do with reality.</p>",
+        "id": 278355349,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649448127
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20ptr2int.20-.3E.20int2ptr.20have.20to.20match.20integer.20values.3F/near/278202799\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20ptr2int.20-.3E.20int2ptr.20have.20to.20match.20integer.20values.3F/near/278199133\">said</a>:</p>\n<blockquote>\n<p>the roundtrip rule requires <code>c==d</code>, yes, but I think that's unrealistic. casting to an int, doing arithmetic there, and casting back is something people would expect to work, so we should make it work. most C/C++ programmers will think this is okay, so it is allowed in \"de-facto C\".</p>\n</blockquote>\n<p>I know it's a hard ask, but I would <em>really</em> like to see some evidence that this is really a bridge too far, given that C/C++ seem to have gotten away with it. Because this is a rule that could make or break a Miri-like tool, so it's unusual to see you on the other side of the fence on this one.</p>\n</blockquote>\n<p>yeah I am as surprised as you are. ;)<br>\nbasically I gave up on having a Miri-like tool for permissive provenance. \"if you want sound and complete tooling, use strict provenance\". that goal is actually achievable, and it is extremely liberating to not constantly worry about integer roundtrips when thinking about aliasing models. assuming strict provenance pans out for the majority of code, this seems like an overall win to me.</p>\n<p>we should ofc still think about ways to get tooling for permissive provenance code, but I am okay with false negatives there. I think a reasonable approximation is to give <code>from_exposed_addr</code> pointers a \"wildcard\" provenance that can simultaneously do everything any previously exposed provenance can. something broadly like <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Checking.20permissive.20provenance.20with.20SMT/near/278116149\">this</a> (but I have not yet checked the details of those patches). I don't think this strategy is much impeded by allowing roundtrips that cast back from a different integer.</p>",
+        "id": 278357845,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649449523
+    },
+    {
+        "content": "<p>Here's a fun miscompile related to this:</p>\n<p><a href=\"https://rust.godbolt.org/z/5EcfeqT83\">https://rust.godbolt.org/z/5EcfeqT83</a></p>",
+        "id": 278507387,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649650919
+    },
+    {
+        "content": "<p>I'm not sure LLVM GEP gives us the guarantees we need to actually pull off these semantics.</p>",
+        "id": 278507521,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649651134
+    },
+    {
+        "content": "<p>Although this works, so I don't know if GEP is the one to blame or LLVM's busted intptr cast handling. <a href=\"https://rust.godbolt.org/z/rfTMKc1jd\">https://rust.godbolt.org/z/rfTMKc1jd</a></p>",
+        "id": 278508052,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649651883
+    },
+    {
+        "content": "<p>miscompile examples without any explanation are so incredibly hard to decipher... could you add some comments, rather than expecting every reader to figure this all out by themselves?^^</p>",
+        "id": 278545073,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649679831
+    },
+    {
+        "content": "<p><a href=\"https://rust.godbolt.org/z/EfhEvWGcz\">https://rust.godbolt.org/z/EfhEvWGcz</a> here's one with comments<br>\nsorry about that, i forget stuff that is obvious to me after spending 20 minutes staring at it isn't obvious to others</p>",
+        "id": 278614884,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649710280
+    },
+    {
+        "content": "<p>Hold on... it's a MIR opt</p>",
+        "id": 278614898,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649710291
+    },
+    {
+        "content": "<p>Doesn't look like it's in MIR, the generated MIR looks correct</p>",
+        "id": 278615804,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1649710726
+    },
+    {
+        "content": "<p>Hmm yeah I got trolled by the generated LLVM IR being after optimization</p>",
+        "id": 278615920,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649710792
+    },
+    {
+        "content": "<p>You can pass <code>-Cno-prepopulate-passes</code></p>",
+        "id": 278616167,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1649710877
+    },
+    {
+        "content": "<p>Yup that compiles fine, so def LLVM.</p>",
+        "id": 278616567,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1649711044
+    },
+    {
+        "content": "<p>ah, that's probably <a href=\"https://bugs.llvm.org/show_bug.cgi?id=34548\">https://bugs.llvm.org/show_bug.cgi?id=34548</a> then</p>",
+        "id": 278617122,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649711329
+    },
+    {
+        "content": "<p>-&gt; <a href=\"https://github.com/llvm/llvm-project/issues/33896\">https://github.com/llvm/llvm-project/issues/33896</a></p>",
+        "id": 278619950,
+        "sender_full_name": "cuviper",
+        "timestamp": 1649712712
+    },
+    {
+        "content": "<p>ah right, I need to re-subscribe to all relevant LLVM issues :/</p>",
+        "id": 278620177,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649712825
+    },
+    {
+        "content": "<p>you should be CC-subscribed based on the top migration header, no?</p>",
+        "id": 278621879,
+        "sender_full_name": "cuviper",
+        "timestamp": 1649713832
+    },
+    {
+        "content": "<p>using <code>mentions:cuviper</code> finds nothing, but <code>cuviper</code> alone works...</p>",
+        "id": 278622275,
+        "sender_full_name": "cuviper",
+        "timestamp": 1649714068
+    },
+    {
+        "content": "<p>I was definitely not subscribed to the GH issue</p>",
+        "id": 278622410,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649714168
+    },
+    {
+        "content": "<p>the importer did some magic to avoid emailing everyone 100 times during the import process, but I guess it also did not preserve the \"subscribed\" state</p>",
+        "id": 278622430,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1649714192
+    },
+    {
+        "content": "<p>oops, I lost one of my replies to \"draft\"... yeah, my own \"soft\" mentions aren't subscribed now either</p>",
+        "id": 278622463,
+        "sender_full_name": "cuviper",
+        "timestamp": 1649714233
+    }
+]

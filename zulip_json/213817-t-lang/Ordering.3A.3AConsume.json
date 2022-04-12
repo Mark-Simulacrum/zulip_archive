@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>So, I get why Ordering::Unordered doesn't exist — it's not part of the memory model we snarfed from C11. <code>Consume</code> is though, so it seems like a strange omission.</p>\n<p>It is definitely the most... subtle of the memory orderings, but it's essentially free even on platforms like ARM, and without it you're forced to use Acquire, which is definitely not free.</p>",
+        "id": 216680855,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1605305419
+    },
+    {
+        "content": "<p>Seems like it'd be useful for things like exposing shared memory or memmaps without being UB.  Not necessarily _useful_ if it's actually changing unexpectedly, but at least not UB.</p>",
+        "id": 216683915,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1605307381
+    },
+    {
+        "content": "<p>It's useful whenever you need pointer or thing from which a pointer is derived (for example, an index) in an atomic.</p>\n<ul>\n<li>\n<p>In <a href=\"https://github.com/rust-lang/rust/blob/master/library/std/src/sys/unix/weak.rs#L42-L67\">https://github.com/rust-lang/rust/blob/master/library/std/src/sys/unix/weak.rs#L42-L67</a> I have a WIP patch that removes the SeqCst but isn't able to make it as cheap as it could be on arm (lots of comments explaining why): <a href=\"https://gist.github.com/thomcc/0005c6f2f36a142dcba0bbb69ed33d4a\">https://gist.github.com/thomcc/0005c6f2f36a142dcba0bbb69ed33d4a</a> — if i could use Consume on that load i wouldn't need the fence.</p>\n</li>\n<li>\n<p>I suspect some of the Relaxed loads we have currently should be Consume, for example: <a href=\"https://github.com/rust-lang/rust/blob/master/library/std/src/sys_common/thread_local_key.rs#L145\">https://github.com/rust-lang/rust/blob/master/library/std/src/sys_common/thread_local_key.rs#L145</a></p>\n</li>\n</ul>",
+        "id": 216686701,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1605308998
+    },
+    {
+        "content": "<p>I believe that there are some foundational issues with <code>memory_order_consume</code> in C11 semantics that make it not actually work for its intended purpose</p>",
+        "id": 216687066,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1605309310
+    },
+    {
+        "content": "<p>it's often called subtle in the sense \"only a few people in the world understand it\" but I think it's closer to \"it is broken but the model is so complex that only a few people are willing to stick their neck out and claim this directly\"</p>",
+        "id": 216687193,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1605309416
+    },
+    {
+        "content": "<p>Yeah, that's fair. I certainly can't claim to understand it as well as the other orderings. It's unfortunate that without it you need acquire for the common pattern of \"I loaded this pointer from an atomic and will read from it\", though.</p>",
+        "id": 216687367,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1605309577
+    },
+    {
+        "content": "<p>if you really care about avoiding the fence on ARM I think you can just use <code>Ordering::Relaxed</code> (which is wrong) and just gate on the processor being ARM, or use volatile and/or <code>asm!</code> because the memory model isn't working for you</p>",
+        "id": 216687469,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1605309649
+    },
+    {
+        "content": "<p>I mean, I don't think that would get r+</p>",
+        "id": 216687576,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1605309720
+    },
+    {
+        "content": "<p>IIRC there is a good discussion of the problems with <code>memory_order_consume</code> in the <a href=\"https://people.mpi-sws.org/~viktor/papers/popl2017-promising.pdf\">promising semantics</a> paper. Basically, what counts as a \"data dependency\" is well defined at the architectural level but is not stable under basic optimizations like <code>x + 0 ~&gt; x</code> so it is not really appropriate for a high level language</p>",
+        "id": 216687714,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1605309801
+    },
+    {
+        "content": "<p>Yeah, it's just annoying. On 32 bit arm a fence(Acquire) forces <code>dmb ish</code> to be emitted, which is basically a <code>fence(SeqCst)</code>. On 64 bit arm it is a <code>dmb ishld</code> which is at least an improvement. The C11 semantics are likely flawed but they do give you the tools to avoid this sort of thing.</p>",
+        "id": 216689144,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1605310794
+    },
+    {
+        "content": "<p>I guess LLVM doesn't even support consume though, :(</p>",
+        "id": 216690259,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1605311474
+    },
+    {
+        "content": "<blockquote>\n<p>I believe that there are some foundational issues with <code>memory_order_consume</code> in C11 semantics that make it not actually work for its intended purpose</p>\n</blockquote>\n<p>Supporting this, C++17 deprecated it because of issues in those semantics. I think 20 fixed some, but AFAIK it's still deprecated.</p>",
+        "id": 216696908,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1605317822
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/213817-t-lang/topic/Ordering.3A.3AConsume/near/216687714\">said</a>:</p>\n<blockquote>\n<p>IIRC there is a good discussion of the problems with <code>memory_order_consume</code> in the <a href=\"https://people.mpi-sws.org/~viktor/papers/popl2017-promising.pdf\">promising semantics</a> paper. Basically, what counts as a \"data dependency\" is well defined at the architectural level but is not stable under basic optimizations like <code>x + 0 ~&gt; x</code> so it is not really appropriate for a high level language</p>\n</blockquote>\n<p>Agreed. <code>Consume</code> is ill-defined currently; even more ill-defined than <code>Relaxed</code> (and that one already has enough problems to worry me^^ the keyword here is \"out-of-thin-air\").</p>",
+        "id": 216726171,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1605356704
+    }
+]

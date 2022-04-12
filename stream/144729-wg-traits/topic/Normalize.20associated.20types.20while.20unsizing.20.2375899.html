@@ -1,0 +1,570 @@
+<html>
+<head><meta charset="utf-8"><title>Normalize associated types while unsizing #75899 · wg-traits · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/index.html">wg-traits</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html">Normalize associated types while unsizing #75899</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="233931778"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/233931778" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#233931778">(Apr 10 2021 at 06:43)</a>:</h4>
+<p>Hi. I've started working on <a href="https://github.com/rust-lang/rust/issues/75899">https://github.com/rust-lang/rust/issues/75899</a>. It's my first time working on the compiler and it feels a bit overwhelming, but I want to try anyway :)</p>
+<p>I've tried to implement <code>eddyb</code> suggestion: normalize <code>trait_pred</code> via <code>normalize_associated_types_in_as_infer_ok</code>. If I understand debug output correctly, this makes the type check pass (on a similar test to one that's in the issue). But then later on I get an error from <code>mir</code>:</p>
+<div class="codehilite"><pre><span></span><code>error: internal compiler error: broken MIR in DefId(0:15 ~ coerce_normalization[317d]::coerce_newtype_slice) (NoSolution): could not prove Binder(TraitPredicate(&lt;&amp;NewType&lt;[T; N]&gt; as std::ops::CoerceUnsized&lt;&amp;NewType&lt;[T]&gt;&gt;&gt;), [])
+  --&gt; /home/waffle/projects/repos/rust/src/test/ui/coercion/coerce-normalization.rs:18:5
+   |
+LL |     array
+   |     ^^^^^
+   |
+   = note: delayed at compiler/rustc_mir/src/borrow_check/type_check/mod.rs:252:27
+</code></pre></div>
+<p>I would assume that this means that <code>NewType&lt;[T; N]&gt;: Unsize&lt;NewType&lt;[T]&gt;&gt;</code> isn't confirmed and I need to change something in <code>rustc_trait_selection</code> too (this PR: <a href="https://github.com/rust-lang/rust/pull/80726">https://github.com/rust-lang/rust/pull/80726</a> feels related <span aria-label="eyes" class="emoji emoji-1f440" role="img" title="eyes">:eyes:</span>)</p>
+<p>This is what I've got so far.</p>
+
+
+
+<a name="247073154"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247073154" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247073154">(Jul 24 2021 at 12:49)</a>:</h4>
+<p>Sorry for such a long silence, I had a lot of problems irl. I think I finally have time to work on this again, so I'm back :)</p>
+<p>So, as I said in the first message, after implementing <code>eddyb</code> suggestion the code seems to type  check:</p>
+<div class="codehilite" data-code-language="Text only"><pre><span></span><code>DEBUG rustc_typeck::check::coercion Coerce.tys(&amp;'a NewType&lt;[T3; N]&gt; =&gt; &amp;'a NewType&lt;[T3]&gt;)
+...
+DEBUG rustc_typeck::check::coercion coerce: unsize successful: Ok(InferOk { value: ([Deref(None) -&gt; NewType&lt;[T3; N]&gt;, Borrow(Ref('_#0r, Not)) -&gt; &amp;NewType&lt;[T3; N]&gt;, Pointer(Unsize) -&gt; _], _), obligations: [Obligation(predicate=Binder(OutlivesPredicate('_#3r, '_#2r), []), depth=1)] })
+</code></pre></div>
+<p>However later I get <code>broken MIR</code> error. The error comes from <a href="https://github.com/rust-lang/rust/blob/1c66d11a34047be1eb6c50703f8ba6689a15e716/compiler/rustc_mir/src/borrow_check/type_check/mod.rs#L2756"><code>rustc_mir::borrow_check::type_check (prove_predicate)</code></a> as it can't prove <code>Binder(TraitPredicate(&lt;&amp;NewType&lt;[T3; N]&gt; as std::ops::CoerceUnsized&lt;&amp;NewType&lt;[T3]&gt;&gt;&gt;), [])</code>. </p>
+<p>Previously I though that something isn't right in <code>rustc_trait_selection</code>, but now checking the logs it seems that everything is fine. </p>
+<ol>
+<li><code>confirm_condidate</code> is called with <code>TraitPredicate(&lt;&amp;NewType&lt;[T3; N]&gt; as std::ops::CoerceUnsized&lt;&amp;NewType&lt;[T3]&gt;&gt;&gt;)</code> and returns (among with some uninteresting things) an obligation with <code>TraitPredicate(&lt;NewType&lt;[T3; N]&gt; as std::marker::Unsize&lt;NewType&lt;[T3]&gt;&gt;&gt;)</code></li>
+<li>then it's called with <code>TraitPredicate(&lt;NewType&lt;[T3; N]&gt; as std::marker::Unsize&lt;NewType&lt;[T3]&gt;&gt;&gt;)</code> and returns an obligation with <code>TraitPredicate(&lt;&lt;[T3; N] as Id&gt;::Assoc as std::marker::Unsize&lt;&lt;[T3] as Id&gt;::Assoc&gt;&gt;)</code></li>
+<li>then it's called with <code>TraitPredicate(&lt;_ as std::marker::Unsize&lt;_&gt;&gt;)</code> (I believe it's the normalization of previous return as <code>confirm_builtin_unsize_candidate</code> reports <code>source=[T3; N], target=[T3]</code>) and returns <code>Ok(ImplSourceBuiltinData(nested=[]))</code></li>
+</ol>
+<p>So that means that the required trait implementation <em>is</em> confirmed, right?</p>
+<p>Then during typecheck in MIR (<code>rustc_mir::borrow_check::type_check</code>), <code>confirm_candidate</code> is called with <code>TraitPredicate(&lt;&amp;NewType&lt;[T3; N]&gt; as std::ops::CoerceUnsized&lt;&amp;NewType&lt;[T3]&gt;&gt;&gt;)</code> again, this leads to an obligation with <code>TraitPredicate(&lt;&lt;[T3; N] as Id&gt;::Assoc as std::marker::Unsize&lt;&lt;[T3] as Id&gt;::Assoc&gt;&gt;</code>. Immediately after this the  <code>prove_predicate</code> fails. Here is the this weird part of log: <a href="https://gist.github.com/WaffleLapkin/026d1b0490d3051061352926ed649f19">gist</a> (note, some debug statements I just added).</p>
+<p>I don't really get why this is happening...</p>
+
+
+
+<a name="247073829"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247073829" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247073829">(Jul 24 2021 at 13:04)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> back in April you've <a href="https://github.com/rust-lang/rust/issues/75899#issuecomment-816249385">said</a> that we could talk this over during some of your morning office hours (9am-10 US Eastern Time, every day but Tuesday), is this still right? :D</p>
+<p>If so, could you give me some directions where to look next? I'm a bit lost atm.</p>
+
+
+
+<a name="247083340"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247083340" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Charles Lew <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247083340">(Jul 24 2021 at 16:43)</a>:</h4>
+<p><span class="user-mention" data-user-id="273349">@Waffle Lapkin</span> maybe you can book a slot with him at this site: <a href="https://calendly.com/nikomatsakis/office-hours?month=2021-07">https://calendly.com/nikomatsakis/office-hours?month=2021-07</a></p>
+
+
+
+<a name="247198391"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247198391" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247198391">(Jul 26 2021 at 13:01)</a>:</h4>
+<p>yes, <span class="user-mention" data-user-id="273349">@Waffle Lapkin</span> please book a slot! Bear in mind I'll be on vacation first two weeks of August. I need to add some August times.</p>
+
+
+
+<a name="247198823"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247198823" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247198823">(Jul 26 2021 at 13:04)</a>:</h4>
+<p>Yeah, sure! I booked a slot yesterday, I believe for Wednesday 28 c:</p>
+
+
+
+<a name="247447900"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247447900" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247447900">(Jul 28 2021 at 11:40)</a>:</h4>
+<p>I've published the changes I've made so far: <a href="https://github.com/WaffleLapkin/rust/tree/coerce_normalization">https://github.com/WaffleLapkin/rust/tree/coerce_normalization</a> (ohh, I haven't noticed before that I've done so little...)</p>
+
+
+
+<a name="247451534"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247451534" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247451534">(Jul 28 2021 at 12:24)</a>:</h4>
+<p><span class="user-mention" data-user-id="273349">@Waffle Lapkin</span> oh, shoot!!</p>
+
+
+
+<a name="247451562"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247451562" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247451562">(Jul 28 2021 at 12:25)</a>:</h4>
+<p>my apologies, my schedule has been off and I messed up my office hours this morning (I'm in different time zones and getting confused)</p>
+
+
+
+<a name="247451573"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247451573" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247451573">(Jul 28 2021 at 12:25)</a>:</h4>
+<p>I'll try to give you some async feedback here</p>
+
+
+
+<a name="247451626"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247451626" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247451626">(Jul 28 2021 at 12:25)</a>:</h4>
+<p>er, wait, haha, they didn't start yet :)</p>
+
+
+
+<a name="247451678"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247451678" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247451678">(Jul 28 2021 at 12:26)</a>:</h4>
+<p>I...knew that</p>
+
+
+
+<a name="247454647"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247454647" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247454647">(Jul 28 2021 at 12:58)</a>:</h4>
+<p>Time zones are very confusing! But I believe that we only start in a couple of minutes, so everything is perfectly fine :)</p>
+
+
+
+<a name="247454984"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247454984" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247454984">(Jul 28 2021 at 13:01)</a>:</h4>
+<p>Yep, I'm here</p>
+
+
+
+<a name="247455017"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455017" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455017">(Jul 28 2021 at 13:01)</a>:</h4>
+<p>But you're going to have to remind me what you're trying to do :)</p>
+
+
+
+<a name="247455164"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455164" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455164">(Jul 28 2021 at 13:02)</a>:</h4>
+<p>I'm trying to allow unsizing for structs that have associated type in last field</p>
+
+
+
+<a name="247455174"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455174" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455174">(Jul 28 2021 at 13:02)</a>:</h4>
+<p>OK, I see,  Unsizing coercion does not normalize associated types in structs. <a href="https://github.com/rust-lang/rust/issues/75899">#75899</a></p>
+
+
+
+<a name="247455200"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455200" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455200">(Jul 28 2021 at 13:02)</a>:</h4>
+<p>yes</p>
+
+
+
+<a name="247455225"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455225" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455225">(Jul 28 2021 at 13:02)</a>:</h4>
+<p>are you still stuck in roughly the same place?</p>
+
+
+
+<a name="247455232"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455232" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455232">(Jul 28 2021 at 13:03)</a>:</h4>
+<p>also, do you have a WIP PR?</p>
+
+
+
+<a name="247455260"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455260" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455260">(Jul 28 2021 at 13:03)</a>:</h4>
+<p>I don't have a WIP PR yet, but I can create it now if needed</p>
+
+
+
+<a name="247455280"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455280" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455280">(Jul 28 2021 at 13:03)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116009">nikomatsakis</span> <a href="#narrow/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899/near/247455225">said</a>:</p>
+<blockquote>
+<p>are you still stuck in roughly the same place?</p>
+</blockquote>
+<p>yep</p>
+
+
+
+<a name="247455313"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455313" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455313">(Jul 28 2021 at 13:04)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="273349">Waffle Lapkin</span> <a href="#narrow/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899/near/247455260">said</a>:</p>
+<blockquote>
+<p>I don't have a WIP PR yet, but I can create it now</p>
+</blockquote>
+<p>that's usually helpful</p>
+
+
+
+<a name="247455400"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455400" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455400">(Jul 28 2021 at 13:04)</a>:</h4>
+<p>also, what test case are you running on?</p>
+
+
+
+<a name="247455418"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455418" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455418">(Jul 28 2021 at 13:04)</a>:</h4>
+<p>(the one in the issue, I gues?</p>
+
+
+
+<a name="247455465"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455465" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455465">(Jul 28 2021 at 13:05)</a>:</h4>
+<p>This one: <a href="https://github.com/WaffleLapkin/rust/commit/ebe2c08bb2a8dd98957758ffdcb47dd952b40118">https://github.com/WaffleLapkin/rust/commit/ebe2c08bb2a8dd98957758ffdcb47dd952b40118</a></p>
+
+
+
+<a name="247455683"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455683" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455683">(Jul 28 2021 at 13:07)</a>:</h4>
+<p>Made a WIP PR: <a href="https://github.com/rust-lang/rust/pull/87548">https://github.com/rust-lang/rust/pull/87548</a></p>
+
+
+
+<a name="247455741"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455741" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455741">(Jul 28 2021 at 13:07)</a>:</h4>
+<p>thanks</p>
+
+
+
+<a name="247455747"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247455747" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247455747">(Jul 28 2021 at 13:07)</a>:</h4>
+<p>I'm reading your notes</p>
+
+
+
+<a name="247456400"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456400" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456400">(Jul 28 2021 at 13:13)</a>:</h4>
+<p>ok, well, I see why you're confused</p>
+
+
+
+<a name="247456531"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456531" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456531">(Jul 28 2021 at 13:14)</a>:</h4>
+<p>as it happens, I would love to remove this part of the coercion code that you are fixing</p>
+
+
+
+<a name="247456549"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456549" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456549">(Jul 28 2021 at 13:14)</a>:</h4>
+<p>I'm not sure if we can get away with it, but it's going to be really painful to make a part of chalk</p>
+
+
+
+<a name="247456592"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456592" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456592">(Jul 28 2021 at 13:14)</a>:</h4>
+<p>the reason I dislike this code is that it is basically reproducing part of the normal "evaluate whether a trait matches" logic</p>
+
+
+
+<a name="247456605"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456605" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456605">(Jul 28 2021 at 13:14)</a>:</h4>
+<p>but doing it in a custom and different way</p>
+
+
+
+<a name="247456611"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456611" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456611">(Jul 28 2021 at 13:15)</a>:</h4>
+<p>anyway, I imagine that this is part of why you are seeing different behavior</p>
+
+
+
+<a name="247456693"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456693" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456693">(Jul 28 2021 at 13:15)</a>:</h4>
+<p>I'm debating whether I can convince you into trying to remove this logic, instead of fixing it</p>
+
+
+
+<a name="247456774"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456774" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456774">(Jul 28 2021 at 13:16)</a>:</h4>
+<p>but that could turn into quite a project</p>
+
+
+
+<a name="247456829"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456829" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456829">(Jul 28 2021 at 13:16)</a>:</h4>
+<p>So one part goes through the thing I'm fixing and another part of the compiler goes through normal trait solving? That seems annoying.</p>
+
+
+
+<a name="247456999"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247456999" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247456999">(Jul 28 2021 at 13:18)</a>:</h4>
+<p>I'm not sure if I'm experienced enough for this project tbh</p>
+
+
+
+<a name="247457022"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457022" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457022">(Jul 28 2021 at 13:18)</a>:</h4>
+<p>I don't mind trying though</p>
+
+
+
+<a name="247457096"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457096" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457096">(Jul 28 2021 at 13:18)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="273349">Waffle Lapkin</span> <a href="#narrow/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899/near/247456829">said</a>:</p>
+<blockquote>
+<p>So one part goes through the thing I'm fixing and another part of the compiler goes through normal trait solving? That seems annoying.</p>
+</blockquote>
+<p>I am guessing</p>
+
+
+
+<a name="247457169"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457169" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457169">(Jul 28 2021 at 13:19)</a>:</h4>
+<p>hmm</p>
+
+
+
+<a name="247457272"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457272" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457272">(Jul 28 2021 at 13:20)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="273349">Waffle Lapkin</span> <a href="#narrow/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899/near/247073154">said</a>:</p>
+<blockquote>
+<p>Then during typecheck in MIR (<code>rustc_mir::borrow_check::type_check</code>), <code>confirm_candidate</code> is called with <code>TraitPredicate(&lt;&amp;NewType&lt;[T3; N]&gt; as std::ops::CoerceUnsized&lt;&amp;NewType&lt;[T3]&gt;&gt;&gt;)</code> again, this leads to an obligation with <code>TraitPredicate(&lt;&lt;[T3; N] as Id&gt;::Assoc as std::marker::Unsize&lt;&lt;[T3] as Id&gt;::Assoc&gt;&gt;</code>. Immediately after this the  <code>prove_predicate</code> fails. Here is the this weird part of log: <a href="https://gist.github.com/WaffleLapkin/026d1b0490d3051061352926ed649f19">gist</a> (note, some debug statements I just added).</p>
+</blockquote>
+<p>specifically here, it looks like we are <em>not</em> normalizing--</p>
+
+
+
+<a name="247457304"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457304" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457304">(Jul 28 2021 at 13:20)</a>:</h4>
+<p>just to check, <span class="user-mention" data-user-id="273349">@Waffle Lapkin</span>, <code>TraitPredicate(&lt;&lt;[T3; N] as Id&gt;::Assoc as std::marker::Unsize&lt;&lt;[T3] as Id&gt;::Assoc&gt;&gt;</code> -- is this what we were seeing before you added the normalization step?</p>
+
+
+
+<a name="247457406"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457406" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457406">(Jul 28 2021 at 13:21)</a>:</h4>
+<p>Hm, let me check</p>
+
+
+
+<a name="247457414"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457414" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457414">(Jul 28 2021 at 13:21)</a>:</h4>
+<p>do you have a backtrace from the broken MIR error?</p>
+
+
+
+<a name="247457429"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457429" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457429">(Jul 28 2021 at 13:21)</a>:</h4>
+<p>that would be helpful</p>
+
+
+
+<a name="247457663"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457663" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457663">(Jul 28 2021 at 13:23)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>query stack during panic:
+end of query stack
+</code></pre></div>
+<p>I don't think I have</p>
+
+
+
+<a name="247457702"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457702" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457702">(Jul 28 2021 at 13:23)</a>:</h4>
+<p>try running with <code>-Ztreat-err-as-bug</code> and use <code>RUST_BACKTRACE=1</code></p>
+
+
+
+<a name="247457942"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247457942" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247457942">(Jul 28 2021 at 13:25)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>thread &#39;rustc&#39; panicked at &#39;no errors encountered even though `delay_span_bug` issued&#39;, compiler/rustc_errors/src/lib.rs:1050:13
+stack backtrace:
+   0: rust_begin_unwind
+             at ./library/std/src/panicking.rs:515:5
+   1: std::panicking::begin_panic_fmt
+             at ./library/std/src/panicking.rs:457:5
+   2: rustc_errors::HandlerInner::flush_delayed
+             at ./compiler/rustc_errors/src/lib.rs:1050:13
+   3: &lt;rustc_errors::HandlerInner as core::ops::drop::Drop&gt;::drop
+             at ./compiler/rustc_errors/src/lib.rs:385:13
+   4: core::ptr::drop_in_place&lt;rustc_errors::HandlerInner&gt;
+             at ./library/core/src/ptr/mod.rs:192:1
+   5: core::ptr::drop_in_place&lt;core::cell::UnsafeCell&lt;rustc_errors::HandlerInner&gt;&gt;
+             at ./library/core/src/ptr/mod.rs:192:1
+   6: core::ptr::drop_in_place&lt;core::cell::RefCell&lt;rustc_errors::HandlerInner&gt;&gt;
+             at ./library/core/src/ptr/mod.rs:192:1
+   7: core::ptr::drop_in_place&lt;rustc_data_structures::sync::Lock&lt;rustc_errors::HandlerInner&gt;&gt;
+             at ./library/core/src/ptr/mod.rs:192:1
+   8: core::ptr::drop_in_place&lt;rustc_errors::Handler&gt;
+             at ./library/core/src/ptr/mod.rs:192:1
+   9: core::ptr::drop_in_place&lt;rustc_session::parse::ParseSess&gt;
+             at ./library/core/src/ptr/mod.rs:192:1
+  10: core::ptr::drop_in_place&lt;rustc_session::session::Session&gt;
+             at ./library/core/src/ptr/mod.rs:192:1
+  11: &lt;alloc::rc::Rc&lt;T&gt; as core::ops::drop::Drop&gt;::drop
+             at ./library/alloc/src/rc.rs:1443:17
+  12: core::ptr::drop_in_place&lt;alloc::rc::Rc&lt;rustc_session::session::Session&gt;&gt;
+             at ./library/core/src/ptr/mod.rs:192:1
+  13: core::ptr::drop_in_place&lt;rustc_interface::interface::Compiler&gt;
+             at ./library/core/src/ptr/mod.rs:192:1
+  14: core::mem::drop
+             at ./library/core/src/mem/mod.rs:896:24
+  15: rustc_interface::interface::create_compiler_and_run::{{closure}}::{{closure}}
+             at ./compiler/rustc_interface/src/interface.rs:213:60
+  16: rustc_data_structures::profiling::TimingGuard::run
+             at ./compiler/rustc_data_structures/src/profiling.rs:590:9
+  17: rustc_interface::interface::create_compiler_and_run::{{closure}}
+             at ./compiler/rustc_interface/src/interface.rs:213:9
+  18: rustc_span::with_source_map
+             at ./compiler/rustc_span/src/lib.rs:911:5
+  19: rustc_interface::interface::create_compiler_and_run
+             at ./compiler/rustc_interface/src/interface.rs:203:5
+  20: rustc_interface::interface::run_compiler::{{closure}}
+             at ./compiler/rustc_interface/src/interface.rs:225:12
+  21: rustc_interface::util::setup_callbacks_and_run_in_thread_pool_with_globals::{{closure}}::{{closure}}
+             at ./compiler/rustc_interface/src/util.rs:157:13
+  22: scoped_tls::ScopedKey&lt;T&gt;::set
+             at /home/waffle/.cargo/registry/src/github.com-1ecc6299db9ec823/scoped-tls-1.0.0/src/lib.rs:137:9
+  23: rustc_span::create_session_globals_then
+             at ./compiler/rustc_span/src/lib.rs:105:5
+  24: rustc_interface::util::setup_callbacks_and_run_in_thread_pool_with_globals::{{closure}}
+             at ./compiler/rustc_interface/src/util.rs:155:9
+  25: rustc_interface::util::scoped_thread::{{closure}}
+             at ./compiler/rustc_interface/src/util.rs:130:24
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+</code></pre></div>
+
+
+
+<a name="247458254"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458254" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458254">(Jul 28 2021 at 13:28)</a>:</h4>
+<p>oh, that's a weird place to die</p>
+
+
+
+<a name="247458269"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458269" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458269">(Jul 28 2021 at 13:28)</a>:</h4>
+<p>did you use <code>-Ztreat-err-as-bug</code>?</p>
+
+
+
+<a name="247458455"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458455" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458455">(Jul 28 2021 at 13:29)</a>:</h4>
+<p>well, I'm sorry to say I don't really know the problem just now</p>
+
+
+
+<a name="247458457"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458457" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458457">(Jul 28 2021 at 13:29)</a>:</h4>
+<p>I specified <code>RUSTC_ARGS="-Ztreat-err-as-bug"</code>, is it a wrong way to specify args to rustc?</p>
+
+
+
+<a name="247458513"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458513" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458513">(Jul 28 2021 at 13:30)</a>:</h4>
+<p>that doesn't sound right</p>
+
+
+
+<a name="247458532"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458532" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458532">(Jul 28 2021 at 13:30)</a>:</h4>
+<p>RUSTFLAGS="-Ztreat-err-as-bug", I think?</p>
+
+
+
+<a name="247458539"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458539" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458539">(Jul 28 2021 at 13:30)</a>:</h4>
+<p>Maybe both work</p>
+
+
+
+<a name="247458557"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458557" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458557">(Jul 28 2021 at 13:30)</a>:</h4>
+<p>or just pass them on the command line</p>
+
+
+
+<a name="247458564"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458564" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458564">(Jul 28 2021 at 13:30)</a>:</h4>
+<p>which is what I normally do</p>
+
+
+
+<a name="247458568"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458568" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458568">(Jul 28 2021 at 13:30)</a>:</h4>
+<p>are you invoking through cargo?</p>
+
+
+
+<a name="247458600"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458600" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458600">(Jul 28 2021 at 13:30)</a>:</h4>
+<p>I'm invoking though <code>x.py</code></p>
+
+
+
+<a name="247458697"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458697" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458697">(Jul 28 2021 at 13:31)</a>:</h4>
+<p>like <code>x.py test</code>?</p>
+
+
+
+<a name="247458715"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458715" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458715">(Jul 28 2021 at 13:31)</a>:</h4>
+<p>yes</p>
+
+
+
+<a name="247458725"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247458725" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247458725">(Jul 28 2021 at 13:31)</a>:</h4>
+<p>I recommend just running rustc manually</p>
+
+
+
+<a name="247459053"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247459053" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247459053">(Jul 28 2021 at 13:33)</a>:</h4>
+<p>though you have to find the binary</p>
+
+
+
+<a name="247459107"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247459107" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247459107">(Jul 28 2021 at 13:34)</a>:</h4>
+<p>I have a rustup toolchain setup</p>
+
+
+
+<a name="247459126"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247459126" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247459126">(Jul 28 2021 at 13:34)</a>:</h4>
+<p>so I can do <code>rustc +stage1</code> etc</p>
+
+
+
+<a name="247459154"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247459154" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247459154">(Jul 28 2021 at 13:34)</a>:</h4>
+<p>in any case, the main reason I recommend this is that you get control over all the flags etc very easily</p>
+
+
+
+<a name="247459245"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247459245" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247459245">(Jul 28 2021 at 13:35)</a>:</h4>
+<p>anyway, I've got to go :( sorry we didn't make more progress. You can schedule another slot, or we can make look for another bug. I'm having a bit of a "not sure this one is worth the effort" feeling :)</p>
+
+
+
+<a name="247459321"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247459321" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247459321">(Jul 28 2021 at 13:35)</a>:</h4>
+<p>Sure, thanks! :)</p>
+
+
+
+<a name="247459602"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247459602" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247459602">(Jul 28 2021 at 13:37)</a>:</h4>
+<p>I'm working on this bug because it actually is blocking me a little, so I guess I'll stick to it at least for now :P</p>
+
+
+
+<a name="247460897"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247460897" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247460897">(Jul 28 2021 at 13:47)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116009">nikomatsakis</span> <a href="#narrow/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899/near/247457304">said</a>:</p>
+<blockquote>
+<p>just to check, <span class="user-mention silent" data-user-id="273349">Waffle Lapkin</span>, <code>TraitPredicate(&lt;&lt;[T3; N] as Id&gt;::Assoc as std::marker::Unsize&lt;&lt;[T3] as Id&gt;::Assoc&gt;&gt;</code> -- is this what we were seeing before you added the normalization step?</p>
+</blockquote>
+<p>Yes, I believe so. Without added normalization I see this <code>TraitPredicate</code> being returned from <code>confirm_candidate</code>, but not solved.</p>
+
+
+
+<a name="247462189"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247462189" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247462189">(Jul 28 2021 at 13:58)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116009">nikomatsakis</span> <a href="#narrow/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899/near/247458725">said</a>:</p>
+<blockquote>
+<p>I recommend just running rustc manually</p>
+</blockquote>
+<p>That turned out to be a lot better actually, thanks!</p>
+
+
+
+<a name="247463306"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/Normalize%20associated%20types%20while%20unsizing%20%2375899/near/247463306" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Waffle Lapkin <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899.html#247463306">(Jul 28 2021 at 14:06)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116009">nikomatsakis</span> <a href="#narrow/stream/144729-wg-traits/topic/Normalize.20associated.20types.20while.20unsizing.20.2375899/near/247457414">said</a>:</p>
+<blockquote>
+<p>do you have a backtrace from the broken MIR error?</p>
+</blockquote>
+<p>Hopefully this one is right: <a href="https://gist.github.com/WaffleLapkin/c63ff8caca9a18add419152f088fe14a">https://gist.github.com/WaffleLapkin/c63ff8caca9a18add419152f088fe14a</a></p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

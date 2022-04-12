@@ -1,0 +1,144 @@
+<html>
+<head><meta charset="utf-8"><title>Disabling `#[track_caller]` inheritance on traits · t-lang · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/index.html">t-lang</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html">Disabling `#[track_caller]` inheritance on traits</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="241573815"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/241573815" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#241573815">(Jun 04 2021 at 18:13)</a>:</h4>
+<p>After revisiting PR <a href="https://github.com/rust-lang/rust/pull/81360">https://github.com/rust-lang/rust/pull/81360</a>, I realized that the current (stable) behavior of <code>#[track_caller]</code> on traits does not support an important use-case:</p>
+<p>Suppose that we have an existing function with <code>#[track_caller]</code> applied:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[track_caller]</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="fm">unimplemented!</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>Later on, we decide to make this function <code>async</code>:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[track_caller]</span><span class="w"></span>
+<span class="k">async</span><span class="w"> </span><span class="k">fn</span> <span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="fm">unimplemented!</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>However, this currently will not work as expected. Even if we start forwarding <code>#[track_caller]</code> to the underlying generator that's returned by <code>foo</code>, all of the calls to the returned future will go through the <code>Future</code> trait. If we make this future into a trait object (e.g. <code>Pin&lt;Box&lt;dyn Future&gt;&gt;</code>), then we will <em>not</em> forward the caller location information, since <code>Future::poll</code> does not have <code>#[track_caller]</code>.</p>
+<p>If we were to add <code>#[track_caller]</code> to <code>Future::poll</code>, then we would force <em>all</em> implementations of <code>Future</code> to be <code>#[track_caller]</code>, since the <code>#[track_caller]</code> attribute would get inherited by the impl. In the vast majority of cases, this would be the wrong decision - we want panics / caller locations to point into the <code>Future</code> implementation, not whatever code happened to call it.</p>
+<p>I propose that we add a new mode: <code>#[track_caller(no_inherit)]</code> (name bikesheddable). This would suppress the inheritance behavior - we would only forward the caller location argument if the trait implementation has <code>#[track_caller]</code>. This would introduce some overhead for trait objects (we would need to pass in the caller location parameter in case the implementation has <code>#[track_caller]</code>), but would not impact monomorphized calls.</p>
+<div class="codehilite"><pre><span></span><code>
+</code></pre></div>
+
+
+
+<a name="241573991"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/241573991" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> anp <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#241573991">(Jun 04 2021 at 18:15)</a>:</h4>
+<p>oof, that's pretty rough!</p>
+
+
+
+<a name="241574148"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/241574148" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> anp <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#241574148">(Jun 04 2021 at 18:16)</a>:</h4>
+<p>i like the idea of letting traits mark it as available to implementations but not required, but im curious whether the performance of the extra arg for trait objects is measurable, esp. with something like <code>Future</code></p>
+
+
+
+<a name="245083973"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245083973" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245083973">(Jul 06 2021 at 19:01)</a>:</h4>
+<p>My working assumption is that these extra parameters are actually free</p>
+
+
+
+<a name="245083985"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245083985" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245083985">(Jul 06 2021 at 19:01)</a>:</h4>
+<p>Is there any evidence to the contrary?</p>
+
+
+
+<a name="245084728"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245084728" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245084728">(Jul 06 2021 at 19:06)</a>:</h4>
+<p>what do you mean by "free" I guess? Certainly they cause a little extra register pressure</p>
+
+
+
+<a name="245084825"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245084825" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245084825">(Jul 06 2021 at 19:07)</a>:</h4>
+<p>and at call sites there's a few more instructions to setup the registers, I assume, right?</p>
+
+
+
+<a name="245086278"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245086278" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245086278">(Jul 06 2021 at 19:18)</a>:</h4>
+<p>The extra parameter could also be the one that spills onto the stack, for a reasonably large number of parameters, so it could cost a full push/pop</p>
+
+
+
+<a name="245089452"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245089452" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245089452">(Jul 06 2021 at 19:45)</a>:</h4>
+<p>To the best of my knowledge there has been no thorough review of the impact of this attribute at all. It just gets slap'd on whatever functions people find panicked without much useful info.</p>
+
+
+
+<a name="245089632"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245089632" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245089632">(Jul 06 2021 at 19:46)</a>:</h4>
+<p>And if there was ever an attempt to quantify the perf impact it was by running the perfbot, which measures the compilation times and therefore is very unlikely to reveal much about the impact to a function which the compiler might very well not be using at all.</p>
+
+
+
+<a name="245089706"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245089706" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245089706">(Jul 06 2021 at 19:47)</a>:</h4>
+<p>In practice these arguments will be free if the function that was annotated with <code>#[track_caller]</code> gets inlined.</p>
+
+
+
+<a name="245089768"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245089768" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245089768">(Jul 06 2021 at 19:47)</a>:</h4>
+<p>That's because in absence of <code>#[track_caller]</code> we'd just set up a different location info in the same place.</p>
+
+
+
+<a name="245090360"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245090360" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245090360">(Jul 06 2021 at 19:52)</a>:</h4>
+<p>what I mean by "free" is that I think it's unlikely to have real impact</p>
+
+
+
+<a name="245090373"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245090373" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245090373">(Jul 06 2021 at 19:52)</a>:</h4>
+<p>but I definitely think testing that hypothesis is a good idea!</p>
+
+
+
+<a name="245090513"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245090513" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245090513">(Jul 06 2021 at 19:53)</a>:</h4>
+<p>well, some methods are very hot code, like collecting into collections. those loops may allocate and thus panic</p>
+
+
+
+<a name="245093751"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245093751" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bstrie <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245093751">(Jul 06 2021 at 20:23)</a>:</h4>
+<p>allocation failure wouldn't panic, just abort (at least, as currently implemented)</p>
+
+
+
+<a name="245095192"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245095192" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245095192">(Jul 06 2021 at 20:36)</a>:</h4>
+<p>I do remember seeing some uses of <code>#[track_caller]</code> on very hot functions for which a perf run showed a substantial hit.</p>
+
+
+
+<a name="245097608"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/245097608" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#245097608">(Jul 06 2021 at 20:56)</a>:</h4>
+<p>I think the reserve() code paths still contain potential panics due to arithmetic overflows</p>
+
+
+
+<a name="248367095"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Disabling%20%60%23%5Btrack_caller%5D%60%20inheritance%20on%20traits/near/248367095" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jeremiah Senkpiel <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Disabling.20.60.23.5Btrack_caller.5D.60.20inheritance.20on.20traits.html#248367095">(Aug 04 2021 at 15:36)</a>:</h4>
+<p>It would be nice to be able to opt into this even if no default solution is good.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

@@ -1,0 +1,181 @@
+<html>
+<head><meta charset="utf-8"><title>miri machine: global state from access hook · t-compiler/const-eval · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/index.html">t-compiler/const-eval</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html">miri machine: global state from access hook</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="147602982"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147602982" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147602982">(Nov 13 2018 at 16:37)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@Oli</span> I think for the implementation of the last piece of stacked borrows, I'd like to have access to some global state from the memory access hooks (<code>memory_read</code>, <code>memory_written</code>, <code>memory_deallocated</code>). The state should be shared across all allocations. What do you think would be the best way to do that?</p>
+
+
+
+<a name="147603080"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147603080" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147603080">(Nov 13 2018 at 16:39)</a>:</h4>
+<p>I am talking about "function barriers", which get pushed when a reference is passed to a function and should get removed when the function returns. A naive implementation would be to store the index of the function in the call stack, and then on a pop iterate over all of memory to get rid of these barriers. But I don't want to iterate over all of memory...</p>
+
+
+
+<a name="147603174"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147603174" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147603174">(Nov 13 2018 at 16:41)</a>:</h4>
+<p>So instead I think I will introduce an indirection: Every call frame gets an ID that is unique across program execution, and we use that ID in the barrier. We have a global table storing which IDs are no longer in use, where frames get added when they are popped. When we encounter a barrier, if its ID is one of a call stack that is marked in that table as having popped already, we just ignore it.</p>
+
+
+
+<a name="147603280"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147603280" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147603280">(Nov 13 2018 at 16:42)</a>:</h4>
+<p>But that means I need access to this global table from the memory access hooks. My best idea so far: Re-introduce the <code>MemoryData</code> that I killed some PRs ago, and pass that to the hooks. With the hooks being called from methods on allocations, that means those methods need to take a pointer to where the <code>MemoryData</code> is. Kind of ugly, but not <em>too</em> bad -- <code>MemoryData</code> would be <code>()</code> for CTFE so when CTFE accesses an allocation directly (outside of an execution), it can just pass <code>&amp;()</code>.</p>
+
+
+
+<a name="147604069"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147604069" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147604069">(Nov 13 2018 at 16:53)</a>:</h4>
+<p>What about using Rc? That would be completely encapsulated in miri and the engine would never know</p>
+
+
+
+<a name="147604178"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147604178" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147604178">(Nov 13 2018 at 16:54)</a>:</h4>
+<p>Would of course incur the memory cost of an additional pointer per AllocationExtra</p>
+
+
+
+<a name="147604328"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147604328" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147604328">(Nov 13 2018 at 16:57)</a>:</h4>
+<p>how would that <code>Rc</code> get into the hooks?</p>
+
+
+
+<a name="147604438"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147604438" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147604438">(Nov 13 2018 at 16:58)</a>:</h4>
+<p>Uh, I don't know, I'm on mobile right now, so gimme a moment</p>
+
+
+
+<a name="147605694"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147605694" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147605694">(Nov 13 2018 at 17:05)</a>:</h4>
+<p>So, you do in fact reintroduce the MemoryData, and you also add an AllocExtra method for <code>allocate</code>, which produces the AllocExtra. You pass a reference to MemoryData to the allocate hook. CTFE just ignores the arg and has an empty function body producing the expected unit</p>
+
+
+
+<a name="147605836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147605836" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147605836">(Nov 13 2018 at 17:05)</a>:</h4>
+<p>So no more Default bound on AllocationExtra</p>
+
+
+
+<a name="147605931"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147605931" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147605931">(Nov 13 2018 at 17:05)</a>:</h4>
+<p>Seems nicely symmetric with the deallocate hook</p>
+
+
+
+<a name="147606274"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147606274" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147606274">(Nov 13 2018 at 17:07)</a>:</h4>
+<p>If you need access to the allocation itself during the allocate hook, pass an allocation with the empty tuple as AllocExtra</p>
+
+
+
+<a name="147653400"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147653400" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147653400">(Nov 14 2018 at 08:18)</a>:</h4>
+<p>So you want every <code>AllocExtra</code> to carry a pointer to the <code>MemoryData</code>? Why is that better than passing in a pointer on every read/write/dealloc? Passing in <code>&amp;()</code> does not seem too bad?</p>
+
+
+
+<a name="147653576"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147653576" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147653576">(Nov 14 2018 at 08:23)</a>:</h4>
+<p>well... every call from within miri-engine and miri is already given a <code>tcx</code>, now a <code>&amp;MemoryData</code>, too... these arguments are just noise. Maybe we can make <code>get</code> and <code>get_mut</code> return a wrapper around <code>Allocation</code> which has the same methods as <code>Allocation</code> but without the extra arguments</p>
+
+
+
+<a name="147654459"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147654459" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147654459">(Nov 14 2018 at 08:40)</a>:</h4>
+<p>I do like not using <code>Default</code>, I got some use for that, but I don't like that extra ptr-sized overhead of memory use everywhere. Hm.</p>
+
+
+
+<a name="147655176"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147655176" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147655176">(Nov 14 2018 at 08:58)</a>:</h4>
+<p>but maybe I am overthinking it and one more ptr size per allocation is not worth the effort?</p>
+
+
+
+<a name="147655194"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147655194" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147655194">(Nov 14 2018 at 08:59)</a>:</h4>
+<p>It's either complexity at every memory operation site or an Rc in the structure + one Mutex check per memory operation</p>
+
+
+
+<a name="147655205"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147655205" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147655205">(Nov 14 2018 at 09:00)</a>:</h4>
+<p>the complexity at every operation site can be solved by making <code>get</code> and <code>get_mut</code> return a wrapper around <code>Allocation</code></p>
+
+
+
+<a name="147655301"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147655301" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147655301">(Nov 14 2018 at 09:01)</a>:</h4>
+<p>Are you planning on trying to get stacked borrows into const eval $ever?</p>
+
+
+
+<a name="147655359"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147655359" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147655359">(Nov 14 2018 at 09:02)</a>:</h4>
+<p>If not, then I think we should go with the extra <code>Rc</code> in miri</p>
+
+
+
+<a name="147655595"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147655595" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147655595">(Nov 14 2018 at 09:08)</a>:</h4>
+<p>Not sure about <code>$ever</code>, but it'd probably kill compile times...</p>
+
+
+
+<a name="147655600"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147655600" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147655600">(Nov 14 2018 at 09:08)</a>:</h4>
+<p>okay I will go with <code>Rc</code> for now</p>
+
+
+
+<a name="147655607"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147655607" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147655607">(Nov 14 2018 at 09:08)</a>:</h4>
+<p>which <code>Mutex</code>?</p>
+
+
+
+<a name="147656202"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147656202" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147656202">(Nov 14 2018 at 09:22)</a>:</h4>
+<p>Well you need an <code>Rc&lt;Mutex&lt;Data&gt;&gt;</code> otherwise you can't mutate it ;)</p>
+
+
+
+<a name="147656205"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147656205" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147656205">(Nov 14 2018 at 09:22)</a>:</h4>
+<p>or RefCell</p>
+
+
+
+<a name="147656207"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147656207" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147656207">(Nov 14 2018 at 09:22)</a>:</h4>
+<p>same thing</p>
+
+
+
+<a name="147656236"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147656236" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147656236">(Nov 14 2018 at 09:23)</a>:</h4>
+<p>fair enough</p>
+
+
+
+<a name="147656291"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/miri%20machine%3A%20global%20state%20from%20access%20hook/near/147656291" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/miri.20machine.3A.20global.20state.20from.20access.20hook.html#147656291">(Nov 14 2018 at 09:24)</a>:</h4>
+<p>I also think I will actually use a <code>HashSet</code> of unique stack frame identifiers that have NOT been popped yet, that won't grow unboundedly like my original idea would^^</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

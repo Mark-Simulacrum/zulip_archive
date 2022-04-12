@@ -1,0 +1,236 @@
+[
+    {
+        "content": "<p>Is there an equivalent to <code>tcx.def_path()</code> that will account for <code>#[proc_macro_derive(SomeDerive)]</code> renamings?</p>",
+        "id": 253963418,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632076906
+    },
+    {
+        "content": "<p>E.g., if the program is this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"c1\">// crate foo</span>\n<span class=\"cp\">#[proc_macro_derive(SomeDerive)]</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">some_derive</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Then <code>def_path()</code> returns something like <code>foo::some_derive</code>, whereas I want to get <code>foo::SomeDerive</code>. I assume there's some way to do at least part of this, because the compiler needs to resolve <code>#[derive(SomeDerive)]</code> to <code>foo::some_derive</code>, but it would be nice to have a solution that can give me the full path.</p>",
+        "id": 253980251,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632094905
+    },
+    {
+        "content": "<p>For context, I'd like to use this in rustdoc as part of a cleanup.</p>",
+        "id": 253980263,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632094921
+    },
+    {
+        "content": "<p>IIRC, proc macros don't create separate <code>DefId</code>s and reuse <code>DefId</code>s (and therefore def paths) or their functions.</p>",
+        "id": 254023775,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1632131569
+    },
+    {
+        "content": "<p>So <code>SomeDerive</code> needs to be obtained in some other way.<br>\nFor cross-crate scenarios it's just encoded into metadata separately, see <code>CrateMetadata::raw_proc_macros</code>.</p>",
+        "id": 254024385,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1632131816
+    },
+    {
+        "content": "<p>Hmm, I was hoping to find an existing compiler API and not have rustdoc roll its own. So I guess the best bet would be to look at the HIR attributes for the function if the current crate is a proc macro crate, and look at that metadata field if it's a cross-crate scenario?</p>",
+        "id": 254072160,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632153107
+    },
+    {
+        "content": "<p>Actually, it looks like there's a <code>TyCtxt::item_attrs</code> function that works cross-crate. Could I use that for both intra-crate and cross-crate situations to avoid having two code paths in rustdoc?</p>",
+        "id": 254072477,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632153230
+    },
+    {
+        "content": "<p>Does this code look reasonable?</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"sd\">/// If `def_id` is a proc macro derive, return its name.</span>\n<span class=\"sd\">/// Otherwise, return `None`.</span>\n<span class=\"k\">fn</span> <span class=\"nf\">proc_macro_derive_name</span><span class=\"p\">(</span><span class=\"n\">tcx</span>: <span class=\"nc\">TyCtxt</span><span class=\"o\">&lt;'</span><span class=\"nb\">_</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">def_id</span>: <span class=\"nc\">DefId</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"nb\">Option</span><span class=\"o\">&lt;</span><span class=\"n\">Symbol</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">attrs</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">tcx</span><span class=\"p\">.</span><span class=\"n\">item_attrs</span><span class=\"p\">(</span><span class=\"n\">def_id</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">attrs</span><span class=\"p\">.</span><span class=\"n\">lists</span><span class=\"p\">(</span><span class=\"n\">sym</span>::<span class=\"n\">proc_macro_derive</span><span class=\"p\">).</span><span class=\"n\">find_map</span><span class=\"p\">(</span><span class=\"o\">|</span><span class=\"n\">mi</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"n\">mi</span><span class=\"p\">.</span><span class=\"n\">ident</span><span class=\"p\">()).</span><span class=\"n\">map</span><span class=\"p\">(</span><span class=\"o\">|</span><span class=\"n\">ident</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"n\">ident</span><span class=\"p\">.</span><span class=\"n\">name</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>(Note that <code>lists()</code> is defined in <code>rustdoc::clean::types::AttributesExt</code>.)</p>",
+        "id": 254084694,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158081
+    },
+    {
+        "content": "<p>The <code>attrs.lists(...)...</code> part is from another part of rustdoc that determines names of proc macros.</p>",
+        "id": 254084768,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158118
+    },
+    {
+        "content": "<p>Looks reasonable, this is very similar to what resolve does for local proc macros:<br>\n<a href=\"https://github.com/rust-lang/rust/blob/master/compiler/rustc_resolve/src/build_reduced_graph.rs#L1204-L1218\">https://github.com/rust-lang/rust/blob/master/compiler/rustc_resolve/src/build_reduced_graph.rs#L1204-L1218</a></p>",
+        "id": 254085514,
+        "sender_full_name": "Vadim Petrochenkov",
+        "timestamp": 1632158424
+    },
+    {
+        "content": "<p>Hmm, actually it's ICEing:</p>\n<div class=\"codehilite\"><pre><span></span><code>error: internal compiler error: compiler/rustc_middle/src/ty/query.rs:263:1: `tcx.item_attrs(DefId(0:0 ~ foo[cf51]))` unsupported by its crate; perhaps the `item_attrs` query was never assigned a provider function\n</code></pre></div>",
+        "id": 254085797,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158529
+    },
+    {
+        "content": "<p>The query stack looks weird too:</p>\n<div class=\"codehilite\"><pre><span></span><code>query stack during panic:\n#0 [item_attrs] collecting attributes of ``\nend of query stack\nerror: aborting due to previous error\n</code></pre></div>",
+        "id": 254085978,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158611
+    },
+    {
+        "content": "<p>Do you have any idea why this is happening? I know rustdoc messes with query providers somewhat, so could that be it?</p>",
+        "id": 254086027,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158631
+    },
+    {
+        "content": "<p><code>tcx.item_attrs()</code> probably doesn't work for proc-macro external crates.</p>",
+        "id": 254086093,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1632158646
+    },
+    {
+        "content": "<p>Actually I don't think rustdoc messes with this one.</p>",
+        "id": 254086099,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158650
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"133247\">bjorn3</span> <a href=\"#narrow/stream/182449-t-compiler.2Fhelp/topic/def_path.20for.20proc.20macro.20derives/near/254086093\">said</a>:</p>\n<blockquote>\n<p><code>tcx.item_attrs()</code> probably doesn't work for proc-macro external crates.</p>\n</blockquote>\n<p>Huh, why not?</p>",
+        "id": 254086121,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158661
+    },
+    {
+        "content": "<p>Encoding the crate metadata of proc-macros skips a lot of unnecessary information to reduce their size.</p>",
+        "id": 254086165,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1632158683
+    },
+    {
+        "content": "<p>Ah, okay. I guess I'll have to fallback to using metadata. What check should I do to see if a <code>def_id</code> belongs to an external proc-macro crate?</p>",
+        "id": 254086224,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158712
+    },
+    {
+        "content": "<p>Actually, how do I access metadata from the <code>tcx</code>?</p>",
+        "id": 254086293,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158747
+    },
+    {
+        "content": "<p>Ah, it looks like <code>CStore::from_tcx</code> is what I want.</p>",
+        "id": 254086442,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158803
+    },
+    {
+        "content": "<p>The <code>raw_proc_macros</code> field is private. The <code>CrateMetadataRef::raw_proc_macro()</code> function is too.</p>",
+        "id": 254086470,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1632158814
+    },
+    {
+        "content": "<p>It looks like there's another part of rustdoc that has this code:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">        </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"fm\">matches!</span><span class=\"p\">(</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">CStore</span>::<span class=\"n\">from_tcx</span><span class=\"p\">(</span><span class=\"n\">cx</span><span class=\"p\">.</span><span class=\"n\">tcx</span><span class=\"p\">).</span><span class=\"n\">load_macro_untracked</span><span class=\"p\">(</span><span class=\"n\">did</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">cx</span><span class=\"p\">.</span><span class=\"n\">sess</span><span class=\"p\">()),</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">LoadedMacro</span>::<span class=\"n\">MacroDef</span><span class=\"p\">(</span><span class=\"n\">def</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"fm\">matches!</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"n\">def</span><span class=\"p\">.</span><span class=\"n\">kind</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ast</span>::<span class=\"n\">ItemKind</span>::<span class=\"n\">MacroDef</span><span class=\"p\">(</span><span class=\"n\">ast_def</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"o\">!</span><span class=\"n\">ast_def</span><span class=\"p\">.</span><span class=\"n\">macro_rules</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Does using <code>load_macro_untracked</code> seem reasonable?</p>",
+        "id": 254086691,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158899
+    },
+    {
+        "content": "<p>Or actually I probably want <code>load_proc_macro</code>.</p>",
+        "id": 254086792,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158951
+    },
+    {
+        "content": "<p>Yeah, I think so.</p>",
+        "id": 254086828,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1632158970
+    },
+    {
+        "content": "<p>Never mind, <code>load_proc_macro</code>'s private too <span aria-label=\"laughing\" class=\"emoji emoji-1f606\" role=\"img\" title=\"laughing\">:laughing:</span></p>",
+        "id": 254086838,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158973
+    },
+    {
+        "content": "<p>But <code>load_macro_untracked</code> is public. However, that doesn't return an <code>Option</code>, so will that panic if there's no macro?</p>",
+        "id": 254086881,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632158991
+    },
+    {
+        "content": "<p>Yes, it seems so.</p>",
+        "id": 254086999,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1632159025
+    },
+    {
+        "content": "<p>Hmm. So could I use <code>tcx.def_kind</code> to check first or will that not work for proc-macro extern crates?</p>",
+        "id": 254087028,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632159047
+    },
+    {
+        "content": "<p>I think that will work.</p>",
+        "id": 254087057,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1632159062
+    },
+    {
+        "content": "<p>And possibly also check if the crate is a proc macro first.</p>",
+        "id": 254087104,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1632159082
+    },
+    {
+        "content": "<p>How do I do that check?</p>",
+        "id": 254087173,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632159119
+    },
+    {
+        "content": "<p>There is an <code>is_proc_macro_crate</code> method on <code>CrateMetadata</code>, but it is private.</p>",
+        "id": 254087486,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1632159239
+    },
+    {
+        "content": "<p>Looks like you don't need to check if it is a proc-macro for as long as you check the def is a macro of any kind.</p>",
+        "id": 254087560,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1632159260
+    },
+    {
+        "content": "<p>Also, it looks like I may be able to just check if <code>tcx.def_kind(did)</code> is <code>DefKind::Macro(MacroKind::Derive)</code>.</p>",
+        "id": 254087708,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632159321
+    },
+    {
+        "content": "<p>Thank you for your help!</p>",
+        "id": 254087724,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632159327
+    },
+    {
+        "content": "<p>Hmm, how do I get the name of a proc macro from its <code>rustc_expand::base::SyntaxExtension</code>? The only field that looks like a name is <code>builtin_name</code>, and it seems that's only for <code>rustc_builtin_macro</code>s.</p>",
+        "id": 254088947,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1632159783
+    },
+    {
+        "content": "<p>Bumping this. Does anyone know how to get the name of a proc macro from its SyntaxExtension?</p>",
+        "id": 261810414,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1637166962
+    },
+    {
+        "content": "<p>I don't think you can.</p>",
+        "id": 261824339,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1637172525
+    },
+    {
+        "content": "<p>Hmm, I guess I'll have to delay this cleanup for now until I come up with a way to do it.</p>",
+        "id": 261989400,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1637268985
+    }
+]

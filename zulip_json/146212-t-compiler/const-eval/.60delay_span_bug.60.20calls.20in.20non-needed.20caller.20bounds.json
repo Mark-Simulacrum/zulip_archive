@@ -1,0 +1,506 @@
+[
+    {
+        "content": "<p>I'm trying to fix an ICE in the following example, which admittedly is a somewhat contrived example, but there are more real-world examples where this also results in ICEs. I chose this example since this is what I initially analyzed.</p>\n<div class=\"codehilite\"><pre><span></span><code>#![allow(incomplete_features)]\n#![feature(generic_const_exprs)]\n\npub trait Foo {\n    const SIZE: usize;\n\n    fn to_bytes(&amp;self) -&gt; [u8; Self::SIZE];\n}\n\npub fn bar&lt;G: Foo&gt;(a: &amp;G) -&gt; u8\nwhere\n    [(); G::SIZE]: Sized,\n{\n    deeper_bar(a)\n}\n\nfn deeper_bar&lt;G: Foo&gt;(a: &amp;G) -&gt; u8\nwhere\n    [(); G::SIZE]: Sized,\n{\n    a.to_bytes()[0]\n}\n\nfn main() {}\n</code></pre></div>\n<p>The problem here is that when we typecheck <code>bar</code> we try to prove <code>&lt;[(); G::SIZE] as Sized&gt;</code> for the where clause in <code>deeper_bar</code> during the check of the call expression. We will of course always find the built-in candidate, but prior to that we use the caller bounds when assembling candidates, so specifically the where clause <code>[(); G::SIZE]: Sized</code> on <code>bar</code>. We then try to relate these two bounds, which will cause us to equate the two associated constants (at this stage we cannot resolve the associated constant <code>G::SIZE</code> of <code>deeper_bar</code>).<br>\nThe problem now is that when we try to resolve the associated item we call <code>codegen_fulfill_obligation</code> with <code>&lt;^0 as Foo&gt;</code> which we can't prove and now this will result in a call of <code>delay_span_bug</code>. This will later ICE because a <code>delay_span_bug</code> was called even though no error has occurred (the built-in candidate proves this Sized obligation obviously).</p>\n<p>I see two possible ways this might be handled. When we try to assemble candidates for <code>&lt;[&lt;(); _] as Sized&gt;</code> and use the caller bounds we equate the two obligations <code>&lt;[(); _] as Sized&gt; (bar) == &lt;[(); _] as Sized&gt; (deeper_bar)</code>. Here we create a <code>ConstEquate</code> predicate, which we later evaluate, but let this relation pass as true and therefore don't ignore the candidate from the caller bounds right away, which will then cause the <code>delay_span_bug</code> call later. Evaluating the relation right away and rejecting this caller bound candidate seems like the most plausible fix to me. Although I don't know whether handling type relations involving constants in this way generally would yield to other problems.</p>\n<p>Another solution would be to write a custom function of <code>codegen_fulfill_obligation</code> for associated constants, in<br>\nwhich we don't call <code>delay_span_bug</code> but instead propagate the error upwards (this propagation is already done<br>\nnow, its just that we propagate <code>ErrorReported</code> instead of the actual type of error), this would then allow us<br>\nto handle this higher in the call stack. The downside to this is that this handling can happen much higher in the<br>\ncallstack, so that might result in confusing code. <br>\nCan anybody help me with this?</p>",
+        "id": 255203177,
+        "sender_full_name": "BN",
+        "timestamp": 1632829856
+    },
+    {
+        "content": "<p>I dont really know how to fix this but there are a tonne of <code>I-ICE</code> <code>F-generic_const_exprs</code>  issues open that would be fixed by solving this</p>",
+        "id": 255203490,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632830004
+    },
+    {
+        "content": "<p><code>/// Assumes that this is run after the entire crate has been successfully type-checked.</code><br>\nthis comment on <code>codegen_fulfill_obligations</code> and the name <strong>codegen</strong>_fulfill_obligatons</p>",
+        "id": 255205522,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632831074
+    },
+    {
+        "content": "<p>makes me think that really we ought to have a separate method for this as we are calling codegen_fulfill_obligations during typeck now</p>",
+        "id": 255205557,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632831093
+    },
+    {
+        "content": "<p>(or make codegen_fullfill_obligations return a result or whatever, either way calling the current <code>codegen_fulfill_obligatons</code> is definitely wrong)</p>",
+        "id": 255205677,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632831141
+    },
+    {
+        "content": "<p>Oh wow, I missed that comment. Thanks for mentioning that. I agree that calling <code>codegen_fullfill_obligations</code> is the problem here. I'll try to fix that.</p>",
+        "id": 255213703,
+        "sender_full_name": "BN",
+        "timestamp": 1632834851
+    },
+    {
+        "content": "<p>Should it actually be possible in this context to infer the value for <code>&lt;^0 as Foo&gt;</code> here or is it expected that we cannot resolve that inference variable at this point, so that using a placeholder here is correct?</p>",
+        "id": 255234943,
+        "sender_full_name": "BN",
+        "timestamp": 1632842512
+    },
+    {
+        "content": "<p>I think its entirely possible that we can get inference variables we cant resolve when trying to fulfill a ConstEquate obligation</p>",
+        "id": 255235247,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632842624
+    },
+    {
+        "content": "<p>Ok thanks. Do you think that a <code>ConstEquate</code> obligation is the only context in which that can happen?</p>",
+        "id": 255235806,
+        "sender_full_name": "BN",
+        "timestamp": 1632842846
+    },
+    {
+        "content": "<p>there doesn't seem to be many places that call <code>Infcx::const_eval_resolve</code>so I think so</p>",
+        "id": 255236095,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632842973
+    },
+    {
+        "content": "<p>or well</p>",
+        "id": 255236112,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632842979
+    },
+    {
+        "content": "<p>i dont know about other places ^^</p>",
+        "id": 255236123,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632842984
+    },
+    {
+        "content": "<p>but ConstEquate seems to be a large portion of the usage of <code>Infcx::const_eval_resolve</code></p>",
+        "id": 255236234,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632843014
+    },
+    {
+        "content": "<p>there's <code>is_const_evaluatable</code> which might run into issues <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 255236343,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632843049
+    },
+    {
+        "content": "<p>it evaluates a const if it cant unify it with a <code>ConstEvaluatable</code> in the paramenv which seems like it might hit the same issue but im not sure really</p>",
+        "id": 255236440,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632843085
+    },
+    {
+        "content": "<p><code>ConstEquate</code> obligations are where i've seen most of the ICEs for this coming from though ^^</p>",
+        "id": 255236727,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632843175
+    },
+    {
+        "content": "<p>I don't really understand what the rationale is for registering <code>ConstEquate</code> obligations in the first place. What is stopping us from evaluating those inside the <code>TypeRelation</code> instances itself?</p>",
+        "id": 255237042,
+        "sender_full_name": "BN",
+        "timestamp": 1632843288
+    },
+    {
+        "content": "<p>my understanding is that <code>ConstEquate</code> was added to try delay unifying constants because it can cause cycles but in reality it didnt really do much</p>",
+        "id": 255237141,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632843326
+    },
+    {
+        "content": "<p>I might be wrong about that though</p>",
+        "id": 255237171,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632843335
+    },
+    {
+        "content": "<p>I dont <em>think</em> this is the cause of the problem though, if we just tried to equate immediately instead of registering a <code>ConstEquate</code> obligation, the inference var would still be there and still potentially be unresolvable</p>",
+        "id": 255237565,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632843480
+    },
+    {
+        "content": "<p>I thought that one possible approach would be to propagate the error upwards to the type relation, instead of delaying the bugs. So e.g. when assembling candidates from caller bounds we use <a href=\"https://github.com/rust-lang/rust/blob/1d71ba862309d59df710078a845c8772ffb22aba/compiler/rustc_trait_selection/src/traits/select/mod.rs#L2127-L2139\"><code>match_poly_trait_ref</code></a> which would simply ignore that candidate if the type relation check fails. But if we allow the type relation to pass and just register a <code>ConstEquate</code> obligation to be checked later, as we currently do, then it becomes much more difficult to correctly propagate the errors that we want to avoid calling <code>delay_span_bug</code> for, as far as I can tell.</p>",
+        "id": 255241027,
+        "sender_full_name": "BN",
+        "timestamp": 1632844712
+    },
+    {
+        "content": "<p>Do you know whether <code>ConstEquate</code> obligations only originate from the type relation?</p>",
+        "id": 255241530,
+        "sender_full_name": "BN",
+        "timestamp": 1632844879
+    },
+    {
+        "content": "<p>I am not sure</p>",
+        "id": 255241583,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632844904
+    },
+    {
+        "content": "<p>Not sure how much you looked into this, but can you say what you believe to be the core problem with this issue?</p>",
+        "id": 255243845,
+        "sender_full_name": "BN",
+        "timestamp": 1632845662
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"328097\">BN</span> <a href=\"#narrow/stream/146212-t-compiler.2Fconst-eval/topic/.60delay_span_bug.60.20calls.20in.20non-needed.20caller.20bounds/near/255243845\">said</a>:</p>\n<blockquote>\n<p>Not sure how much you looked into this, but can you say what you believe to be the core problem with this issue?</p>\n</blockquote>\n<p>when we have some const containing an inference variable, for example <code>{ &lt;T as Trait&lt;_&gt;&gt;::ASSOC }</code> and we want to know whether its the same as some other const (hence ConstEquate). If we fail to unify with <code>try_unify_abstract_const</code> (which walks the THIR of both consts and checks if they are equal) then we attempt to evaluate both consts to see if they evaluate to the same thing (this is what <code>Infcx::const_eval_resolve</code> is doing I believe)</p>\n<p>When we call <code>const_eval_resolve</code> it (at some point) tries to find what impl satisfies <code>&lt;T as Trait&lt;_&gt;&gt;</code> so that we can evaluate the associated const <code>ASSOC</code>. Since there's an inference variable we turn it into something like <code>for&lt;U&gt; &lt;T as Trait&lt;U&gt;&gt;</code> and try to find an impl that satisfies that traitref. (finding the impl that satisfies the traitref is what <code>codegen_fulfill_obligation</code> is doing)</p>\n<p><code>codegen_fulfill_obligation</code> is not meant to run during typeck though, it's only meant to run when we <em>already</em> know that the trait ref can actually be fulfilled (because typeck has run). So when it cant find an impl to fulfill <code>for&lt;U&gt; &lt;T as Trait&lt;U&gt;&gt;</code> we ICE with that <code>encountered Unimplemented blah blah</code> because without <code>generic_const_exprs</code> it would mean that we messed up somewhere and code typeck'ed when it shouldn't have</p>\n<p>The core issue IMO  is that we're calling <code>codegen_fulfill_obligation</code> when we dont actually know if there's an impl out there that fulfills the trait ref. Or maybe the core issue is that <code>codegen_fulfill_obligation</code> should handle being called during typeck, I don't know which is the right framing...</p>",
+        "id": 255247240,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632846904
+    },
+    {
+        "content": "<p>^ this is basically my understanding of the issue</p>",
+        "id": 255247667,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632847067
+    },
+    {
+        "content": "<p>with all that said I feel like my understanding here is not completely correct, I would expect things to be ICEing a <em>whole lot more</em> so I think im missing something</p>",
+        "id": 255248313,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632847302
+    },
+    {
+        "content": "<p>there's an issue open that suggests that <code>tcx.const_eval_resolve</code> instead of <code>infcx.const_eval_resolve</code> would fix this as it doesnt do the replacing inference vars with <code>for&lt;...&gt;</code> (I tried this a while back and it didnt fix stuff)</p>",
+        "id": 255248831,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632847493
+    },
+    {
+        "content": "<p>Thanks a lot for the helpful answer. I'll try to look more into this issue.</p>",
+        "id": 255271803,
+        "sender_full_name": "BN",
+        "timestamp": 1632853070
+    },
+    {
+        "content": "<p>I've looked into <a href=\"https://github.com/rust-lang/rust/issues/83249\">#83249</a>, I have some questions and thoughts about that. </p>\n<p>When we check the argument type of the call <code>foo([0; 1]);</code> we <a href=\"https://github.com/rust-lang/rust/blob/207d9558d00dd5cc438a6418ba96912d396e2155/compiler/rustc_typeck/src/check/fn_ctxt/checks.rs#L415\">demand</a> that the type of the argument is always a subtype of the type of the parameter. Now in this case we have an inference variable here for the type of the parameter. </p>\n<p>Is this inference variable ever resolvable?  In theory we should know that the inference variable corresponds to some type that implements Foo but I don't see how we could ever get a concrete type for <code>T</code> here, except of course the argument type but we try to relate that to the parameter type here.</p>\n<p>Assuming that we would know that the inference variable implements Foo, how would we proceed? Would we look for all kinds of impls and see whether there is a unique impl whose associated constant <code>N</code> is equal to 1? If not, how could we ever eq relate these constants (to me it seems as if the const in the parameter always remains 'non-concrete')? </p>\n<p>If we would settle for the approach of looking for a unique implementation of Foo, wouldn't we need some other construct than an inference variable to convey the information that the type we look for implements Foo?</p>\n<p>If we don't expect the type system to be able to infer the right type for <code>T</code> in the parameter, we should probably always consider <code>ConstEquate</code> type relations that involve inference variables as false and try to give good diagnostics that suggest to provide the correct type (as in <code>foo&lt;u8&gt;([u8; 1])</code>.</p>",
+        "id": 255432593,
+        "sender_full_name": "BN",
+        "timestamp": 1632934032
+    },
+    {
+        "content": "<p>this issue which is a duplicate of that issue has a case where it is realistic for the inference vars to get resolved eventually <a href=\"https://github.com/rust-lang/rust/issues/82418\">#82418</a> <a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=04e711e02c9323e2c4fe1fcf187eb68f\">playground</a></p>",
+        "id": 255433382,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632934303
+    },
+    {
+        "content": "<p>ah although actually yes even in <a href=\"https://github.com/rust-lang/rust/issues/83249\">#83249</a> that inference variable can totally be resolved because of the type annotation <code>let _: u8</code></p>",
+        "id": 255433952,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632934498
+    },
+    {
+        "content": "<p>I don't know much about how type inference actually works though so I wont be much help with those questions</p>",
+        "id": 255434720,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1632934776
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"328097\">@BN</span> are you still interested/are working on this? I spoke with lcnr and a solution was come up with but they wanted to speak with niko before deciding for sure (no idea how long that will take)</p>",
+        "id": 257356974,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634128393
+    },
+    {
+        "content": "<p>Hey <span class=\"user-mention\" data-user-id=\"326176\">@Boxy [she/her]</span> , I'm still interested in this issue. I've worked on it and I thought most of the functionality of postponing the evaluation of consts is already in place in the compiler, but either I must have misunderstood something or was too conservative in postponing certain types of consts, because I got a weird error when trying to compile std. I wanted to give this another shot, but if you have a working solution then thats obviously not necessary. Would you be looking for someone to implement that?</p>",
+        "id": 257358927,
+        "sender_full_name": "BN",
+        "timestamp": 1634129309
+    },
+    {
+        "content": "<p>Yea, I wanted to know if you wanted to have a go at implementing it (I probably should have said in the original message, oh well)</p>",
+        "id": 257359371,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634129514
+    },
+    {
+        "content": "<p>Yes, i'd like to do that. Thanks for keeping me in mind.</p>",
+        "id": 257359544,
+        "sender_full_name": "BN",
+        "timestamp": 1634129570
+    },
+    {
+        "content": "<p>Ok i'll write up the idea then</p>",
+        "id": 257359697,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634129641
+    },
+    {
+        "content": "<p>Currently in <a href=\"https://github.com/rust-lang/rust/blob/master/compiler/rustc_infer/src/infer/mod.rs#L1582-L1597\">infcx.const_eval_resolve</a> we canonicalize the <code>unevaluated</code> and <code>paramenv</code> (which replaces inference variables with the stuff that we discussed before) </p>\n<p>What we want to do instead of canonicalizing is to return <code>Err::TooGeneric</code> when there are inference vars. Which will cause our handling of <code>ConstEquate</code> to <a href=\"https://github.com/rust-lang/rust/blob/master/compiler/rustc_trait_selection/src/traits/fulfill.rs#L614-L618\">stall on the inference vars</a> which means we wont evaluate the const until all the inference vars have been resolved (and if we cant, it'll error)</p>",
+        "id": 257362492,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634130793
+    },
+    {
+        "content": "<p>as a side effect of this change the test added in <a href=\"https://github.com/rust-lang/rust/pull/89588\">this PR</a> (sorry :P) will likely start failing but that's fine the test can be removed and we'll open an issue to make the code compile again</p>",
+        "id": 257362685,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634130866
+    },
+    {
+        "content": "<p>I've had the same solution in mind, I chose to always reject or rather postpone (by returing the <code>TooGeneric</code> error) the evaluations of consts inside a ConstEquate predicate whenever we have a bound placeholder as a subst. But this resulted in a very confusing error during compilation of std. Is the placeholder the result of the canonicalization or rather is it possible for bound placeholders to be introduced in situations in which we don't have inference vars?</p>",
+        "id": 257363924,
+        "sender_full_name": "BN",
+        "timestamp": 1634131374
+    },
+    {
+        "content": "<p>The canonicalisation introduces boundvars not placeholders so I dont think checking for placeholders is the right thing to do</p>",
+        "id": 257364307,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634131527
+    },
+    {
+        "content": "<p>I think I checked for bound vars, I'll try to push my local branch. One second</p>",
+        "id": 257364493,
+        "sender_full_name": "BN",
+        "timestamp": 1634131601
+    },
+    {
+        "content": "<p>I dont know everywhere boundvars get created in the compiler but checking for inference vars instead of bound vars seems more correct given what we're trying to accomplish here</p>",
+        "id": 257364542,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634131623
+    },
+    {
+        "content": "<p>(particularly I wouldn't be surprised if we get bound vars not coming from inference vars)</p>",
+        "id": 257364585,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634131646
+    },
+    {
+        "content": "<p><a href=\"https://github.com/b-naber/rust/commit/5d72a23a92755b41f5c319d093228ade995fc67c\">https://github.com/b-naber/rust/commit/5d72a23a92755b41f5c319d093228ade995fc67c</a></p>",
+        "id": 257365112,
+        "sender_full_name": "BN",
+        "timestamp": 1634131823
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"326176\">Boxy [she/her]</span> <a href=\"#narrow/stream/146212-t-compiler.2Fconst-eval/topic/.60delay_span_bug.60.20calls.20in.20non-needed.20caller.20bounds/near/257364542\">said</a>:</p>\n<blockquote>\n<p>I dont know everywhere boundvars get created in the compiler but checking for inference vars instead of bound vars seems more correct given what we're trying to accomplish here</p>\n</blockquote>\n<p>Yes thats what I thought, its probably too conservative to always reject bound vars.</p>",
+        "id": 257365234,
+        "sender_full_name": "BN",
+        "timestamp": 1634131870
+    },
+    {
+        "content": "<p>oh hmm I hadnt thought about changing resolve_associated_item <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 257365514,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634131962
+    },
+    {
+        "content": "<p>Ah no actually the problem wasn't that the std didn't compile (that must have been another issue), but that we were failing most of the <code>ui/abi</code> tests. I don't really know anything about the abi functionality. Any idea how that might be related to this solution?</p>",
+        "id": 257367200,
+        "sender_full_name": "BN",
+        "timestamp": 1634132600
+    },
+    {
+        "content": "<p>mmm I'm not really sure I'd have to get your changes setup locally and see whats happening when we fail to resolve an assoc item</p>",
+        "id": 257367511,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634132719
+    },
+    {
+        "content": "<p>I can try to implement the changes you proposed first and see whether I get similar problems, before you need to look into this.</p>",
+        "id": 257367836,
+        "sender_full_name": "BN",
+        "timestamp": 1634132865
+    },
+    {
+        "content": "<p>I think that's probably worth a shot <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 257368699,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634133163
+    },
+    {
+        "content": "<p>I'll probably have time for that either this evening or tomorrow</p>",
+        "id": 257373140,
+        "sender_full_name": "BN",
+        "timestamp": 1634134739
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"326176\">@Boxy [she/her]</span> We still get the same errors in the abi tests if we postpone the evaluation of consts before the canonicalization. All of the failing tests I've looked at include the link attribute to <code>rust_test_helpers.c</code>. I don't know how one can debug this.</p>",
+        "id": 257549720,
+        "sender_full_name": "BN",
+        "timestamp": 1634223582
+    },
+    {
+        "content": "<p>do you have code I can poke/look at?</p>",
+        "id": 257549804,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223604
+    },
+    {
+        "content": "<p><a href=\"https://github.com/b-naber/rust/tree/eval_consts_infer_vars\">https://github.com/b-naber/rust/tree/eval_consts_infer_vars</a></p>",
+        "id": 257549841,
+        "sender_full_name": "BN",
+        "timestamp": 1634223611
+    },
+    {
+        "content": "<p>can you debug out the substs to see what the inference vars are?</p>",
+        "id": 257550099,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223700
+    },
+    {
+        "content": "<p>How do you get debug output when running <code>x.py test</code>?</p>",
+        "id": 257550398,
+        "sender_full_name": "BN",
+        "timestamp": 1634223816
+    },
+    {
+        "content": "<p>Uh</p>",
+        "id": 257550412,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223822
+    },
+    {
+        "content": "<p>good question</p>",
+        "id": 257550418,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223824
+    },
+    {
+        "content": "<p>i tend to make a second cargo project and run <code>rustc +stage1 main.rs</code> lol...</p>",
+        "id": 257550446,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223836
+    },
+    {
+        "content": "<p>but this is test specific i think. Those abi tests always fail when you compile them in a seperate file, e.g. in playground</p>",
+        "id": 257550553,
+        "sender_full_name": "BN",
+        "timestamp": 1634223870
+    },
+    {
+        "content": "<p>oh... hmm ive no idea then</p>",
+        "id": 257550581,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223882
+    },
+    {
+        "content": "<p>(looking at your code btw I don't think you're handling lifetime infernece variables correctly)</p>",
+        "id": 257550685,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223926
+    },
+    {
+        "content": "<p>(I think those are still going through the canonicalisation and turning into <code>for&lt;'a&gt;</code> probably)</p>",
+        "id": 257550710,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223939
+    },
+    {
+        "content": "<p>( I dont know if the test failures would be caused by that though)</p>",
+        "id": 257550746,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223959
+    },
+    {
+        "content": "<p>(if erasing lifetimes in substs (tcx.erase_lifetimes) then it probably is caused by that)</p>",
+        "id": 257550874,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634223989
+    },
+    {
+        "content": "<p>I dont think they are relevant here, since if it misses the test branch it just works as usual and the tests obviously passed before the changes</p>",
+        "id": 257550904,
+        "sender_full_name": "BN",
+        "timestamp": 1634224003
+    },
+    {
+        "content": "<p>hmmmm right</p>",
+        "id": 257550975,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634224026
+    },
+    {
+        "content": "<p>by test branch I meant the check for inference variables</p>",
+        "id": 257550979,
+        "sender_full_name": "BN",
+        "timestamp": 1634224029
+    },
+    {
+        "content": "<p>but you're right in general we should take inferred lifetimes into account here</p>",
+        "id": 257551105,
+        "sender_full_name": "BN",
+        "timestamp": 1634224078
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"326176\">@Boxy [she/her]</span> so turns out the failures of the abi tests were due to problems on my local machine(I recently installed binutils and putting that in my path caused its version of ar to be used which was incompatible with my architecture and caused errors when building the static library for <code>rust_test_helpers</code>. Sorry for the confusion</p>",
+        "id": 257732990,
+        "sender_full_name": "BN",
+        "timestamp": 1634318195
+    },
+    {
+        "content": "<p>Besides the test that you mentioned previously, we have one other test failing though:</p>\n<div class=\"codehilite\"><pre><span></span><code>// run-pass\n#![feature(generic_const_exprs)]\n#![allow(incomplete_features)]\n\ntrait Foo {}\n\nimpl&lt;const N: usize&gt; Foo for [(); N] where Self: FooImpl&lt;{ N == 0 }&gt; {}\n\ntrait FooImpl&lt;const IS_ZERO: bool&gt; {}\n\nimpl FooImpl&lt;{ 0u8 == 0u8 }&gt; for [(); 0] {}\n\nimpl&lt;const N: usize&gt; FooImpl&lt;{ 0u8 != 0u8 }&gt; for [(); N] {}\n\nfn foo&lt;T: Foo&gt;(_v: T) {}\n\nfn main() {\n    foo([]);\n    foo([()]);\n}\n</code></pre></div>\n<p>which seems like a more serious problem</p>",
+        "id": 257733071,
+        "sender_full_name": "BN",
+        "timestamp": 1634318235
+    },
+    {
+        "content": "<p>oh thats a relief</p>",
+        "id": 257733072,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634318236
+    },
+    {
+        "content": "<p><em>that</em> on the other hand isnt</p>",
+        "id": 257733118,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634318255
+    },
+    {
+        "content": "<p>I'm trying to investigate, but if you have any ideas now, let me know please</p>",
+        "id": 257733122,
+        "sender_full_name": "BN",
+        "timestamp": 1634318259
+    },
+    {
+        "content": "<p>what is the error message you're getting?</p>",
+        "id": 257733273,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634318319
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>error[E0119]: conflicting implementations of trait `FooImpl&lt;{ 0u8 == 0u8 }&gt;` for type `[(); 0]`\n  --&gt; src/test/ui/const-generics/generic_const_exprs/issue-73899.rs:13:1\n   |\n11 | impl FooImpl&lt;{ 0u8 == 0u8 }&gt; for [(); 0] {}\n   | ------------- first implementation here\n12 |\n13 | impl&lt;const N: usize&gt; FooImpl&lt;{ 0u8 != 0u8 }&gt; for [(); N] {}\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ conflicting implementation for `[(); 0]`\n\nerror: aborting due to previous error\n</code></pre></div>",
+        "id": 257733343,
+        "sender_full_name": "BN",
+        "timestamp": 1634318354
+    },
+    {
+        "content": "<p>Seems as if the constants arent being evaluated at all here</p>",
+        "id": 257733375,
+        "sender_full_name": "BN",
+        "timestamp": 1634318376
+    },
+    {
+        "content": "<p>hmm yeah</p>",
+        "id": 257733411,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634318392
+    },
+    {
+        "content": "<p>mmmm does the error go away if you call <code>infcx.resolve_vars_if_possible</code> on the substs</p>",
+        "id": 257733650,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634318498
+    },
+    {
+        "content": "<p>though im not sure why there are inference vars here, i'm not familiar with this code lol</p>",
+        "id": 257733782,
+        "sender_full_name": "Boxy [she/her]",
+        "timestamp": 1634318541
+    },
+    {
+        "content": "<p>I'll try that out. But you're right we should definitely check whether we can resolve infer vars before postponing any evaluations.</p>",
+        "id": 257733914,
+        "sender_full_name": "BN",
+        "timestamp": 1634318594
+    },
+    {
+        "content": "<p>ok that fixes it. Thanks a lot, Boxy</p>",
+        "id": 257736340,
+        "sender_full_name": "BN",
+        "timestamp": 1634319594
+    }
+]

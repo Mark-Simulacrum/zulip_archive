@@ -1,0 +1,58 @@
+<html>
+<head><meta charset="utf-8"><title>complexity of constness in the type system · t-compiler/const-eval · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/index.html">t-compiler/const-eval</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/complexity.20of.20constness.20in.20the.20type.20system.html">complexity of constness in the type system</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="270057648"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/complexity%20of%20constness%20in%20the%20type%20system/near/270057648" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/complexity.20of.20constness.20in.20the.20type.20system.html#270057648">(Jan 31 2022 at 16:13)</a>:</h4>
+<p>I've been worried about the complexity of <code>Constness</code> (<code>~const</code>) in the type system and trait resolver. The work <span class="user-mention" data-user-id="361356">@fee1-dead</span> is doing shows (and I agree with the decisions <span class="user-mention" data-user-id="361356">@fee1-dead</span> made on those PRs) that we need to do some fragile and complex remappings of the constness of trait obligations. So... what if we changed this representation? Let's step one step back:</p>
+<p>TLDR: traits need to opt-in to having const impls, otherwise adding default method bodies is a breaking change</p>
+<p>The current implementation of <code>impl const Trait for Type</code> allows you to declare such impls for <em>any</em> trait, as long as you can deliver a <code>const</code> implementation for all methods. So far so good, until we get into default method bodies. A trait that has a default method body for one of its methods, does not require implementors to implement that method. The problem is that we have no way of declaring that those default method bodies are const, either all implementors of the trait need to re-declare it, even if trival (think <code>ne</code> of <code>PartialEq</code> which is just <code>fn ne(&amp;self, other: &amp;Other) -&gt; bool { !self.eq(other) }</code>, or we need a way to mark default method bodies as const. The latter currently works via the very-much-not-meant-to-be-stabilized <code>#[default_method_body_is_const]</code>, and we'll find a way to stabilize some form of this behaviour... but... that means that adding a new default method will now require you to add that attribute, otherwise anyone with a const impl for your trait will now have their code stop compiling, as there is no const body, so they need to implement the new method.</p>
+<p>Which brings us back to the TLDR: we need a way to opt-in that a trait permits downstream crates to have const impls for that trait, which is a promise that the trait will never add new methods unless also adding a const default body for said methods</p>
+<p>basically, Step 0 of my idea for solving the complexity problem is to allow <code>const trait Foo {</code> declarations. This solves a few side-problems like default method bodies and super traits, as we can just say that all default method bodies of a <code>const trait Foo</code> are <code>const</code>, if you don't want that, split your trait until we come up with something more fine grained. And all super traits are also required to have a <code>const</code> impl for the if there is a <code>const</code> impl for the trait itself.</p>
+<p>As a next step we add a fourth kind of generic parameter: <code>constness</code>. All <code>const trait Foo</code> implicitly get that parameter. In rustc we remove the <code>constness</code> field from <code>TraitPredicate</code> and instead rely on generic parameter substitutions to replace constness parameters. For now such a generic parameter can either be <code>Constness::Required</code>, <code>Constness::Not</code> or <code>Constness::Param</code>, where only the latter is replaced during substitutions, the other two variants are fixed. Making this work as generic parameter substitution should allow us to re-use all the existing logic for such substitutions instead of rolling them again. I am aware of a significant amount of hand-waving happening here, most notably around where the substitutions are coming from, but I'm hoping we can hash that out in an explorative implementation</p>
+
+
+
+<a name="270069012"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/complexity%20of%20constness%20in%20the%20type%20system/near/270069012" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/complexity.20of.20constness.20in.20the.20type.20system.html#270069012">(Jan 31 2022 at 17:20)</a>:</h4>
+<blockquote>
+<p>basically, Step 0 of my idea for solving the complexity problem is to allow <code>const trait Foo {</code> declarations. This solves a few side-problems like default method bodies and super traits, as we can just say that all default method bodies of a <code>const trait Foo</code> are <code>const</code>, if you don't want that, split your trait until we come up with something more fine grained. And all super traits are also required to have a <code>const</code> impl for the if there is a <code>const</code> impl for the trait itself.</p>
+</blockquote>
+<p>I think this is exactly right.</p>
+<blockquote>
+<p>As a next step we add a fourth kind of generic parameter: <code>constness</code>.</p>
+</blockquote>
+<p>I'm not qualified to weigh in on this part, since I didn't do the impl work and this is more of an implementation detail AFAICS</p>
+
+
+
+<a name="270075962"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/complexity%20of%20constness%20in%20the%20type%20system/near/270075962" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Michael Goulet (compiler-errors) <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/complexity.20of.20constness.20in.20the.20type.20system.html#270075962">(Jan 31 2022 at 18:01)</a>:</h4>
+<blockquote>
+<p>As a next step we add a fourth kind of generic parameter: <code>constness</code>. All <code>const trait Foo</code> implicitly get that parameter. In rustc we remove the <code>constness</code> field from TraitPredicate and instead rely on generic parameter substitutions to replace constness parameters.</p>
+</blockquote>
+<p>Would we also be removing constness from <code>ParamEnv</code>? I think that would simplify existing logic where we have to remap <code>ParamEnv</code>s from const to non-const and vice versa depending on environment and nested obligations (e.g. if we ever want to add <code>T: const Trait</code> bounds on non-const impls) (also e.g. <a href="https://github.com/rust-lang/rust/blob/24b8bb13bff98bb747cd403b86596af43aceee78/compiler/rustc_trait_selection/src/traits/select/confirmation.rs#L58">this hack in confirmation</a>).</p>
+
+
+
+<a name="270110186"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/complexity%20of%20constness%20in%20the%20type%20system/near/270110186" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/complexity.20of.20constness.20in.20the.20type.20system.html#270110186">(Jan 31 2022 at 21:45)</a>:</h4>
+<p>That's what I'm hoping we can solve with this, yes</p>
+
+
+
+<a name="271527736"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/146212-t-compiler/const-eval/topic/complexity%20of%20constness%20in%20the%20type%20system/near/271527736" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/146212-t-compiler/const-eval/topic/complexity.20of.20constness.20in.20the.20type.20system.html#271527736">(Feb 11 2022 at 03:42)</a>:</h4>
+<p>From my perspective as someone who has been cutting their hands on various bleeding edges of constness, this seems more correct than "anything can be declared const impl'd", since a trait may model a "fundamentally dynamic" behavior. It would have been nice if it was actually the default and trait declarations and implementations would opt out buuuut lol maybe for the next language.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

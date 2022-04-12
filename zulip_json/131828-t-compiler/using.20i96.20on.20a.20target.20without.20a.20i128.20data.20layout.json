@@ -1,0 +1,620 @@
+[
+    {
+        "content": "<p>Hello!</p>\n<p>I am currently working on a rustc backend for nvvm ir, which is a subset of LLVM IR (llvm ir with restrictions) used for compiling stuff to cuda kernels using nvidia's libnvvm. Im close to it working, but i am running into an issue im uncertain on how to resolve. the nvptx data layout:</p>\n<div class=\"codehilite\"><pre><span></span><code>e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\n</code></pre></div>\n<p>Does not specify i128, which is a big problem. I got around this for <code>i128</code> by using <code>&lt;2 x i64&gt;</code> which kind of worked. But annoyingly enough, rust also generates <code>i96</code> for functions such as <code>_ZN4core7unicode12unicode_data11conversions8to_lower17h7496522699630263E</code>. This causes libnvvm to segfault or to yield an error because LLVM's behavior for integers is to use the next highest data layout integer, which in this case is none because <code>i128</code> is not specified. </p>\n<p>I was wondering if anyone knew of an easy-ish way of solving this. Is there maybe an LLVM pass for transforming integers such as this? I filed a bug with NVIDIA for i128 and they stated they are working on i128 support for cuda 11.5 and full support for cuda 12, but it will be a while before thats released.</p>",
+        "id": 250289419,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629660621
+    },
+    {
+        "content": "<p>This issue yielded some insights <a href=\"https://github.com/rust-lang/rust/issues/38824\">https://github.com/rust-lang/rust/issues/38824</a><br>\nIm thinking i could maybe write a function pass to convert ints over <code>i64</code> to vectors and then back in the body, but that feels hacky and i dont have much experience with llvm passes.</p>",
+        "id": 250289512,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629660771
+    },
+    {
+        "content": "<p>i96 is probably created by the abi calculation code. Search for cast_to in rustc_target/src/abi/call.</p>",
+        "id": 250289637,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629660939
+    },
+    {
+        "content": "<p>there are no results of it in nvptx</p>",
+        "id": 250289720,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661063
+    },
+    {
+        "content": "<p>right, that code is for <code>extern \"C\"</code>. the rust abi calculation is in rustc_middle/src/ty/layout.rs. this happens at <a href=\"https://github.com/rust-lang/rust/blob/7481e6d1a415853a96dcec11a052caaa02859b5a/compiler/rustc_middle/src/ty/layout.rs#L3015\">https://github.com/rust-lang/rust/blob/7481e6d1a415853a96dcec11a052caaa02859b5a/compiler/rustc_middle/src/ty/layout.rs#L3015</a></p>",
+        "id": 250289847,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661205
+    },
+    {
+        "content": "<p>oh i see</p>",
+        "id": 250289857,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661226
+    },
+    {
+        "content": "<p>yeah in nvptx, there are no calling conventions, everything uses the ptx calling convention</p>",
+        "id": 250289862,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661242
+    },
+    {
+        "content": "<p>you could make <code>max_by_val_size</code> by equal to 1 times the pointer size instead of 2 times.</p>",
+        "id": 250289884,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661284
+    },
+    {
+        "content": "<p>inside my codegen?</p>",
+        "id": 250289933,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661328
+    },
+    {
+        "content": "<p>nvm i am blind</p>",
+        "id": 250289941,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661359
+    },
+    {
+        "content": "<p>Hmm i don't think patching rustc is really an option here, i think i would unintentionally break either the ptx backend or something else</p>",
+        "id": 250289948,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661383
+    },
+    {
+        "content": "<p>there are big differences between the llvm ptx backend and libnvvm</p>",
+        "id": 250289953,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661397
+    },
+    {
+        "content": "<p>the altermative would be to patch cg_llvm to treat every PassMode::Cast as PassMode::Indirect I think.</p>",
+        "id": 250290018,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661448
+    },
+    {
+        "content": "<p>i am not using cg_llvm, this is a completely separate codegen, albeit it takes a lot from cg_llvm</p>",
+        "id": 250290024,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661477
+    },
+    {
+        "content": "<p>in any case changing <code>max_by_val_size</code> will at most cause a perf regression afaict.</p>",
+        "id": 250290031,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661489
+    },
+    {
+        "content": "<p>eh i dont think it makes a difference in cuda kernels</p>",
+        "id": 250290043,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661511
+    },
+    {
+        "content": "<blockquote>\n<p>i am not using cg_llvm, this is a completely separate codegen, albeit it takes a lot from cg_llvm</p>\n</blockquote>\n<p>Yeah, I mean your codegen.</p>",
+        "id": 250290044,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661514
+    },
+    {
+        "content": "<p>ah ok</p>",
+        "id": 250290052,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661525
+    },
+    {
+        "content": "<p>abi code scares me</p>",
+        "id": 250290060,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661535
+    },
+    {
+        "content": "<p>understandable</p>",
+        "id": 250290071,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661547
+    },
+    {
+        "content": "<p>whats the diff between Cast and Indirect?</p>",
+        "id": 250290115,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661573
+    },
+    {
+        "content": "<p>I had to spent quite a lot of time reading through it and refactoring it to make it more readable to implement the abi handling in cg_clif.</p>",
+        "id": 250290119,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661587
+    },
+    {
+        "content": "<p>oof thats painful</p>",
+        "id": 250290123,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661599
+    },
+    {
+        "content": "<p>i mostly copy and pasted the abi code from cg_llvm, it surprisingly works so im not complaining</p>",
+        "id": 250290150,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661669
+    },
+    {
+        "content": "<p>The difference between Cast and Indirect is that Cast will take the raw bytes of the argument amd stuff them in one or more registers. Indirect will cause it to be passed either as a pointer or at a specific stack offset depending on the <code>on_stack</code> argument.</p>",
+        "id": 250290151,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661671
+    },
+    {
+        "content": "<p>hmm yeah but the funny thing is cuda doesnt really have a stack <span aria-label=\"laughing\" class=\"emoji emoji-1f606\" role=\"img\" title=\"laughing\">:laughing:</span></p>",
+        "id": 250290204,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661708
+    },
+    {
+        "content": "<p>it has a lot of registers but everything not in registers is spilled to local memory</p>",
+        "id": 250290211,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661722
+    },
+    {
+        "content": "<p>how would i go about treating casts as indirect? from what im seeing i cant really transform cast to indirect since it doesnt have the same data</p>",
+        "id": 250290290,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661807
+    },
+    {
+        "content": "<p>actually it seems doable</p>",
+        "id": 250290310,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661854
+    },
+    {
+        "content": "<p>If there is a match on the pass mode take the <code>Cast</code> match arm and handle it as if it is <code>Indirect</code> with <code>on_stack</code> set to false.</p>",
+        "id": 250290321,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661866
+    },
+    {
+        "content": "<p>i see</p>",
+        "id": 250290327,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661875
+    },
+    {
+        "content": "<p>store has some scary code for cast but im guessing i can just delete that</p>",
+        "id": 250290332,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661888
+    },
+    {
+        "content": "<p>Yeah, that is the code to handle the stuffing of the raw bytes into one or more registers. It is ugly.</p>",
+        "id": 250290381,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661925
+    },
+    {
+        "content": "<p>makes sense</p>",
+        "id": 250290387,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661941
+    },
+    {
+        "content": "<p>is PassMode::Cast used for anything else or is it just this kind of thing?</p>",
+        "id": 250290395,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661961
+    },
+    {
+        "content": "<p>Just this.</p>",
+        "id": 250290399,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629661970
+    },
+    {
+        "content": "<p>oh that should work fine then</p>",
+        "id": 250290403,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629661977
+    },
+    {
+        "content": "<p>although debugging this if it doesnt work will be interesting because gpus dont really segfault</p>",
+        "id": 250290412,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662025
+    },
+    {
+        "content": "<p>had to make an entire script to isolate every function in the core llvm ir file using <code>llvm-extract</code> and try to compile every individual function because libnvvm loves to segfault instead of yielding useful errors, pain</p>",
+        "id": 250290502,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662162
+    },
+    {
+        "content": "<p>Can you compile it with assertions enabled or is it closed-source?</p>",
+        "id": 250290540,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662206
+    },
+    {
+        "content": "<p>im running it with llvm 7 compiled with assertions</p>",
+        "id": 250290549,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662225
+    },
+    {
+        "content": "<p>its closed source for now while i work on it but it will be open source once its usable</p>",
+        "id": 250290553,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662243
+    },
+    {
+        "content": "<p>I mean is libnvvm closed-source?</p>",
+        "id": 250290562,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662271
+    },
+    {
+        "content": "<p>oh, yep</p>",
+        "id": 250290566,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662277
+    },
+    {
+        "content": "<p><span aria-label=\"cry\" class=\"emoji emoji-1f622\" role=\"img\" title=\"cry\">:cry:</span></p>",
+        "id": 250290603,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662285
+    },
+    {
+        "content": "<p>now you know my pain <span aria-label=\"upside down\" class=\"emoji emoji-1f643\" role=\"img\" title=\"upside down\">:upside_down:</span></p>",
+        "id": 250290605,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662293
+    },
+    {
+        "content": "<p>LLVM loves to SIGSEGV when assertions  would otherwise fail.</p>",
+        "id": 250290609,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662313
+    },
+    {
+        "content": "<p>its the library that nvcc (the cuda compiler) uses to compile gpu kernels to ptx, it contains some proprietary opts so its closed source</p>",
+        "id": 250290612,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662330
+    },
+    {
+        "content": "<p>which is why im writing a backend for it instead of just trying to use the llvm ptx backend (which doesnt even work on windows because of dll stuff :( )</p>",
+        "id": 250290625,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662353
+    },
+    {
+        "content": "<p>it also allows for special treatment of things at a codegen level which is helpful</p>",
+        "id": 250290639,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662397
+    },
+    {
+        "content": "<p>Stallman should have ready his email. Then LLVM would have been part of GCC and thus GPL licensed...</p>",
+        "id": 250290699,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662419
+    },
+    {
+        "content": "<p>haha</p>",
+        "id": 250290717,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662431
+    },
+    {
+        "content": "<p>you have no idea how much pain ive been through with this codegen...</p>",
+        "id": 250290735,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662464
+    },
+    {
+        "content": "<p>i initially used llvm 12 when i realized nvvm only works with llvm 7 bytecode</p>",
+        "id": 250290742,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662479
+    },
+    {
+        "content": "<p>then there was all of the debugging for i128, transformations, adding libdevice intrinsics, fixing segfaults, etc</p>",
+        "id": 250290754,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662498
+    },
+    {
+        "content": "<p>compiler_builtins finally compiles, now i need to fix this i96 thing and it <em>should</em> compile</p>",
+        "id": 250290768,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662520
+    },
+    {
+        "content": "<p>How much optimizations are missed due to using LLVM 7 instead of 12?</p>",
+        "id": 250290810,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662539
+    },
+    {
+        "content": "<p>Depending on how good those nvidia optimizations are maybe it would actually be slower.</p>",
+        "id": 250290828,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662593
+    },
+    {
+        "content": "<p>Not much i dont think</p>",
+        "id": 250290829,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662599
+    },
+    {
+        "content": "<p>the gpu optimizations should make up for it</p>",
+        "id": 250290835,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662618
+    },
+    {
+        "content": "<p>considering cuda uses it, nvidia is very inclined to make stuff go fast</p>",
+        "id": 250290888,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662671
+    },
+    {
+        "content": "<p>it should be easy to bench either ways</p>",
+        "id": 250290904,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662708
+    },
+    {
+        "content": "<p><em>Just</em> get an AMD GPU. At least they upstream their stuff instead of keeping it closed sourve.</p>",
+        "id": 250290923,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662743
+    },
+    {
+        "content": "<p>and using a custom codegen, i can make special attributes for gpu hints which should improve performance on select kernels. It also makes shared memory implementation easier</p>",
+        "id": 250290924,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662746
+    },
+    {
+        "content": "<p>yeah but CUDA is <em>the</em> system for gpu computing, i use it at the research lab i work at, its fast, has plenty of libraries, and almost all tools support it</p>",
+        "id": 250290975,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662791
+    },
+    {
+        "content": "<p>I know. AMD has so much opportunity, yet somehow at least to me they seem to be focused just on gaming.</p>",
+        "id": 250291002,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662861
+    },
+    {
+        "content": "<p>i wish nvidia would open source nvcc fully, but i get why they wouldnt want to, because nvidia dominates the gpu computing/scientific computing fields by a gigantic amount</p>",
+        "id": 250291005,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662866
+    },
+    {
+        "content": "<p>yeah amd is a great choice if you just do gaming, but if you do 3d rendering and computing like me, nvidia is just the better choice for now</p>",
+        "id": 250291059,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662901
+    },
+    {
+        "content": "<p>especially rendering since they have rtx and optix, plus, blender's cycles X is dropping opencl support</p>",
+        "id": 250291070,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629662942
+    },
+    {
+        "content": "<p>Hopefully they will either get Vulkan compute or HSA support soonish.</p>",
+        "id": 250291093,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1629662999
+    },
+    {
+        "content": "<p>anyways id love for rust to be used more for cuda, right now its super painful so my goal is to make rust more viable and hopefully make nvidia notice the benefits rust would have for gpu kernels, especially for safety and maybe even performance</p>",
+        "id": 250291132,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629663007
+    },
+    {
+        "content": "<p>the thing with vulkan and using spirv is that it just doesnt match cuda performance usually, also, launching a cuda kernel is much easier than launching vulkan. Also, cuda has amazing profilers like nsight, as well as more features such as async memory copies and graphs</p>",
+        "id": 250291164,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629663094
+    },
+    {
+        "content": "<p>im excited for spirv computing, but for now it seems like computing is just pushed to the side and its mostly just for shaders</p>",
+        "id": 250291230,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629663184
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> hmm i changed cast to be treated as indirect, but now its trying to do some... odd things with bitcasts</p>\n<div class=\"codehilite\"><pre><span></span><code>(val, dest_ty) = (\n    ({ [0 x i64], i64, [0 x i16], i16, [0 x i8], i8, [5 x i8] }* %0),\n    float,\n)\n</code></pre></div>",
+        "id": 250294199,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629668270
+    },
+    {
+        "content": "<p>its trying to call <code>i32 @\"_ZN4core3f3221_$LT$impl$u20$f32$GT$7to_bits17h09dd8e2a9b5ccbcbE\"(float)</code> and it errors at </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">casted_args</span>: <span class=\"nb\">Vec</span><span class=\"o\">&lt;</span><span class=\"n\">_</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">param_tys</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">.</span><span class=\"n\">into_iter</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">.</span><span class=\"n\">zip</span><span class=\"p\">(</span><span class=\"n\">args</span><span class=\"p\">.</span><span class=\"n\">iter</span><span class=\"p\">())</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">.</span><span class=\"n\">enumerate</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">.</span><span class=\"n\">map</span><span class=\"p\">(</span><span class=\"o\">|</span><span class=\"p\">(</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">expected_ty</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">actual_val</span><span class=\"p\">))</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">actual_ty</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">val_ty</span><span class=\"p\">(</span><span class=\"n\">actual_val</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">expected_ty</span><span class=\"w\"> </span><span class=\"o\">!=</span><span class=\"w\"> </span><span class=\"n\">actual_ty</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">bitcast</span><span class=\"p\">(</span><span class=\"n\">actual_val</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">expected_ty</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"n\">actual_val</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">})</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">.</span><span class=\"n\">collect</span><span class=\"p\">();</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 250294376,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629668536
+    },
+    {
+        "content": "<p>for some reason its making a really odd struct type for this and trying to pass it off as a float</p>",
+        "id": 250294409,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629668601
+    },
+    {
+        "content": "<p>i think perhaps i need to only treat PassMode::Cast s that are for <code>i96</code></p>",
+        "id": 250294633,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629668949
+    },
+    {
+        "content": "<p>then again i dont see why it would be trying to pass a 40 bit aggregate off as a float</p>",
+        "id": 250294885,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629669339
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"276242\">@Riccardo D'Ambrosio</span> data layout is not required to specify the details for every possible type.</p>",
+        "id": 250297036,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629672393
+    },
+    {
+        "content": "<p>the way these are defined, there's a meaningful default for every bit width and data layouts are only required for the situtations where the defaults don't work right.</p>",
+        "id": 250297067,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629672427
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span> hmm well the answer i got by nvidia on why i96 and i128 segfaulted is that the nvptx data layout does not specify i128</p>",
+        "id": 250297188,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629672615
+    },
+    {
+        "content": "<p>Segfaulted at what stage? runtime?</p>",
+        "id": 250297274,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629672832
+    },
+    {
+        "content": "<p><a href=\"https://llvm.org/docs/LangRef.html#data-layout\">Data layout</a> portion on llvm's langref.</p>",
+        "id": 250297322,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629672893
+    },
+    {
+        "content": "<p>segfaulted at compile time</p>",
+        "id": 250297330,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629672907
+    },
+    {
+        "content": "<p>after all the bytecode was done and fed to libnvvm and called compile</p>",
+        "id": 250297336,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629672924
+    },
+    {
+        "content": "<p>so that just sounds like a bug in libnvvm in case it happens to consume LLVM-IR directly.</p>",
+        "id": 250297383,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629672991
+    },
+    {
+        "content": "<p>yeah it is a bug in libnvvm, i already filed a bug for it and they said they are working on it, but id rather not wait on nvidia, waiting on large corporations usually ends badly</p>",
+        "id": 250297396,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673042
+    },
+    {
+        "content": "<p>I guess it could be the case that libnvvm adds additional requirements to the IR passed to it over what LLVM requires, but then its no longer LLVM-compatible.</p>",
+        "id": 250297397,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629673043
+    },
+    {
+        "content": "<p>it absolutely does</p>",
+        "id": 250297400,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673056
+    },
+    {
+        "content": "<p>NVVM IR is a subset of llvm ir</p>",
+        "id": 250297402,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673060
+    },
+    {
+        "content": "<p><a href=\"https://docs.nvidia.com/cuda/nvvm-ir-spec/index.html\">https://docs.nvidia.com/cuda/nvvm-ir-spec/index.html</a></p>",
+        "id": 250297405,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673066
+    },
+    {
+        "content": "<p>all NVVM IR should be valid LLVM IR</p>",
+        "id": 250297454,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673104
+    },
+    {
+        "content": "<p>which is also why im not just using cg_llvm, because it makes incompatible nvvm ir</p>",
+        "id": 250297467,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673137
+    },
+    {
+        "content": "<p>anyways, any clue why rustc is trying to pass off that aggregate as a float? o.O</p>",
+        "id": 250297477,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673162
+    },
+    {
+        "content": "<p>I'd guess there's a mismatch of indices somewhere that happens because some other part of the compiler still thinks that particular thing should be passed around some other way.</p>",
+        "id": 250297629,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629673312
+    },
+    {
+        "content": "<p><code>i32 @\"_ZN4core3f3221_$LT$impl$u20$f32$GT$7to_bits17h09dd8e2a9b5ccbcbE\"(float)</code> looks like a correct signature though.</p>",
+        "id": 250297671,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629673349
+    },
+    {
+        "content": "<p>so I'd suspect one layer above – i.e. the arguments of the calling function perhaps are handled wrong.</p>",
+        "id": 250297731,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629673461
+    },
+    {
+        "content": "<p>yeah it is</p>",
+        "id": 250297736,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673474
+    },
+    {
+        "content": "<p>its trying to call <code>core[2fcb]::f32::{impl#0}::to_bits</code></p>",
+        "id": 250297753,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673511
+    },
+    {
+        "content": "<p>and i <em>think</em> its when codegenning this function <code>_ZN59_$LT$f32$u20$as$u20$core$$num$$dec2flt$$rawfp$$RawFloat$GT$14integer_decode17h31743191f0f0e4a9E</code></p>",
+        "id": 250297767,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673559
+    },
+    {
+        "content": "<p>the weird aggregate comes from <code>backend_type</code></p>",
+        "id": 250297821,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673655
+    },
+    {
+        "content": "<p>which just gets the llvm type of <code>TyAndLayout</code></p>",
+        "id": 250297835,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629673682
+    },
+    {
+        "content": "<p>Yep it appears like treating PassMode::Cast as PassMode::Indirect does not work, i even tried only doing this for integer casts over 64 bits, but nothing seems to work, its still sprouting wrong casts</p>",
+        "id": 250313962,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1629698628
+    }
+]

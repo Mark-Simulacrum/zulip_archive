@@ -1,0 +1,260 @@
+[
+    {
+        "content": "<p>Hey everyone! I am interesting in implementing better support for crash dump debugging of async programs, with the goal of ideally providing something similar to what <span class=\"user-mention\" data-user-id=\"421986\">@eholk</span> described in his <a href=\"https://github.com/rust-lang/wg-async-foundations/pull/229\">shiny future vision doc</a> on the topic. And I was wondering I anyone else is also looking into this <code>:)</code></p>\n<p>I have looked exclusively at <code>async-std</code> so far, trying to get a feel of what would need to be done. (Thanks, <span class=\"user-mention\" data-user-id=\"211722\">@Yoshua Wuyts</span>, for getting me started!). My findings so far are:</p>\n<ul>\n<li>Async runtimes tend to be very complex and without some explicit support from the runtime itself it will be hard to write debugger extensions that can extract useful information (e.g. in <code>async-std</code> a task's name, id, and local variables are injected into a wrapping future around the future to be executed and it seems to impossible to get them back out again because we lose too much type information along the way). </li>\n<li>Crash dump debugging can only rely on things that are in the process's memory at the time of the crash. One might not have access to logs and such. </li>\n<li>Because we have to work with the actual runtime in-memory data structures, any debugger extension is likely to depend on implementation details of the runtime. An extension that works for one version of the runtime is unlikely to work for the next version of the same runtime. </li>\n<li>Because we are working with runtime data structures, a debugger extension that works for crash dumps should work just as well with a running process.</li>\n<li>There seems to be at least some overlap with what TurboWish / tokio-console is trying to achieve, so maybe there are synergies? At the very least when it comes to finding useful abstractions for describing the state of an async program.</li>\n<li>Debuginfo for optimized Rust programs might not be 100% reliable, especially when it comes to local variables and scoping. Debuginfo describing global variables, thread-local variables, and types, on the other hand, should be pretty reliable even for optimized code.</li>\n<li>We probably cannot rely on being able to call helper functions/methods in the debuggee.</li>\n</ul>\n<p>Given the points above it seems to me that it might make sense to try and reduce the dependence on low-level implementation details of async runtimes. Otherwise the initial implementation- and subsequent maintenance-cost of debugger extensions and other tooling might be prohibitively large, with the additional side effect of adding a lot of friction to changing and refactoring a given runtime's implementation.</p>\n<p>Some preliminary thoughts on how to achieve this:</p>\n<ul>\n<li>Come up with guidelines for framework authors on how to make their framework debugging friendly.</li>\n<li>Implement a support library that provides easy to use callbacks (e.g. <code>task_created</code>, <code>task_blocked_on</code>, <code>resource_created</code>, etc) that frameworks can use and that will maintain a simplified, abstract model of the program's state in memory, in a format that can easily and reliably be inspected by a debugger.</li>\n<li>Provide a support library with common primitives that can be used directly in the implementation of an async framework and gives debugger extensions just enough well-known parts to work with. </li>\n</ul>\n<p>I'd be really interested in what others think about this topic! </p>\n<p>cc <span class=\"user-mention\" data-user-id=\"116883\">@tmandry</span> <span class=\"user-mention\" data-user-id=\"116083\">@pnkfelix</span></p>",
+        "id": 250118393,
+        "sender_full_name": "mw",
+        "timestamp": 1629466740
+    },
+    {
+        "content": "<blockquote>\n<p>Debuginfo for optimized Rust programs might not be 100% reliable, especially when it comes to local variables and scoping. Debuginfo describing global variables, thread-local variables, and types, on the other hand, should be pretty reliable even for optimized code.</p>\n</blockquote>\n<p>I think this is not a problem for our use case; what we mostly want is to be able to crawl the data structures of the executor itself and the types of the tasks it allocates.</p>\n<blockquote>\n<p>We probably cannot rely on being able to call helper functions/methods in the debuggee.</p>\n</blockquote>\n<p>This was actually a question of mine, what are the constraints here?</p>",
+        "id": 250139215,
+        "sender_full_name": "tmandry",
+        "timestamp": 1629476109
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124287\">mw</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250118393\">said</a>:</p>\n<blockquote>\n<ul>\n<li>Implement a support library that provides easy to use callbacks (e.g. <code>task_created</code>, <code>task_blocked_on</code>, <code>resource_created</code>, etc) that frameworks can use and that will maintain a simplified, abstract model of the program's state in memory, in a format that can easily and reliably be inspected by a debugger.</li>\n</ul>\n</blockquote>\n<p>That's an interesting idea, and given the constraints you set (particularly not being able to call functions) I think it's a promising option. I don't want to dictate how executors organize their internal state.</p>\n<p>One detail: For this to be low overhead (e.g. not adding ref counts everywhere) we might have to use raw pointers, which itself isn't unsafe, but are there any cases where we need to dereference those in-process and this would potentially lead to UB? (This wouldn't be a deal killer, we'd just make the interface unsafe)</p>",
+        "id": 250139862,
+        "sender_full_name": "tmandry",
+        "timestamp": 1629476482
+    },
+    {
+        "content": "<p>I'm really glad someone else is thinking about this :)</p>",
+        "id": 250140088,
+        "sender_full_name": "tmandry",
+        "timestamp": 1629476589
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124287\">mw</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250118393\">said</a>:</p>\n<blockquote>\n<ul>\n<li>Come up with guidelines for framework authors on how to make their framework debugging friendly.</li>\n</ul>\n</blockquote>\n<p>This was kind of what I had in mind when writing the shiny future story. That said, I have no idea what these guidelines would look like. </p>\n<p>I like the idea of a set of callbacks that we can use to build a simplified in-memory data structure that debuggers can use. It'd be nice if we could include type info in here somehow too (maybe <code>Any</code> would work?) so that the debugger would be able to get from an abstract debugger task to the actual runtime task in case someone wants to inspect the specifics of a certain executor.</p>",
+        "id": 250153296,
+        "sender_full_name": "eholk",
+        "timestamp": 1629483125
+    },
+    {
+        "content": "<p>Assuming we can't execute code in process (which as far as I know is true), I wonder if we could do something like include a wasm module in the binary somewhere that has well define entry points and knows how to inspect the important parts.</p>",
+        "id": 250153422,
+        "sender_full_name": "eholk",
+        "timestamp": 1629483205
+    },
+    {
+        "content": "<p>Also, one nice thing about the callbacks and in-memory summary is that with a minidump we could make sure that chunk of memory gets included to make it more likely we can successfully debug it.</p>",
+        "id": 250153516,
+        "sender_full_name": "eholk",
+        "timestamp": 1629483244
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124287\">@mw</span> here is a silly quesiton for you</p>",
+        "id": 250154753,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629483848
+    },
+    {
+        "content": "<p>I am looking at the \"roadmap\" and revamping things</p>",
+        "id": 250154777,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629483857
+    },
+    {
+        "content": "<p>I would be happy to add an item about this -- but do you feel it is <em>tooling</em> or <em>polish</em>?</p>",
+        "id": 250154791,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629483868
+    },
+    {
+        "content": "<p>I think the former</p>",
+        "id": 250154792,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629483870
+    },
+    {
+        "content": "<p>I'm not @mw, but it sounds more like tooling to me, even though currently tooling seems to be listed under polish.</p>",
+        "id": 250155140,
+        "sender_full_name": "eholk",
+        "timestamp": 1629484051
+    },
+    {
+        "content": "<blockquote>\n<p>It'd be nice if we could include type info in here somehow too (maybe Any would work?)</p>\n</blockquote>\n<p>Yes, I think that's vital. A pointer to the vtable should hopefully be enough to recover debuginfo for the type.</p>",
+        "id": 250155698,
+        "sender_full_name": "tmandry",
+        "timestamp": 1629484322
+    },
+    {
+        "content": "<p>Yes, \"tooling\" sounds right to me</p>",
+        "id": 250322658,
+        "sender_full_name": "mw",
+        "timestamp": 1629706807
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116883\">@tmandry</span> </p>\n<blockquote>\n<p>This was actually a question of mine, what are the constraints here?</p>\n</blockquote>\n<p>I need to do more research there myself. Maybe it would be possible to call, for example, side-effect-free non-allocating functions with C ABI or something. I imagine this to be very platform- and debugger-specific and we'll need to support exotic cases like debugging core dumps from one target platform on another platform.</p>",
+        "id": 250322984,
+        "sender_full_name": "mw",
+        "timestamp": 1629707031
+    },
+    {
+        "content": "<p>I just tried calling a simple C function in the debuggee in GDB and LLDB on Linux and in WinDbg and Visual Studio on Windows. All of them gave me an error message that that isn't supported without a running process. I also did an internet search but I did not find the topic even mentioned. So I'm pretty sure we can't rely on that being available.</p>",
+        "id": 250349923,
+        "sender_full_name": "mw",
+        "timestamp": 1629724688
+    },
+    {
+        "content": "<blockquote>\n<p>One detail: For this to be low overhead (e.g. not adding ref counts everywhere) we might have to use raw pointers, which itself isn't unsafe, but are there any cases where we need to dereference those in-process and this would potentially lead to UB? (This wouldn't be a deal killer, we'd just make the interface unsafe)</p>\n</blockquote>\n<p>I think this is something that we can only find out by implementing prototypes. My naïve hope is that most of the synchronization and resource management would basically fall out of the runtime's own synchronization/resource management. But that's probably too much to hope for <code>:)</code></p>",
+        "id": 250354681,
+        "sender_full_name": "mw",
+        "timestamp": 1629726912
+    },
+    {
+        "content": "<blockquote>\n<p>This was kind of what I had in mind when writing the shiny future story. That said, I have no idea what these guidelines would look like.</p>\n</blockquote>\n<p>Some points that came to mind while looking at <code>async-std</code>:</p>\n<ul>\n<li>Use named types with named fields instead e.g. <code>async move { ... }</code> for injecting interesting information about a task (so that a debugger can reliably decode runtime structures.</li>\n<li>Provide global variables to executor state so that debuggers have a reliable entry point to global executor state.</li>\n<li>Write a good high-level overview of how the runtime works. E.g. what executors are there? How are tasks implemented? Locks? I/O? etc.</li>\n</ul>\n<p>But even with all that available, it would still be a lot of work to write debugger extensions for every combination of runtime/debugger. We already have GDB, LLDB, WinDbg (and the shiny future mentioned <code>zxdb</code> at some point?) on the debugger side and at least async-std, Tokio, and smol (?) on the runtime side. Turning this from <code>N * M</code> into <code>N + M</code> implementation effort by having a common \"protocol\" seems like a good idea.</p>",
+        "id": 250356855,
+        "sender_full_name": "mw",
+        "timestamp": 1629727840
+    },
+    {
+        "content": "<blockquote>\n<p>and the shiny future mentioned <code>zxdb</code> at some point?</p>\n</blockquote>\n<p>Oh yeah, that's apparently the Fuchsia debugger. That was taken from an example <span class=\"user-mention\" data-user-id=\"116883\">@tmandry</span> shared with me.</p>",
+        "id": 250373576,
+        "sender_full_name": "eholk",
+        "timestamp": 1629735083
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124287\">mw</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250349923\">said</a>:</p>\n<blockquote>\n<p>I just tried calling a simple C function in the debuggee in GDB and LLDB on Linux and in WinDbg and Visual Studio on Windows. All of them gave me an error message that that isn't supported without a running process. I also did an internet search but I did not find the topic even mentioned. So I'm pretty sure we can't rely on that being available.</p>\n</blockquote>\n<p>This is interesting. I’ve had an interest in experimenting with adding some sort of checkpoint+resume facility to Rust (potentially only supported on some target archs+OS’es). And now I’m wondering what info is in a typical checkpoint that <em>isn’t</em> in a crashdump.</p>",
+        "id": 250378781,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1629737410
+    },
+    {
+        "content": "<p>Here we go: <a href=\"https://stackoverflow.com/questions/16047636/checkpoint-restart-using-core-dump-in-linux/16047837\">https://stackoverflow.com/questions/16047636/checkpoint-restart-using-core-dump-in-linux/16047837</a></p>",
+        "id": 250379081,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1629737544
+    },
+    {
+        "content": "<p>@mw there must be somebody at Microsoft who can tell us more about crashdump debugging and what is possible, at least for windbg/VS, no idea who of course :-)</p>",
+        "id": 250420627,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1629757870
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"256841\">@Nick Cameron</span> Yes, I've reached out to the WinDbg team. I've also asked on the GDB mailing list.</p>",
+        "id": 250479743,
+        "sender_full_name": "mw",
+        "timestamp": 1629809530
+    },
+    {
+        "content": "<p>But I think whatever approach we choose has to work on <em>all</em> debuggers we want to support, so we have to go for the lowest common denominator in terms of assumed debugger features.</p>",
+        "id": 250480287,
+        "sender_full_name": "mw",
+        "timestamp": 1629809801
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116083\">@pnkfelix</span>, out of interest: how does tokio-console integrate with the runtime? From <a href=\"https://github.com/tokio-rs/console\">https://github.com/tokio-rs/console</a>, it looks like it is getting its data by hooking into <code>tracing</code> events. What I can't quite tell is if these events are generated by the tokio runtime or at a higher level by the application.</p>",
+        "id": 250495488,
+        "sender_full_name": "mw",
+        "timestamp": 1629816350
+    },
+    {
+        "content": "<p>yes, it is based on <code>tracing</code> events that are emitted by the tokio runtime itself. Longer term we want the console to also support higher-level <code>tracing</code> events emitted by the application, to get domain-specific info, but we don’t have that yet.</p>",
+        "id": 250495795,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1629816466
+    },
+    {
+        "content": "<p>So e.g. to have the console provide info about the rayon runtime, we have to instrument rayon in a corresponding manner.</p>",
+        "id": 250495937,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1629816505
+    },
+    {
+        "content": "<p>(and same for async-std)</p>",
+        "id": 250495954,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1629816511
+    },
+    {
+        "content": "<p>Thanks! OK, so the tokio runtime will generate a tracing event whenever a task is created, scheduled, starts being blocked, etc? Does that cause noticeable overhead? Or are those events cheaply filtered out if nothing subscribes to them?</p>",
+        "id": 250501104,
+        "sender_full_name": "mw",
+        "timestamp": 1629818518
+    },
+    {
+        "content": "<p>\"But I think whatever approach we choose has to work on all debuggers we want to support, so we have to go for the lowest common denominator in terms of assumed debugger features.\" - I disagree with this - as long as there is graceful degradation, I think it's OK for some debuggers to have better support than others. In a way, that is true already - GDB works better than LLDB because someone happened to be able to implement better support there</p>",
+        "id": 250554046,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1629841751
+    },
+    {
+        "content": "<p>Should we merge the stories about this, <a href=\"https://github.com/rust-lang/wg-async-foundations/issues/228\">wg-async-foundations#228</a> and <a href=\"https://github.com/rust-lang/wg-async-foundations/issues/229\">wg-async-foundations#229</a>?</p>",
+        "id": 250580072,
+        "sender_full_name": "tmandry",
+        "timestamp": 1629867255
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"256841\">Nick Cameron</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250554046\">said</a>:</p>\n<blockquote>\n<p>I disagree with this - as long as there is graceful degradation, I think it's OK for some debuggers to have better support than others. In a way, that is true already - GDB works better than LLDB because someone happened to be able to implement better support there</p>\n</blockquote>\n<p>In general I agree. However, my thinking is that</p>\n<ul>\n<li>there is some basic functionality (like listing all tasks and what they are doing) that we want to have everywhere</li>\n<li>providing that basic functionality already requires us to solve most (or even all) of the hard problems (i.e. navigating the complex internal data structures of a given runtime)</li>\n<li>so there probably won't be a real benefit in requiring async runtimes to implement and maintain additional infrastructure on their side.</li>\n</ul>\n<p>Of course, these assumptions might change as we learn more about the problem. But right now it looks like no debugger has support for code execution in crash dumps anyway.</p>",
+        "id": 250597068,
+        "sender_full_name": "mw",
+        "timestamp": 1629883571
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116883\">tmandry</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250580072\">said</a>:</p>\n<blockquote>\n<p>Should we merge the stories about this, <a href=\"https://github.com/rust-lang/wg-async-foundations/issues/228\">wg-async-foundations#228</a> and <a href=\"https://github.com/rust-lang/wg-async-foundations/issues/229\">wg-async-foundations#229</a>?</p>\n</blockquote>\n<p>I'd say go ahead and merge it. For the open questions, I'd rather update them later after we have time to get some more experience.</p>",
+        "id": 250643020,
+        "sender_full_name": "eholk",
+        "timestamp": 1629908495
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124287\">mw</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250501104\">said</a>:</p>\n<blockquote>\n<p>Thanks! OK, so the tokio runtime will generate a tracing event whenever a task is created, scheduled, starts being blocked, etc? Does that cause noticeable overhead? Or are those events cheaply filtered out if nothing subscribes to them?</p>\n</blockquote>\n<p>The tracing architecture is meant to cheaply filter out the events. However, I don’t know if the <em>current</em> version is optimal on that axis. More specifically, I know the tracing designers are considering redoing the low-level design in order to reduce overhead.</p>",
+        "id": 250664216,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1629917657
+    },
+    {
+        "content": "<p>Having said that, I think the current overhead is reasonable?</p>",
+        "id": 250664259,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1629917673
+    },
+    {
+        "content": "<p>but to be honest I should have a better answer there than “I think\"</p>",
+        "id": 250664305,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1629917690
+    },
+    {
+        "content": "<p>(like, hard numbers re overhead)</p>",
+        "id": 250664338,
+        "sender_full_name": "pnkfelix",
+        "timestamp": 1629917699
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124287\">@mw</span> you asked what I meant by logical stack trace, I'll post my mockup here for further discussion. Something like</p>\n<div class=\"codehilite\"><pre><span></span><code>Task 123\n- currently: async fn foo() in foo.rs:43\n- awaiting : async fn bar() in bar.rs:89\n- awaiting : async fn baz() in baz.rs:23\n- awaiting : Join on the following futures:\n  - async fn fee()\n    - awaiting: std::io::AsyncWriteFut { fd: 42 (/dev/null) }\n  - async fn foe()\n  - async fn fum()\n</code></pre></div>\n<p>In particular we should be able to see this while the task is not being polled, i.e. none of its code is on the stack.</p>",
+        "id": 250864636,
+        "sender_full_name": "tmandry",
+        "timestamp": 1630027148
+    },
+    {
+        "content": "<p>There's probably a better name for this</p>",
+        "id": 250864674,
+        "sender_full_name": "tmandry",
+        "timestamp": 1630027195
+    },
+    {
+        "content": "<p>For one, this is really a tree of futures in general, not a stack.</p>",
+        "id": 250864735,
+        "sender_full_name": "tmandry",
+        "timestamp": 1630027220
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"421986\">eholk</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250643020\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"116883\">tmandry</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250580072\">said</a>:</p>\n<blockquote>\n<p>Should we merge the stories about this, <a href=\"https://github.com/rust-lang/wg-async-foundations/issues/228\">wg-async-foundations#228</a> and <a href=\"https://github.com/rust-lang/wg-async-foundations/issues/229\">wg-async-foundations#229</a>?</p>\n</blockquote>\n<p>I'd say go ahead and merge it. For the open questions, I'd rather update them later after we have time to get some more experience.</p>\n</blockquote>\n<p>done</p>",
+        "id": 250866842,
+        "sender_full_name": "tmandry",
+        "timestamp": 1630029258
+    },
+    {
+        "content": "<p>Thanks <span class=\"user-mention\" data-user-id=\"116883\">@tmandry</span>! Let me try to decode that to see if I understand:</p>\n<ul>\n<li><code>Task 123</code> is rooted in <code>foo()</code> (i.e. it was created by something like <code>task::spawn(foo())</code>)</li>\n<li><code>foo()</code> called <code>bar().await</code></li>\n<li><code>bar()</code> called <code>baz().await</code></li>\n<li><code>baz()</code> called something like <code>tokio::join!(fee(), foe(), fum())</code></li>\n<li><code>fee()</code> somehow created a <code>std::io::AsyncWriteFut</code> and did an <code>.await</code> on it.</li>\n</ul>\n<p>Is that correct? And it is a tree because things like <code>join!</code> and <code>select!</code>, which have multiple children, right?</p>",
+        "id": 250898562,
+        "sender_full_name": "mw",
+        "timestamp": 1630052220
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124287\">@mw</span> yep!</p>",
+        "id": 250961386,
+        "sender_full_name": "tmandry",
+        "timestamp": 1630083580
+    }
+]

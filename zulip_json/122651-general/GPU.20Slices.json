@@ -1,0 +1,452 @@
+[
+    {
+        "content": "<p>Hello!</p>\n<p>I am running into some issues which im not sure how to solve. As a background, <a href=\"https://docs.rs/cust/latest/cust/\">cust</a>(CUDA Driver API wrapper) previously used <code>DeviceSlice([T])</code> which was definitely unsound because the inner <code>[T]</code> is not dereferenceable on the CPU. But switching away from this and using a proper pointer and length yields some issues that are a bit unwanted. The major one is that now <code>DeviceSlice&lt;T&gt;</code> is not a DST, which means it does not behave like an actual slice, <code>from_raw_parts</code> yields a <code>DeviceSlice&lt;T&gt;</code> not a <code>&amp;DeviceSlice&lt;T&gt;</code> because it cannot return a temporary value. Slices can easily get around this because of pointer metadata, but i cannot do this on stable myself. This also means i cannot keep indexing for GPU slices, which is very very helpful. Because i cannot index and return a reference, or i'd be returning a temporary value.</p>\n<p>Anyone know of a possible fix for this kind of stuff?</p>",
+        "id": 268863936,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642781364
+    },
+    {
+        "content": "<p>well if it's not dereferenceable it can't be a slice, that's for sure<br>\nand a slice is basically the only dst that's even vaguely supported for newtyping, that's also true</p>\n<p>Could you show maybe a sample usage of how you might be using the GPU thing? I'm only familiar with <code>glMapBuffer</code> which does allow the creation of a normal slice once the buffer is mapped properly.</p>",
+        "id": 268868123,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1642783129
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224471\">@Lokathor</span> the device slice usually comes from a DeviceBuffer, such as:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">DeviceBuffer</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"mi\">5</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">20</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>This data is on the GPU, it is not dereferenceable on the CPU. However, it is sometimes helpful to copy into only a part of the slice, such as</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">data</span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"o\">..</span><span class=\"mi\">5</span><span class=\"p\">].</span><span class=\"n\">async_copy_to</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">stream</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 268872858,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642785280
+    },
+    {
+        "content": "<p>i mean for that you'd be best served by accepting some slightly different than normal syntax and just using a method instead of indexing notation</p>",
+        "id": 268873294,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1642785488
+    },
+    {
+        "content": "<p>yeah, i just wanted to maybe avoid that, but if its not possible ill just do that</p>",
+        "id": 268873330,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642785507
+    },
+    {
+        "content": "<p>technically you can tell cuda to map arbitrary memory as unified memory, which would make it dereferenceable on the cpu</p>",
+        "id": 268873382,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642785535
+    },
+    {
+        "content": "<p>but i assume this has a cost, especially since normal unified memory has a cost</p>",
+        "id": 268873422,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642785552
+    },
+    {
+        "content": "<p>When designing an API to work with volatile stuff I mostly ended up in the same boat. Normal Rust just isn't flexible enough to do this.</p>",
+        "id": 268873436,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1642785558
+    },
+    {
+        "content": "<p>i think the funniest part of this was the old struct (this is all from rustacuda, cust is a rustacuda fork with many changes) derived <code>Debug</code>, so if you tried to debug it it just segfaulted lol</p>",
+        "id": 268873760,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642785691
+    },
+    {
+        "content": "<p>You could do the bitvec trick and do <code>struct DeviceSlice([()])</code></p>",
+        "id": 268902278,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642798767
+    },
+    {
+        "content": "<p>I.e. <code>DeviceSlice</code> wraps a slice of zero-sized types</p>",
+        "id": 268902495,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642798838
+    },
+    {
+        "content": "<p>Since it's zero-sized it's allowed to point basically anywhere, doesn't have to be valid memory there</p>",
+        "id": 268902594,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642798883
+    },
+    {
+        "content": "<p>And it will also track the length</p>",
+        "id": 268902625,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642798904
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"306504\">Tavian Barnes</span> <a href=\"#narrow/stream/122651-general/topic/GPU.20Slices/near/268902594\">said</a>:</p>\n<blockquote>\n<p>Since it's zero-sized it's allowed to point basically anywhere, doesn't have to be valid memory there</p>\n</blockquote>\n<p>Though note that this way the pointer inside the reference will only be allowed to access the contents of <code>[()]</code>. I'm not sure how that interacts with GPU memory, but it's definitely not a good thing.</p>",
+        "id": 268909187,
+        "sender_full_name": "Giacomo Stevanato",
+        "timestamp": 1642802581
+    },
+    {
+        "content": "<p>yeah the allowed memory width is cut down if you make it a reference. that's also why we can't make an ffi compatible zero-terminated string type</p>",
+        "id": 268914889,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1642805948
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"338379\">@Giacomo Stevanato</span> Occasionally the slice must use the pointer to give it to the CUDA Driver API to issue memcpys, like allocating an intermediate vec, issuing a DtoH memcpy into the vec, then returning the vec</p>",
+        "id": 269032023,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642962492
+    },
+    {
+        "content": "<p>but you cannot directly read data from the pointer, it doesn't make sense, you can use the pointer to issue a GPU copy to the CPU then read the CPU memory, sure</p>",
+        "id": 269032037,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642962527
+    },
+    {
+        "content": "<p>But also, wouldn't i need phantom data to keep track of the actual type behind the slice? how do i do that if its a newtype of <code>[()]</code>?</p>",
+        "id": 269032059,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642962589
+    },
+    {
+        "content": "<p>for example</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">vec</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"fm\">vec!</span><span class=\"p\">[</span><span class=\"n\">T</span>::<span class=\"n\">default</span><span class=\"p\">();</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()];</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">copy_to</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">vec</span><span class=\"p\">)</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"nb\">Ok</span><span class=\"p\">(</span><span class=\"n\">vec</span><span class=\"p\">)</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 269032132,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642962655
+    },
+    {
+        "content": "<p>which then issues this call: </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">as_mut</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"fm\">assert!</span><span class=\"p\">(</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">(),</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"s\">\"destination and source slices have different lengths\"</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">size</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">mem</span>::<span class=\"n\">size_of</span>::<span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">size</span><span class=\"w\"> </span><span class=\"o\">!=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"n\">cuda</span>::<span class=\"n\">cuMemcpyDtoH_v2</span><span class=\"p\">(</span><span class=\"n\">val</span><span class=\"p\">.</span><span class=\"n\">as_mut_ptr</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">c_void</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">as_ptr</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"kt\">u64</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">size</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">.</span><span class=\"n\">to_result</span><span class=\"p\">()</span><span class=\"o\">?</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"nb\">Ok</span><span class=\"p\">(())</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 269032146,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642962682
+    },
+    {
+        "content": "<p>So basically, i need to be able to query the slice's pointer and length and make a new slice from an arbitrary pointer, thats my 2 restrictions</p>",
+        "id": 269032270,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642962863
+    },
+    {
+        "content": "<p>and know the type behind the slice</p>",
+        "id": 269032272,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642962867
+    },
+    {
+        "content": "<p>Oh bitvec also has phantom data along with the slice... cool</p>",
+        "id": 269032369,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642963010
+    },
+    {
+        "content": "<p>i might give it a try then</p>",
+        "id": 269032371,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642963016
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"338379\">Giacomo Stevanato</span> <a href=\"#narrow/stream/122651-general/topic/GPU.20Slices/near/268909187\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"306504\">Tavian Barnes</span> <a href=\"#narrow/stream/122651-general/topic/GPU.20Slices/near/268902594\">said</a>:</p>\n<blockquote>\n<p>Since it's zero-sized it's allowed to point basically anywhere, doesn't have to be valid memory there</p>\n</blockquote>\n<p>Though note that this way the pointer inside the reference will only be allowed to access the contents of <code>[()]</code>. I'm not sure how that interacts with GPU memory, but it's definitely not a good thing.</p>\n</blockquote>\n<p>Im not exactly sure what you mean, CUDA is usually 64 bit for the GPU side, and 64 bit for the CPU side too. Its basically unheard of to use 64 bit CUDA for GPU then 32-bit arches for the CPU side.</p>",
+        "id": 269032529,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642963214
+    },
+    {
+        "content": "<p>I can make a panicking conversion too just to make sure the 64 bit gpu pointer doesnt wrap for 32 bit arches</p>",
+        "id": 269032709,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642963458
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"338379\">Giacomo Stevanato</span> <a href=\"#narrow/stream/122651-general/topic/GPU.20Slices/near/268909187\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"306504\">Tavian Barnes</span> <a href=\"#narrow/stream/122651-general/topic/GPU.20Slices/near/268902594\">said</a>:</p>\n<blockquote>\n<p>Since it's zero-sized it's allowed to point basically anywhere, doesn't have to be valid memory there</p>\n</blockquote>\n<p>Though note that this way the pointer inside the reference will only be allowed to access the contents of <code>[()]</code>. I'm not sure how that interacts with GPU memory, but it's definitely not a good thing.</p>\n</blockquote>\n<p>Wait really?  Are you saying that this is not permitted:</p>\n<div class=\"codehilite\"><pre><span></span><code>fn main() {\n    let arr = [1, 2, 3, 4];\n    let zst_ptr = &amp;arr as *const i32 as *const ();\n    let zst_slice = unsafe { std::slice::from_raw_parts(zst_ptr, 4) };\n    let new_ptr = zst_slice as *const [()] as *const i32;\n    let new_slice = unsafe { std::slice::from_raw_parts(new_ptr, 4) };\n    dbg!(new_slice);\n}\n</code></pre></div>\n<p>Miri accepts it.</p>",
+        "id": 269036150,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642967803
+    },
+    {
+        "content": "<p>doesn't this violate provenance?</p>",
+        "id": 269036175,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642967849
+    },
+    {
+        "content": "<p>I mean, I would argue that it shouldn't.  I don't know the details of Stacked Borrows (or any other Rust provenance model) well enough to say</p>",
+        "id": 269036295,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642967999
+    },
+    {
+        "content": "<p>Does it with <code>-Zmiri-tag-raw-pointers</code>?</p>",
+        "id": 269036351,
+        "sender_full_name": "The 8472",
+        "timestamp": 1642968008
+    },
+    {
+        "content": "<p>I believe zst pointers are allowed to point everywhere <em>except</em> deallocated allocations. This is an LLVM restriction we can't do anything about.</p>",
+        "id": 269036412,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1642968075
+    },
+    {
+        "content": "<p>Well i mean technically i cant know if the gpu pointer overlaps with the same adress of a deallocated space in cpu memory</p>",
+        "id": 269036428,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642968115
+    },
+    {
+        "content": "<p>Right, ZST pointers are permissive enough, I guess the question is whether ZST <em>references</em> reduce the allowed memory range to nothing</p>",
+        "id": 269036495,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642968211
+    },
+    {
+        "content": "<p>but im never actually accessing anything from the pointer, only passing it to the very opaque cuda api</p>",
+        "id": 269036496,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642968212
+    },
+    {
+        "content": "<p>Right, I don't think that's a problem for memory that isn't CPU-addressable anyway, Rust doesn't care</p>",
+        "id": 269036543,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642968252
+    },
+    {
+        "content": "<p>But this is potentially a big deal for bitvec unless I'm missing something</p>",
+        "id": 269036553,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642968275
+    },
+    {
+        "content": "<p>Yeah rust isnt usually the problem, LL \"pointers aint just numbers\" VM is the problem</p>",
+        "id": 269036563,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642968283
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"330154\">The 8472</span> <a href=\"#narrow/stream/122651-general/topic/GPU.20Slices/near/269036351\">said</a>:</p>\n<blockquote>\n<p>Does it with <code>-Zmiri-tag-raw-pointers</code>?</p>\n</blockquote>\n<p>Indeed that makes it fail :(</p>",
+        "id": 269036650,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642968383
+    },
+    {
+        "content": "<p>Well i cant imagine that packing a gpu pointer as a slice pointer would make rust or llvm mad, im just storing an arbitrary value in there, never accessing it as a cpu thing</p>",
+        "id": 269036664,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1642968419
+    },
+    {
+        "content": "<p>Yes I think that's should be fine</p>",
+        "id": 269036745,
+        "sender_full_name": "Tavian Barnes",
+        "timestamp": 1642968501
+    },
+    {
+        "content": "<p>if it's not a pointer within the cpu address space might be better to just store a darn usize</p>",
+        "id": 269060964,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643001171
+    },
+    {
+        "content": "<p>if it's not a pointer in the cpu address space, store a u64...a usize will likely give the false impression that gpu pointer size always == cpu pointer size when you can have 64-bit gpus on 32-bit cpus and vis versa; idk if that's the case for cuda but it's definitely the case for opencl/vulkan/etc.</p>",
+        "id": 269061212,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1643001493
+    },
+    {
+        "content": "<p>ah, fair point, a plain u64</p>",
+        "id": 269061473,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643001863
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224471\">Lokathor</span> <a href=\"#narrow/stream/122651-general/topic/GPU.20Slices/near/269060964\">said</a>:</p>\n<blockquote>\n<p>if it's not a pointer within the cpu address space might be better to just store a darn usize</p>\n</blockquote>\n<p>thats what i do for <code>DevicePointer&lt;T&gt;</code>, but thats not the issue, its how to pack that pointer and a length alongside so i can make proper gpu slices</p>",
+        "id": 269061647,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643002073
+    },
+    {
+        "content": "<p>CUDA on 32 bit arches is exceedingly rare, i think its fine to pack it as a pointer and just panic if it doesnt fit</p>",
+        "id": 269061701,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643002105
+    },
+    {
+        "content": "<p>besides, if ur on a 32 bit arch, u wont even be able to use the full 64 bits of the GPU because u can't copy data all at once lol</p>",
+        "id": 269061986,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643002529
+    },
+    {
+        "content": "<p>if you can't read directly from the memory why do you want a slice to it though</p>",
+        "id": 269062275,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643002928
+    },
+    {
+        "content": "<p>that seems to be what I'm missing</p>",
+        "id": 269062280,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643002946
+    },
+    {
+        "content": "<p>sketch of what you could do instead of using <code>&amp;[T]</code>: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=0a34a48b4e4ccb2c58b1cce6531f0d8c\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=0a34a48b4e4ccb2c58b1cce6531f0d8c</a></p>",
+        "id": 269063568,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1643004512
+    },
+    {
+        "content": "<p>it uses <code>NonZeroU64</code> as the gpu ptr and <code>u64</code> as the length.</p>",
+        "id": 269063600,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1643004547
+    },
+    {
+        "content": "<p>though...idk if gpu apis guarantee that 0 is null</p>",
+        "id": 269063679,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1643004647
+    },
+    {
+        "content": "<p>i know some weird C compilers use a non-zero value as a null pointer</p>",
+        "id": 269063711,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1643004705
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224471\">Lokathor</span> <a href=\"#narrow/stream/122651-general/topic/GPU.20Slices/near/269062275\">said</a>:</p>\n<blockquote>\n<p>if you can't read directly from the memory why do you want a slice to it though</p>\n</blockquote>\n<p>Same reason that you'd want slices on the CPU, except in this case, the data is not directly accessible without copying back to the CPU. It is often useful to borrow a piece of data on the GPU without owning it (because that means dropping it when done), and being able to only write to/from a specific area of a buffer.</p>",
+        "id": 269130113,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041306
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"229517\">Jacob Lifshay</span> <a href=\"#narrow/stream/122651-general/topic/GPU.20Slices/near/269063568\">said</a>:</p>\n<blockquote>\n<p>sketch of what you could do instead of using <code>&amp;[T]</code>: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=0a34a48b4e4ccb2c58b1cce6531f0d8c\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=0a34a48b4e4ccb2c58b1cce6531f0d8c</a></p>\n</blockquote>\n<p>The issue is that without a DST, its not possible to implement things like index because you cannot return</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"o\">&amp;</span><span class=\"n\">DeviceSlice</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">ptr</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">len</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>That is the core issue here, with slices this is not a problem the slices encode the needed data in the actual ref</p>",
+        "id": 269130562,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041480
+    },
+    {
+        "content": "<p>Well the reason that I want a slice normally is because it's a simple way to keep all my references in one place</p>",
+        "id": 269130601,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643041496
+    },
+    {
+        "content": "<p>So if there's no references possible, a slice becomes a not helpful thing</p>",
+        "id": 269130645,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643041520
+    },
+    {
+        "content": "<p>but it <em>is</em> a reference, just not one you can directly read from</p>",
+        "id": 269130677,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041536
+    },
+    {
+        "content": "<p>that doesn't mean its not useful</p>",
+        "id": 269130691,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041542
+    },
+    {
+        "content": "<p>sorry, by \"reference\" i mean \"rust reference that follows all the rules of rust references including being dereferenceable\"</p>",
+        "id": 269130886,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643041615
+    },
+    {
+        "content": "<p>Well in this case its not really a reference in the traditional sense, its a reference to some data on the gpu you can do stuff to. References to structures not on the CPU is not uncommon</p>",
+        "id": 269130980,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041665
+    },
+    {
+        "content": "<p>I don't want <code>&amp;[T]</code>, i just want to be able to have my GPU slices behave like... slices, and the issue is <code>[T]</code> is basically the only supported DST</p>",
+        "id": 269131073,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041699
+    },
+    {
+        "content": "<p>Right, Rust doesn't support your use case with the level of ergonomics/integration that you want. I absolutely agree on that point.</p>",
+        "id": 269131158,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643041741
+    },
+    {
+        "content": "<p>Yeah</p>",
+        "id": 269131174,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041747
+    },
+    {
+        "content": "<p>So i need to hack around it to some degree</p>",
+        "id": 269131185,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041753
+    },
+    {
+        "content": "<p>You can just make your own for most of this. All you lose is suger</p>",
+        "id": 269131267,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643041792
+    },
+    {
+        "content": "<p>I have: <a href=\"https://github.com/Rust-GPU/Rust-CUDA/blob/master/crates/cust/src/memory/device/device_slice.rs\">https://github.com/Rust-GPU/Rust-CUDA/blob/master/crates/cust/src/memory/device/device_slice.rs</a><br>\nBut then i realized this makes it impossible to implement cool things like <code>Index</code> and <code>IndexMut</code></p>",
+        "id": 269131398,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041835
+    },
+    {
+        "content": "<p>things that the previous impl of deviceslice had might i add*</p>",
+        "id": 269131466,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041878
+    },
+    {
+        "content": "<p>Right, but you don't need those to begin with</p>",
+        "id": 269131562,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643041908
+    },
+    {
+        "content": "<p>Yes i do, writing to specific parts of a GPU buffer is incredibly common</p>",
+        "id": 269131635,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041925
+    },
+    {
+        "content": "<p>but those traits are just sugar</p>",
+        "id": 269131673,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643041942
+    },
+    {
+        "content": "<p>just write your own method that has the slightly altered signature you need</p>",
+        "id": 269131721,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643041962
+    },
+    {
+        "content": "<p>Yes but sugar is good, its the expected way to be doing things</p>",
+        "id": 269131731,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643041965
+    },
+    {
+        "content": "<p><a href=\"https://docs.rs/voladdress/latest/voladdress/struct.VolBlock.html#method.index\">https://docs.rs/voladdress/latest/voladdress/struct.VolBlock.html#method.index</a></p>\n<p>Eh, it's good i guess, but it's not really a big deal once you get used to just using a few methods instead though.</p>",
+        "id": 269131982,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643042065
+    },
+    {
+        "content": "<p>I would also need to return an \"owned\" <code>DeviceSlice&lt;T&gt;</code> like i currently do, which is undesireable <a href=\"https://github.com/Rust-GPU/Rust-CUDA/blob/master/crates/cust/src/memory/device/device_slice.rs#L545\">https://github.com/Rust-GPU/Rust-CUDA/blob/master/crates/cust/src/memory/device/device_slice.rs#L545</a></p>",
+        "id": 269132256,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1643042182
+    },
+    {
+        "content": "<p>just slap a lifetime on that thing or whatever and you're all set.</p>",
+        "id": 269132897,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643042435
+    }
+]

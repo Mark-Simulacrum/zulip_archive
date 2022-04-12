@@ -1,0 +1,200 @@
+[
+    {
+        "content": "<p>I'm trying to add a new allocator method, as part of an experiment. I currently have this, which triggers a link error:</p>\n<div class=\"codehilite\"><pre><span></span><code>diff --git a/compiler/rustc_ast/src/expand/allocator.rs b/compiler/rustc_ast/src/expand/allocator.rsindex 1976e4ad3c9..d862d44f428 100644\n--- a/compiler/rustc_ast/src/expand/allocator.rs\n+++ b/compiler/rustc_ast/src/expand/allocator.rs\n@@ -35,6 +35,11 @@ pub struct AllocatorMethod {\n         inputs: &amp;[AllocatorTy::Layout],\n         output: AllocatorTy::ResultPtr,\n     },\n+    AllocatorMethod {\n+        name: sym::alloc2,\n+        inputs: &amp;[AllocatorTy::Layout],\n+        output: AllocatorTy::ResultPtr,\n+    },\n     AllocatorMethod {\n         name: sym::dealloc,\n         inputs: &amp;[AllocatorTy::Ptr, AllocatorTy::Layout],\ndiff --git a/compiler/rustc_span/src/symbol.rs b/compiler/rustc_span/src/symbol.rs\nindex 51a7a2644f6..4828ee13b2c 100644\n--- a/compiler/rustc_span/src/symbol.rs\n+++ b/compiler/rustc_span/src/symbol.rs\n@@ -304,6 +304,7 @@\n         alignstack,\n         all,\n         alloc,\n+        alloc2,\n         alloc_error_handler,\n         alloc_layout,\n         alloc_zeroed,\ndiff --git a/library/alloc/src/alloc.rs b/library/alloc/src/alloc.rs\nindex 66ef92558d8..885f6507ec8 100644\n--- a/library/alloc/src/alloc.rs\n+++ b/library/alloc/src/alloc.rs\n@@ -28,6 +28,9 @@\n     #[rustc_allocator]\n     #[rustc_allocator_nounwind]\n     fn __rust_alloc(size: usize, align: usize) -&gt; *mut u8;\n+    #[rustc_allocator]\n+    #[rustc_allocator_nounwind]\n+    fn __rust_alloc2(size: usize, align: usize) -&gt; *mut u8;\n     #[rustc_allocator_nounwind]\n     fn __rust_dealloc(ptr: *mut u8, size: usize, align: usize);\n     #[rustc_allocator_nounwind]\n@@ -87,6 +90,14 @@ pub unsafe fn alloc(layout: Layout) -&gt; *mut u8 {\n     unsafe { __rust_alloc(layout.size(), layout.align()) }\n }\n\n+/// njn: todo\n+#[stable(feature = &quot;global_alloc&quot;, since = &quot;1.28.0&quot;)]\n+#[must_use = &quot;losing the pointer will leak memory&quot;]\n+#[inline]\n+pub unsafe fn alloc2(layout: Layout) -&gt; *mut u8 {\n+    unsafe { __rust_alloc2(layout.size(), layout.align()) }\n+}\n+\n /// Deallocate memory with the global allocator.\n ///\n /// This function forwards calls to the [`GlobalAlloc::dealloc`] method\n@@ -166,7 +177,8 @@ fn alloc_impl(&amp;self, layout: Layout, zeroed: bool) -&gt; Result&lt;NonNull&lt;[u8]&gt;, Allo             0 =&gt; Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0)),\n             // SAFETY: `layout` is non-zero in size,\n             size =&gt; unsafe {\n-                let raw_ptr = if zeroed { alloc_zeroed(layout) } else { alloc(layout) };\n+                // njn: this triggers the link error\n+                let raw_ptr = if zeroed { alloc_zeroed(layout) } else { alloc2(layout) };\n                 let ptr = NonNull::new(raw_ptr).ok_or(AllocError)?;\n                 Ok(NonNull::slice_from_raw_parts(ptr, size))\n             },\ndiff --git a/library/std/src/alloc.rs b/library/std/src/alloc.rs\nindex 8ee55234cea..c5bdfaddee3 100644\n--- a/library/std/src/alloc.rs\n+++ b/library/std/src/alloc.rs\n@@ -356,6 +356,17 @@ pub mod __default_lib_allocator {\n         }\n     }\n\n+    #[rustc_std_internal_symbol]\n+    pub unsafe extern &quot;C&quot; fn __rdl_alloc2(size: usize, align: usize) -&gt; *mut u8 {\n+        // SAFETY: see the guarantees expected by `Layout::from_size_align` and\n+        // `GlobalAlloc::alloc`.\n+        unsafe {\n+            let layout = Layout::from_size_align_unchecked(size, align);\n+            // njn: todo\n+            System.alloc(layout)\n+        }\n+    }\n+\n     #[rustc_std_internal_symbol]\n     pub unsafe extern &quot;C&quot; fn __rdl_dealloc(ptr: *mut u8, size: usize, align: usize) {\n         // SAFETY: see the guarantees expected by `Layout::from_size_align` and\n</code></pre></div>",
+        "id": 265633973,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640047322
+    },
+    {
+        "content": "<p>The link errors:</p>\n<div class=\"codehilite\"><pre><span></span><code>ld.lld: error: /home/njn/dev/rust1/build/x86_64-unknown-linux-gnu/stage0-rustc/x86_64-unknown-linux-gnu/release/deps/librustc_driver-e375244a403fe1f2.so: undefined reference to __rust_alloc2 [--no-allow-shlib-undefined]\nld.lld: error: /home/njn/dev/rust1/build/x86_64-unknown-linux-gnu/stage0-sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd-fba87e034eaaa705.so: undefined reference to __rust_alloc2 [--no-allow-shlib-undefined]\n</code></pre></div>",
+        "id": 265634007,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640047358
+    },
+    {
+        "content": "<p>I must be missing a spot, but after a lot of grepping I still can't find it</p>",
+        "id": 265634036,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640047384
+    },
+    {
+        "content": "<p>It seems like <a href=\"https://github.com/rust-lang/rust/blob/5ab0f37087b61b2ea51f364498cddc20ecff74fa/compiler/rustc_codegen_llvm/src/allocator.rs#L29-L90\">this code</a> should be generating the <code>__rust_alloc2</code> function</p>",
+        "id": 265634213,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640047520
+    },
+    {
+        "content": "<p>/me wonders if there's some bootstrapping complication here</p>",
+        "id": 265634667,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640047893
+    },
+    {
+        "content": "<p>there's nothing defining __rust_alloc2 in stage0, right?</p>",
+        "id": 265634780,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1640047959
+    },
+    {
+        "content": "<p>so yeah, you probably need to cfg(not(bootstrap)) all reference to it in std</p>",
+        "id": 265634797,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1640047978
+    },
+    {
+        "content": "<p>Thanks, I'll try that</p>",
+        "id": 265635050,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640048188
+    },
+    {
+        "content": "<p>It works! thanks for the tip</p>",
+        "id": 265636257,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640049183
+    },
+    {
+        "content": "<p>Hmm, now I want <code>cfg(not(bootstrap))</code> when building the stage 1 compiler, but then I'd like the opposite when building the stage 2 compiler. Is that possible?</p>",
+        "id": 265645766,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640060310
+    },
+    {
+        "content": "<p>Because I want __rust_alloc2 to be used when building the stage 2 compiler</p>",
+        "id": 265645768,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640060327
+    },
+    {
+        "content": "<p>Maybe I can use <code>--keep-stage</code> somehow</p>",
+        "id": 265648141,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640063489
+    },
+    {
+        "content": "<p>Hmm, I had hoped that <code>./x.py build --stage 2 library/test</code>, followed by removing the <code>not(bootstrap)</code> bits, and then doing <code>./x.py build --stage 2 library/test --keep-stage-std=0 --keep-stage=0</code> might give me a stage 2 compiler that uses <code>__rust_alloc2</code>, but seemingly not</p>",
+        "id": 265650383,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640066237
+    },
+    {
+        "content": "<p>I think this text from the guide is relevant:</p>\n<blockquote>\n<p>Note that there are two std libraries in play here:</p>\n<ul>\n<li>The library linked to stageN/rustc, which was built by stage N-1 (stage N-1 std)</li>\n<li>The library used to compile programs with stageN/rustc, which was built by stage N (stage N std).</li>\n</ul>\n<p>Stage N std is pretty much necessary for any useful work with the stage N compiler. Without it, you can only compile programs with #![no_core] -- not terribly useful!</p>\n</blockquote>",
+        "id": 265651737,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640067877
+    },
+    {
+        "content": "<p>But at 5pm I'm having trouble wrapping my head around it</p>",
+        "id": 265651741,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640067902
+    },
+    {
+        "content": "<blockquote>\n<p>Hmm, now I want <code>cfg(not(bootstrap))</code> when building the stage 1 compiler, but then I'd like the opposite when building the stage 2 compiler. Is that possible?</p>\n</blockquote>\n<p>This is <code>cfg(bootstrap)</code>, right?</p>",
+        "id": 265652838,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1640069251
+    },
+    {
+        "content": "<p><code>cfg(bootstrap)</code> is first for stage 0 building stage 1, then <code>not</code> for later when you expect your change is fully in place</p>",
+        "id": 265691366,
+        "sender_full_name": "cuviper",
+        "timestamp": 1640097326
+    },
+    {
+        "content": "<p>That's what <span class=\"user-mention\" data-user-id=\"120989\">@nnethercote</span> said, I think</p>",
+        "id": 265697146,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1640100268
+    },
+    {
+        "content": "<p>Got it, thanks</p>",
+        "id": 265758327,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640138963
+    },
+    {
+        "content": "<p>Somehow calls to <code>std::alloc::alloc</code> are ending up in the <code>System</code> allocator in my tikv_jemallocator-enabled stage 2 compiler. I can't work out why. When I build a simple test binary that is also tikv_jemallocator-enabled with the stage 1 compiler things work properly.</p>",
+        "id": 265758412,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640139051
+    },
+    {
+        "content": "<p>And yet calling tikv_jemalloc_sys::malloc_usable_size on an allocation coming from <code>System</code> works. So I'm totally confused</p>",
+        "id": 265758511,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640139163
+    },
+    {
+        "content": "<p>A possible reason: <a href=\"https://github.com/rust-lang/rust/blob/master/compiler/rustc/src/main.rs#L7-L9\">this</a> appears to do nothing. I can remove it without any noticeable effect in a <code>jemalloc=true</code> build.</p>",
+        "id": 265768481,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640151715
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/blob/master/compiler/rustc/src/main.rs#L17-L54\">This</a> is what's doing the work. It causes jemalloc to be used, but as the <code>System</code> allocator!  <code>tikv_jemallocator::Jemalloc</code> (which impls <code>GlobalAlloc</code>) doesn't get called.</p>",
+        "id": 265768557,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640151786
+    },
+    {
+        "content": "<p>No wonder I was confused, the mechanism for jemalloc being used was not the obvious one (<code>global_allocator</code>). I wonder if this is intentional/expected...</p>",
+        "id": 265769524,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640153089
+    },
+    {
+        "content": "<p>All this is true on my Linux box, at least</p>",
+        "id": 265769613,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640153194
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120989\">@nnethercote</span> <a href=\"https://github.com/rust-lang/rust/pull/81782#issuecomment-784438001\">https://github.com/rust-lang/rust/pull/81782#issuecomment-784438001</a> might give you some insight on why it works the way it does.</p>",
+        "id": 265769961,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1640153746
+    },
+    {
+        "content": "<p>Thanks for the pointer, that's interesting. I see that <a href=\"https://github.com/rust-lang/rust/pull/83152\">https://github.com/rust-lang/rust/pull/83152</a> added the <code>#[global_allocator]</code>. There are comments in that PR suggesting that the <code>#[global_allocator]</code> was necessary for sized deallocations to occur, but that doesn't match my findings today that the <code>#[global_allocator]</code> has no effect in practice. I'm also astonished at the giant improvements in memory usage that happened when switching from <code>jemallocator</code> to <code>tikv-jemallocator</code>... AFAIK there differences between the two are very small. Overall I'm wondering if that PR worked the way everyone thought it did...</p>",
+        "id": 265779102,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640162840
+    },
+    {
+        "content": "<p>tikv-jemallocator uses a newer jemalloc version I believe.</p>",
+        "id": 265789648,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1640169703
+    },
+    {
+        "content": "<p>So, my hopes to use malloc_usable_size within rustc are currently are stymied, because:</p>",
+        "id": 265879620,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640229774
+    },
+    {
+        "content": "<ul>\n<li>The <code>Allocator</code>/<code>GlobalAlloc</code> trait split doesn't currently allow actual sizes to be returned accurately. It would require new or changed methods in the <code>GlobalAlloc</code> trait.</li>\n</ul>",
+        "id": 265879657,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640229830
+    },
+    {
+        "content": "<ul>\n<li>Even if that was supported, rustc is unlike other Rust programs, and cannot use <code>global_allocator</code> meaningfully. Instead, when it uses jemalloc it does it in a way that replaces libc malloc. Which means we're just calling <code>malloc</code>, <code>free</code>, etc. via <code>System</code> and there's again no way to get usable size information through.</li>\n</ul>",
+        "id": 265879739,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640229914
+    },
+    {
+        "content": "<p>I did some local perf runs and confirmed that tikv-jemallocator is much faster and less uses memory with rustc than jemallocator. Confirmation that it does come down to the newer jemalloc version in tikv-jemallocator being better.</p>",
+        "id": 265883413,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640235091
+    },
+    {
+        "content": "<p>I filed <a href=\"https://github.com/rust-lang/rust/pull/92222\">https://github.com/rust-lang/rust/pull/92222</a> to remove the useless <code>#[global_allocator]</code> and improve the comments explaining what's going on.</p>",
+        "id": 265887954,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1640241232
+    }
+]

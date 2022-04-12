@@ -1,0 +1,668 @@
+[
+    {
+        "content": "<p>AFAICT there is no agreement on which problem this feature should solve, nor what are the constraints on the design (e.g. should this be a zero-cost abstraction, should this result in an explosion of impls, etc.). It would probably make sense to start by collecting examples and constraints before designing a proposed solution.</p>",
+        "id": 183353652,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576239694
+    },
+    {
+        "content": "<p>I think this is a good idea. Here's my first stab at this:<br>\n<strong>Problems</strong>:</p>\n<ul>\n<li>Main issues: Converting between bytes (i.e., <code>&amp;[u8]</code>) to types and in general casting between two arbitrary types. The reason I call out the casting between <code>&amp;[u8]</code> and a some other type as a special case is because my impression is that this is the most common use case (e.g., you have some buffer of bytes and would like to view pieces of that buffer as bytes). </li>\n<li>Side issue: some types require runtime checks to verify a particular invariant (e.g., a byte can be a bool only if it is 0 or 1). Ideally a solution would allow for casting to and from such types.</li>\n<li>Side issue: safe reading of union fields </li>\n</ul>\n<p><strong>constraints</strong>:</p>\n<ul>\n<li>Should be a \"zero-cost\" abstraction (i.e., runtime checks are only performed when strictly necessary). </li>\n<li>Should not cause an explosion of trait impls that could negatively impact compiler performance</li>\n<li>Should be flexible enough to support main issue above and if not now at least later also support the side issues above</li>\n<li>Should allow differentiation between types that can be viewed as well formed bytes (i.e., no UB) and types that can constructed from arbitrary bytes. </li>\n<li>should be automatically implementable for custom types and allow casting between types even no matter where those types are defined.</li>\n</ul>",
+        "id": 183354963,
+        "sender_full_name": "rylev",
+        "timestamp": 1576240834
+    },
+    {
+        "content": "<p>The Compatible&lt;T&gt; RFC also lists some constraints on the design: <a href=\"https://gist.github.com/gnzlbg/4ee5a49cc3053d8d20fddb04bc546000#design-goals-and-constraints\" target=\"_blank\" title=\"https://gist.github.com/gnzlbg/4ee5a49cc3053d8d20fddb04bc546000#design-goals-and-constraints\">https://gist.github.com/gnzlbg/4ee5a49cc3053d8d20fddb04bc546000#design-goals-and-constraints</a></p>\n<blockquote>\n<p>These design goals and constraints are derived from the examples below:</p>\n<ul>\n<li>\n<p><strong>performance</strong>: users that do not care about performance can just deconstruct a value into its fields and use those to construct a new value without using any unsafe code. Going from one value to another in a single (or no) memcpy is the main advantage of this feature.</p>\n</li>\n<li>\n<p><strong>complete</strong>: it must be possible to encode safety invariant using this feature, if<br>\n        * transmute::&lt;T, U&gt; is provably safe, using safe_transmute<br>\n        * transmute::&lt;T, U&gt; is only safe for some values of U, using try_safe_transmute</p>\n</li>\n<li>\n<p><strong>sound</strong>: safe_transmute&lt;T, U&gt; must not type check for a T-U-pair for which a transmute is unsound.</p>\n</li>\n<li>\n<p><strong>consistent</strong>: if safe_transmute::&lt;T, U&gt; is safe, it must be possible to replace that with transmute::&lt;T, U&gt;.</p>\n</li>\n<li>\n<p><strong>ergonomic</strong>: the feature should be more ergonomic than mem::transmute. In particular, if transmute::&lt;T, U&gt; is provably safe, then safe_transmute::&lt;T, U&gt; must just work.</p>\n</li>\n</ul>\n</blockquote>",
+        "id": 183355186,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241022
+    },
+    {
+        "content": "<p>For example, IIUC, the safe transmute pre-RFCs violate most of these constraints.</p>",
+        "id": 183355516,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241238
+    },
+    {
+        "content": "<p>But by doing so the safe transmute pre-RFCs are able to do things that this RFC cannot.</p>",
+        "id": 183355551,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241274
+    },
+    {
+        "content": "<p>For example, with the safe transmute RFC you can transmute a <code>&amp;[u8]</code> to a <code>&amp;[u8; 16]</code>, but you can't replace that with an unsafe <code>transmute::&lt;&amp;[u8; 16], &amp;[u8]&gt;</code> call to avoid checks because the two types have different sizes.</p>",
+        "id": 183355672,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241384
+    },
+    {
+        "content": "<p>Just so we're on the same page, I think the RFC you posted is not fully correct when specifying the constraints that \"safe-transmute-v2\" proposes:</p>\n<blockquote>\n<p>unnecessarily require run-time checks, e.g. bool -&gt; #[repr(transparent)] struct Bool(bool)</p>\n</blockquote>\n<p>Because of inlining the example you provided does not actually require runtime checks. I think a more appropriate way to state this is that it relies on the optimizer to do the right thing. So far, I've only found one case where runtime checks were not correctly eliminated by the optimizer (which I stated above). I'm not saying this isn't an issue, but the way it's stated is misleading.</p>\n<blockquote>\n<p>ergonomics: many \"\"transmutes\"\" require multiple calls to the transmute methods, as opposed to plain transmute, e.g., bool -&gt; Bool requires two transmute operations.</p>\n</blockquote>\n<p>This is not true. The RFC provides a method that allows this to happen in one call (namely <code>cast</code>).</p>\n<p>As for the other two constraints, I'm not sure I fully understand why those are a constraint on the design.</p>",
+        "id": 183355909,
+        "sender_full_name": "rylev",
+        "timestamp": 1576241542
+    },
+    {
+        "content": "<blockquote>\n<p>Because of inlining the example you provided does not actually require runtime checks</p>\n</blockquote>\n<p>In my constraint, this must be guaranteed, and not require run-time checks at any optimization level.</p>",
+        "id": 183355939,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241573
+    },
+    {
+        "content": "<p>That is, the constraint is that because this is a performance-only feature, such optimizations must be guaranteed and always apply.</p>",
+        "id": 183355993,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241619
+    },
+    {
+        "content": "<blockquote>\n<blockquote>\n<p>Because of inlining the example you provided does not actually require runtime checks</p>\n</blockquote>\n<p>In my constraint, this must be guaranteed, and not require run-time checks at any optimization level.</p>\n</blockquote>\n<p>That's fair. I think though that it's important to state that the \"safe-transmute-v2\" proposal fails at this _only_ when the optimizer is not able to optimize many of the const expressions away. The way it reads currently makes it sound like a runtime check will always be performed when that's simply not true.</p>",
+        "id": 183356088,
+        "sender_full_name": "rylev",
+        "timestamp": 1576241681
+    },
+    {
+        "content": "<p>It also fails at this when LTO is disabled, when optimizations are disabled, when the inliner fails, etc.</p>",
+        "id": 183356132,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241722
+    },
+    {
+        "content": "<p>i.e., the choice is between gurantee of no runtime checks vs. best effort no runtime checks _NOT_ between no runtime checks and runtime checks</p>",
+        "id": 183356137,
+        "sender_full_name": "rylev",
+        "timestamp": 1576241729
+    },
+    {
+        "content": "<p>As mentioned, my constraint requires guaranteeing no runtime checks, ever. I couldn't find anywhere in the RFC of safe-transmute v2 that guarantee, so that's why I mentioned that it does not guarantee that.</p>",
+        "id": 183356205,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241771
+    },
+    {
+        "content": "<p>If the safe-transmute RFC is changed to guarantee that such run-time checks will never happen, then I can change that part.</p>",
+        "id": 183356230,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241802
+    },
+    {
+        "content": "<p>But I understood safe-transmute v2 to be \"best-effort\" in that regard.</p>",
+        "id": 183356248,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241817
+    },
+    {
+        "content": "<p>And the tests in godbolt are done within the same translation unit. More interesting tests would be when the FromBytes/ToBytes trait are implemented in different crates, the impls aren't <code>#[inline]</code>, and LTO is disabled.</p>",
+        "id": 183356285,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241859
+    },
+    {
+        "content": "<p>I think you're misunderstanding what I'm saying. What you're stating here is correct, but your analysis in the RFC reads differently. Your analysis reads as if the runtime checks will always be performed not that there is not hard guarantee that they won't be performed. I believe this to be very different</p>",
+        "id": 183356294,
+        "sender_full_name": "rylev",
+        "timestamp": 1576241870
+    },
+    {
+        "content": "<p>My analysis reads that rustc will always generate code to perform the runtime checks, and whether this code is removed or not would depend on a best effort optimization in the backend that might or might not happen.</p>",
+        "id": 183356365,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241916
+    },
+    {
+        "content": "<p>I can try to word that in such a way that makes it clearer that those run-time checks can sometimes be removed by the backend.</p>",
+        "id": 183356373,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576241935
+    },
+    {
+        "content": "<p>Yes that's all I'm stating. I think that would make it much clearer</p>",
+        "id": 183356395,
+        "sender_full_name": "rylev",
+        "timestamp": 1576241964
+    },
+    {
+        "content": "<p>I've added a sentence to clarify that.</p>",
+        "id": 183356428,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242002
+    },
+    {
+        "content": "<p>Thanks, and thoughts on the ergonomics point? From the user's perspective, casting between two types is a single call to <code>cast</code>.</p>",
+        "id": 183356561,
+        "sender_full_name": "rylev",
+        "timestamp": 1576242080
+    },
+    {
+        "content": "<p>I'm not sure I agree with your point that the proposal fails to provide an ergonomic ability to transmute</p>",
+        "id": 183356639,
+        "sender_full_name": "rylev",
+        "timestamp": 1576242123
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> how does that work for types with padding ?</p>",
+        "id": 183356663,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242150
+    },
+    {
+        "content": "<p>IIUC, that requires an implementation of <code>ToBytes</code> to exist</p>",
+        "id": 183356680,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242159
+    },
+    {
+        "content": "<p>but that cannot exist for, e.g., <code>#[repr(C)] struct A { x: bool, y: u16 }</code>, and then you can't cast that to <code>#[repr(C)] struct B { x: Bool, y: u16 }</code></p>",
+        "id": 183356730,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242207
+    },
+    {
+        "content": "<p>Ah wait, that's a violation of the completeness constraint, not ergonomics.</p>",
+        "id": 183356888,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242303
+    },
+    {
+        "content": "<p>Yes, I was about to write that. And I agree with that point</p>",
+        "id": 183356921,
+        "sender_full_name": "rylev",
+        "timestamp": 1576242325
+    },
+    {
+        "content": "<p>I believe that when the proposal doesn't fail on one of the other points, it does not fail on ergonomics</p>",
+        "id": 183357029,
+        "sender_full_name": "rylev",
+        "timestamp": 1576242391
+    },
+    {
+        "content": "<p>I'd also change the completeness point to reflect the example above ^^ and not the <code>bool</code> to <code>Bool</code> one currently in the document. While that might be technically true, I don't believe it captures why one should care like the example above does</p>",
+        "id": 183357137,
+        "sender_full_name": "rylev",
+        "timestamp": 1576242472
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> yes you are right, ergonomics are fine</p>",
+        "id": 183357201,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242503
+    },
+    {
+        "content": "<p>It doesn't suffer from N x M, since you only need ~ N + M implementations, to go from/to <code>[u8]</code></p>",
+        "id": 183357228,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242528
+    },
+    {
+        "content": "<p>That's the best that can be done AFAICT</p>",
+        "id": 183357243,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242546
+    },
+    {
+        "content": "<p>(by the way, it might be a good idea to get these two RFCs into the repo so we can collaborate through PRs as well). I'll need to convert the \"safe-transmute-v2\" pre-rfc into the RFC format so we can more easily compare</p>",
+        "id": 183357268,
+        "sender_full_name": "rylev",
+        "timestamp": 1576242575
+    },
+    {
+        "content": "<p>sure I can send a PR</p>",
+        "id": 183357276,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242589
+    },
+    {
+        "content": "<p>the RFC is not ready though</p>",
+        "id": 183357281,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242593
+    },
+    {
+        "content": "<p>There are some degrees-of-freedom that some RFCs have, that I haven't been able to word as constraints</p>",
+        "id": 183357335,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242618
+    },
+    {
+        "content": "<p>for example, <code>TryCompatible</code> has an associated error type</p>",
+        "id": 183357344,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242628
+    },
+    {
+        "content": "<p>That solves some problems that safe-transmute v2 has, like being able to express that some operations cannot fail by using <code>!</code></p>",
+        "id": 183357368,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242651
+    },
+    {
+        "content": "<p>But it introduces other problems</p>",
+        "id": 183357373,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242656
+    },
+    {
+        "content": "<blockquote>\n<p>All alternatives discussed below require N x M trait impls.</p>\n</blockquote>\n<p>This is not true for the safe-transmute-v2 proposal</p>",
+        "id": 183357389,
+        "sender_full_name": "rylev",
+        "timestamp": 1576242674
+    },
+    {
+        "content": "<p>Like it makes it impossible to provide something like <code>::cast</code></p>",
+        "id": 183357391,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242675
+    },
+    {
+        "content": "<p>A middle ground solution would be to only allow certain types as the associated type</p>",
+        "id": 183357623,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242893
+    },
+    {
+        "content": "<p>e.g. one can allow <code>!</code> or a specific Result type, by bounding the associated error type with a sealed trait that's only implemented for those two.</p>",
+        "id": 183357640,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242913
+    },
+    {
+        "content": "<p>I believe the \"safe-transmute-v2\" proposal does better in terms of trait impls. Each type has at most 3 trait impls (FromAnyBytes, FromBytes and ToBytes). The \"compatible\" proposal requires each trait to have an unbounded number of impls for every type it can possibly be compatible with. Am I wrong in thinking this?</p>",
+        "id": 183357664,
+        "sender_full_name": "rylev",
+        "timestamp": 1576242958
+    },
+    {
+        "content": "<p>Yes, you are wrong.</p>",
+        "id": 183357720,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242980
+    },
+    {
+        "content": "<p>The compatible trait proposal only requires one trait impl, either <code>Compatible&lt;T&gt;</code> or <code>TryCompatible&lt;T&gt;</code>, per type.</p>",
+        "id": 183357727,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576242999
+    },
+    {
+        "content": "<p>If <code>T</code> is <code>[u8]</code> then you can go to any type that's compatible with that</p>",
+        "id": 183357756,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243038
+    },
+    {
+        "content": "<p>For example, if you have a type <code>struct Foo([u8; 4]);</code> and implement <code>Foo: Compatible&lt;[u8; 4]&gt;</code>, and you have some other type <code>Bar</code> such that <code>[u8; 4]: Compatible&lt;Bar&gt;</code>, then you can go from <code>Foo</code> to <code>Bar</code>.</p>",
+        "id": 183357855,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243100
+    },
+    {
+        "content": "<p>Even though there is no <code>Foo: Compatible&lt;Bar&gt;</code> impl.</p>",
+        "id": 183357889,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243141
+    },
+    {
+        "content": "<p>I would not have imagined the type system was capable of following through all those relationships. I'm assuming you've tested this and it works?</p>",
+        "id": 183357982,
+        "sender_full_name": "rylev",
+        "timestamp": 1576243217
+    },
+    {
+        "content": "<p>I asked in the chalk zulip, and they said that such a query is probably possible, similar queries exist</p>",
+        "id": 183358007,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243248
+    },
+    {
+        "content": "<p>Is it currently possible? Because it should be explicitly noted that this would require changes to the type inferencer if that's the case</p>",
+        "id": 183358048,
+        "sender_full_name": "rylev",
+        "timestamp": 1576243295
+    },
+    {
+        "content": "<p>They are unsure about how exactly formulate the query in a recursive way</p>",
+        "id": 183358050,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243297
+    },
+    {
+        "content": "<p>But since chalk is prolog-like, it must be possible to ask whether such a sequence exist</p>",
+        "id": 183358120,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243327
+    },
+    {
+        "content": "<p>It is noted that the meaning of <code>T: Compatible&lt;U&gt;</code> bound is special.</p>",
+        "id": 183358146,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243357
+    },
+    {
+        "content": "<p>And the precise definition of that trait query is noted in the RFC.</p>",
+        "id": 183358158,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243368
+    },
+    {
+        "content": "<p>There's also the issue that it can result in non-deterministic lifetime bounds, unless there's some well-defined search order. Which IMO makes it a non-starter, even if no one will ever write a lifetime-dependent <code>Compatible</code> impl.</p>",
+        "id": 183358176,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1576243389
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span> it is non-deterministic, but the RFC argues that it doesn't matter</p>",
+        "id": 183358191,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243413
+    },
+    {
+        "content": "<p>is that argument incorrect ?</p>",
+        "id": 183358203,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243423
+    },
+    {
+        "content": "<p>If you have a <code>transmute::&lt;T, U&gt;()</code>, for that to be safe, it suffices to exist a chain of transmutes from U to T that are safe</p>",
+        "id": 183358260,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243449
+    },
+    {
+        "content": "<p>if there are multiple chains, it doesn't really matter which one you pick</p>",
+        "id": 183358266,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243460
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132920\">@gnzlbg</span> I'm not seeing where that's plainly stated. Can you point me to that?</p>",
+        "id": 183358282,
+        "sender_full_name": "rylev",
+        "timestamp": 1576243475
+    },
+    {
+        "content": "<p>In the trait query specification</p>",
+        "id": 183358290,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243489
+    },
+    {
+        "content": "<blockquote>\n<p>Notice that multiple such sequences could exist, but it suffices that one exists for the query to be satisfied.</p>\n</blockquote>",
+        "id": 183358304,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243500
+    },
+    {
+        "content": "<p>There problem is that with lifetimes you don't know whether a sequence exists until it's too late.</p>",
+        "id": 183358323,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1576243523
+    },
+    {
+        "content": "<p>Ah sorry, I meant where it's plainly stated that the trait resolution is not currently possible but would need to be added to have this feature</p>",
+        "id": 183358334,
+        "sender_full_name": "rylev",
+        "timestamp": 1576243540
+    },
+    {
+        "content": "<p>I see where it's implied if you're familiar with how things currently work, but it would be nice to have this spelled out explicitly</p>",
+        "id": 183358408,
+        "sender_full_name": "rylev",
+        "timestamp": 1576243575
+    },
+    {
+        "content": "<p>In the drawbacks section, it does say \"Complicates the trait system\"</p>",
+        "id": 183358424,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243592
+    },
+    {
+        "content": "<p>That section is obviously incomplete, somebody should expand on that, mentioning that a new kind of query with the semantics of the reference section have to be added, etc.</p>",
+        "id": 183358455,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243635
+    },
+    {
+        "content": "<blockquote>\n<p>There problem is that with lifetimes you don't know whether a sequence exists until it's too late.</p>\n</blockquote>\n<p>Can you elaborate?</p>",
+        "id": 183358462,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243649
+    },
+    {
+        "content": "<p>Maybe an example would help making that clearer.</p>",
+        "id": 183358470,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243659
+    },
+    {
+        "content": "<p>(e.g. i'm imagining <code>impl&lt;'a, T, U&gt; Compatible&lt;&amp;'a U&gt; for &amp;'a T { } where T: Compatible&lt;U&gt;</code> but I don't see any big issues with that)</p>",
+        "id": 183358530,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243698
+    },
+    {
+        "content": "<p>Maybe <code>impl&lt;'a, 'b, T, U&gt; Compatible&lt;&amp;'a U&gt; for &amp;'b T where T: Compatible&lt;U&gt;, 'b: 'a {}</code> ?</p>",
+        "id": 183358607,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576243774
+    },
+    {
+        "content": "<p>So if there are impls like <code>Compatible&lt;&amp;'a U&gt; for &amp;'b U</code> and <code>Compatible&lt;U&gt; for U</code> then depending on the impl we choose converting <code>&amp;'0 U</code> to <code>&amp;'1 U</code> may require the regions to be equal, or only that one outlives the other. (It doesn't matter here due to variance, but that's besides the point).</p>",
+        "id": 183358926,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1576244015
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span> I thought it would be the other way around</p>",
+        "id": 183359039,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576244102
+    },
+    {
+        "content": "<p>If one writes <code>safe_transmute::&lt;&amp;'a U, &amp;'a U&gt;</code> then the regions are required to be equal, while if one does <code>safe_transmute::&lt;&amp;'a U, &amp;'b U&gt;</code> then one is required to out-live the other.</p>",
+        "id": 183359092,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576244155
+    },
+    {
+        "content": "<p>You can link me to the Discussion in the Chalk Zulip you mentioned? It seems clear that this can be implemented without too much trouble, but I'm not sure it will be better for compiler performance than having N x M impls manifest in the program. The obvious way to do it (which side-steps all worries about degrading the neat properties Chalk has today) is to add a transitivity rule like <code>(?T : Compatible&lt;?U&gt;) :- (?T : Compatible&lt;?V&gt;), (?V : Compatible&lt;?U&gt;)</code>. But I worry that setting Chalk loose on this won't be particularly efficient, because Chalk enumerates answers to trait queries breadth-first. BFS is not great at finding paths between a specific pair of nodes quickly, and although it amortizes pretty well (assuming memoization, which Chalk obviously has) if you compute the reachability matrix of the whole graph, doing that would require (asymptotically) as much time and memory as generating all the N x M impls before going into trait solving.</p>",
+        "id": 183359142,
+        "sender_full_name": "Hanna Kruppe",
+        "timestamp": 1576244164
+    },
+    {
+        "content": "<blockquote>\n<p>If one writes safe_transmute::&lt;&amp;'a U, &amp;'a U&gt; then the regions are required to be equal, while if one does safe_transmute::&lt;&amp;'a U, &amp;'b U&gt; then one is required to out-live the other.</p>\n</blockquote>\n<p>I wouldn't expect the lifetimes to be dependent on with chain of trait impls is picked, but rather, for the lifetime requirements to constraint which chain of trait impls are valid. But maybe I'm misunderstanding the order in which lifetimes and traits are resolved ?</p>",
+        "id": 183359213,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576244240
+    },
+    {
+        "content": "<p>I may have swapped them. Free lifetime inference is always the last part of type checking.</p>",
+        "id": 183359289,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1576244306
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"124289\">@rkruppe</span> I kind of expect each type to have very few <code>Compatible</code> impls, and typically towards some type like a <code>[u8; N]</code> that \"maximizes\" how many safe transmutes they get for free</p>",
+        "id": 183359362,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576244384
+    },
+    {
+        "content": "<p>So that's indeed quite bad due to what you said</p>",
+        "id": 183359420,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576244408
+    },
+    {
+        "content": "<p>Once you reach such a type, there are many edges that must be visited to find the type you want to convert to</p>",
+        "id": 183359439,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576244443
+    },
+    {
+        "content": "<p>even if the conversion is only two graph edges away</p>",
+        "id": 183359446,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576244452
+    },
+    {
+        "content": "<p>because these nodes in the middle have lots of edges</p>",
+        "id": 183359450,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576244459
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><span class=\"n\">TryCompatible</span><span class=\"o\">&lt;&amp;</span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"n\">size_of</span>::<span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">()}]</span><span class=\"o\">&gt;</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>One benefit of <code>Compatible&lt;T&gt;</code> is that its future compatible with const generics. For the other RFC we would need to make the choice if we want to be dependent on const generics or not</p>",
+        "id": 183359473,
+        "sender_full_name": "rylev",
+        "timestamp": 1576244483
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span></p>\n<blockquote>\n<p>I may have swapped them. Free lifetime inference is always the last part of type checking.</p>\n</blockquote>\n<p>So I'm not sure how that would work. From the constraint, multiple chains might be valid, and each chain might have different life-time requirements, and that might impact lifetime inference later on, since there are multiple ways to infer a particular lifetime. I'm not sure if by that time it matters, e.g., if the two possibilities are that either one lifetime must outlive the other, or be independent, and both are \"ok\", then does it matter? And if only one is ok, the other cannot be inferred, right?</p>",
+        "id": 183359818,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576244734
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224872\">@Ryan Levick</span> I think that <code>bytemuck</code> actually hits most of your goals already, <em>except</em> that it is deliberately very conservative in the design and mostly doesn't tackle the issue of types with limited bit patterns. Such things could be added without changing the fundamental design though (one such extension to support limited bit pattern types is in PR review phase actually).</p>\n<p>I think that a lot of the safe transmuting can be handled with marker traits to give what a type supports and then a small collection of trait bound free functions that do the work. This lets us leverage parametric generics as much as possible to do a lot of the hard thinking for us.</p>\n<p>I would also like to add that transmuting <code>&amp;[u8]</code> to <code>&amp;T</code> seems to get mentioned a lot but it's not even the type of cast that was most requested before I made my crate. People were usually asking for slice to slice casting and owned to owned casting. I hope those casts can be remembered more often as we discuss.</p>",
+        "id": 183402089,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576272260
+    },
+    {
+        "content": "<blockquote>\n<p>I would also like to add that transmuting &amp;[u8] to &amp;T seems to get mentioned a lot but it's not even the type of cast that was most requested before I made my crate</p>\n</blockquote>\n<p>This is certainly interesting. The original use case I was coming from that prompted me to start the whole RFC process was one in which the programmer memcopies a large buffer (probably from the network) and then wants to safely view pieces of that buffer in a structured way. This is directly the <code>&amp;[u8]</code> to <code>&amp;T</code> use case. I see <code>&amp;[u8]</code> to <code>&amp;[T]</code> as a direct extension of that as well. </p>\n<p>What are some of the high level use cases for <code>&amp;[T]</code> to <code>&amp;[U]</code> and <code>T</code> to <code>U</code> casting? I believe both proposals being discussed support these use cases, but I want to make sure I have a good understanding of the actual need for this.</p>",
+        "id": 183544035,
+        "sender_full_name": "rylev",
+        "timestamp": 1576499183
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224471\">@Lokathor</span> I also don't see a huge ton of difference between the \"safe-transmute\" pre-RFC and <code>bytemuck</code> (we only didn't mention it in the pre-RFC because we somehow missed it - we'll mention it in the RFC should we go this direction). I believe <code>bytemuck</code> simplifies by removing the following features which are available in the pre-RFC:</p>\n<ul>\n<li>No distinction between types that can be safely cast _from_ vs safely cast _to_. For instance, it's safe to cast to a type with padding and it's safe to cast from bool.</li>\n<li>No derive mechanism</li>\n<li>No fallible casting (e.g., casting to bool)</li>\n</ul>",
+        "id": 183546261,
+        "sender_full_name": "rylev",
+        "timestamp": 1576501283
+    },
+    {
+        "content": "<p>I first came to this general problem of safe transmutation because gfx-hal had a \"cast_slice\" operation that was actually really unsound, so I wrote a correct version. I stuffed it into my \"bag of utils\" crate and forgot about it for months until the lead of <a href=\"https://github.com/rust-secure-code/safety-dance\" target=\"_blank\" title=\"https://github.com/rust-secure-code/safety-dance\">Safety Dance</a> saw it and said \"actually you should put just that one thing in its own crate because people are out here casting slices all the time and getting it wrong all the time\".</p>\n<p>I've specifically seen people ask for:</p>\n<ul>\n<li><code>&amp;[u8]</code> to <code>&amp;[u32]</code>: This is what <code>gfx-hal</code> wanted, so that you can upload <code>include_bytes!</code> data as SPIRV</li>\n<li><code>&amp;[T]</code> to <code>&amp;[u8]</code>: Another FFI problem, where C is accepting a <code>void*</code> and a length, so in Rust we kinda shrug and say \"Well I guess we model that with letting the user pass <code>&amp;[u8]</code> for the C code to read?\". Eg: for the GPU you might want to upload some huge list of <code>f32</code> vertex data but the C API is non-generic so it's on you to make it <code>&amp;[u8]</code> first.</li>\n<li><code>&amp;[u8]</code> to <code>&amp;[i8]</code> or the reverse: Basically \"c_char\" has no default signed-ness to it so the signed-ness that we apply to it in rust isn't the same by platform, but really it doesn't matter and people just want to cast between the two forms.</li>\n<li><code>__m128</code> to <code>[f32;4]</code> is super popular for SIMD work, obviously. You don't do it during your SIMD operations, but you do it to pack and unpack the data at the edges of the SIMD pipeline.</li>\n<li><code>&amp;mut T</code> to <code>&amp;mut [u8]</code>: needed for randomization libraries such as <a href=\"https://docs.rs/getrandom/0.1.13/getrandom/fn.getrandom.html\" target=\"_blank\" title=\"https://docs.rs/getrandom/0.1.13/getrandom/fn.getrandom.html\">getrandom</a> that accept a buffer to overwrite with random bytes .</li>\n</ul>\n<p>I didn't even put <code>&amp;[u8]</code> to <code>&amp;T</code> into <code>bytemuck</code> 1.0 because I guess I didn't talk to enough parsing people or something, but <em>also</em> that's just a mild specialization of a slice cast. For the first pass of my PNG parser, where I  probably would have used <code>&amp;[u8]</code> to <code>&amp;T</code>, I just wrote</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">here</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">more</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">more</span><span class=\"p\">.</span><span class=\"n\">split_at</span><span class=\"p\">(</span><span class=\"mi\">4</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">arr</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">cast_slice</span>::<span class=\"o\">&lt;</span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"kt\">u8</span><span class=\"p\">;</span><span class=\"mi\">4</span><span class=\"p\">]</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">slice</span><span class=\"p\">)[</span><span class=\"mi\">0</span><span class=\"p\">];</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>to pull out <code>[u8;4]</code> arrays from the data steam. Perfectly ergonomic? No, definitely not, but it does show that slice casting is probably the most \"fundamental\" of all the casts. SimonSapin actually threw a <code>&amp;[u8]</code> to <code>&amp;T</code> PR at me the day they saw my crate, so that's in 1.1 now.</p>\n<p>As to your bullet points:\n* For \"cast from X into bytes\", I considered making a trait for that which is a parent trait of <code>Pod</code>, similar to how <code>Zeroable</code> gets its own sub-trait. People often want to just zero a thing as cheap initialization, so I split if off as its own ability. However, when I asked folks, \"hey what if there was a trait for linear memory that was totally initialized? That could be a lesser contract than <code>Pod</code>.\" people said \"what's the point?\" and I said \"Well it'd let you have this one special method <code>as_bytes</code> where you can turn any <code>&amp;T</code> into <code>&amp;[u8]</code>\". Not a <em>single</em> person I talked to was impressed with the concept. No one thought that it was worth having a dedicated trait, so I just dropped the concept for lack of demand. It's certainly something you could fit into the design if anyone actually does care.\n* Deriving it all is really, really hard without compiler support :P Though someone added a Zeroable derive. Of course I'd like to see more happen here, \n* Fallible casting actually has an <a href=\"https://github.com/Lokathor/bytemuck/pull/12\" target=\"_blank\" title=\"https://github.com/Lokathor/bytemuck/pull/12\">open PR right now</a> if you want to see one possible design. It's really focused on enums and enum-likes just because of how the person who wrote it wants to use it. They need it for somewhere deep inside some huge mostly-C++ codebase where Rust and C++ talk to each other. The PR's particular design allows <code>bool</code>, but it <em>doesn't</em> allow for <code>char</code> or <code>NonZeroI32</code>. Again, it's largely an artifact of wanting to be fast (minimal checks) while also being absolutely correct without fail, and in the absence of compiler support we end up just covering the cases that we know we can do correctly as a crate. I think that with compiler support this would become a lot easier. On the other hand, I asked on the <code>#design</code> channel of the Official Discord a few weeks ago, \"hey what about the idea of compiler support for having some bits of some amount and then being able to ask the compiler 'if I wanted to put these bits within some enum or other limited bit pattern type, what value would they be in that type?\" and at the time people essentially said \"that sounds so niche I don't think we'd bother to spend the time to implement that ability\". So hopefully this project group can make the issue seem worth the time.</p>\n<p>(This post got super long but I hope I was clear about everything.)</p>",
+        "id": 183562942,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576512204
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224471\">@Lokathor</span> Thanks for the clarifications! Question: is the limitation that some types aren't Pod but could be casted to (e.g., bool) acceptable to you? The reason we introduced the <code>ToBytes</code> wasn't because we thought it's interesting to turn a  type into bytes, but because it's sometimes necessary to distinguish between types that are Pods (using your definition for what that is) and types that aren't but reading them always gives you well defined bytes</p>",
+        "id": 183567213,
+        "sender_full_name": "rylev",
+        "timestamp": 1576514779
+    },
+    {
+        "content": "<p>I have nothing fundamentally against the idea. People just told me no one cared, so I skipped over it. I could even put it into <code>bytemuck</code> as a proof of concept if you'd like to see it set up in practice.</p>\n<p>Though I'll note: for going from <code>u8</code> to <code>bool</code> it should just be a <code>TryFrom</code> impl. Any \"do a cast but we have to perform a validity check\" should just use the existing TryFrom trait as much as possible. That's what it's there for. And it makes the way you can use a type very discoverable when you look in the docs.</p>",
+        "id": 183570114,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576516465
+    },
+    {
+        "content": "<p>(though, without const generics, the only thing <code>bytemuck</code> could do with a \"LinearInitialized\" marker trait is some sort of <code>view_bytes</code> function for <code>&amp;T</code> to <code>&amp;[u8]</code>. It'd probably get really complicated if you wanted to do owned to owned casting.)</p>",
+        "id": 183570658,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576516862
+    },
+    {
+        "content": "<p>I'm not sure I agree with the TryFrom recommendation</p>",
+        "id": 183575885,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576520714
+    },
+    {
+        "content": "<p>TryFrom does a \"value preserving\" conversion, while transmute re-interprets some memory as being of a different type, and is \"bit pattern preserving\"</p>",
+        "id": 183575933,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576520761
+    },
+    {
+        "content": "<p>For some types, like going from a <code>u8</code> to a <code>bool</code>, both things have the same semantics, but this is not true for all types.</p>",
+        "id": 183576053,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576520847
+    },
+    {
+        "content": "<p>So if both operations are different and make sense exposing, then we need two ways to expose them, and then the question becomes whether for types for which both operations mean the same thing, both should still be exposed or not.</p>",
+        "id": 183576202,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576520953
+    },
+    {
+        "content": "<p>That's fair. For other types it might be a lot less correct for TryFrom to be used.</p>",
+        "id": 183578173,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576522272
+    },
+    {
+        "content": "<p>Agreed; <code>TryFrom</code>is for semantic conversions that might change the memory values, and it doesn't guarantee that it'll do an allocation-free reinterpretation of memory.</p>",
+        "id": 183582694,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1576525100
+    },
+    {
+        "content": "<p>This touches a bit on a tangential issue, which is how can we encourage implementations of whatever mechanism we use to be \"allocation-free\" (or more generally, just free)</p>",
+        "id": 183594557,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576532916
+    },
+    {
+        "content": "<p>I think one invariant that kind of enforces this is to allow replacing whatever mechanism we use with an <code>unsafe { transmute::&lt;T, U&gt;(x) }</code></p>",
+        "id": 183594601,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576532949
+    },
+    {
+        "content": "<p>But that feels to restrictive, since it require both <code>T</code> and <code>U</code> to have the same size</p>",
+        "id": 183594625,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576532965
+    },
+    {
+        "content": "<p>(e.g. it won't work for <code>&amp;[T]</code> to <code>&amp;[T; N]</code> because both references have different sizes)</p>",
+        "id": 183594682,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576533000
+    },
+    {
+        "content": "<p>It seems fair to classify &amp;[T] to &amp;U as a different \"type\" of transmute which we can simply support separately from non-referencing T to U.</p>",
+        "id": 183595162,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576533296
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"224471\">@Lokathor</span> to me it feels more like a coercion than a transmute</p>",
+        "id": 183640325,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576582965
+    },
+    {
+        "content": "<p>We are coercing a fat pointer <code>&amp;[T]</code> into a thin pointer, e.g., <code>&amp;[T; N]</code>.</p>",
+        "id": 183640342,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576582990
+    },
+    {
+        "content": "<p>I think there is also a third case: coercing <code>&amp;[T]</code> to <code>&amp;[U]</code>, where the coercion is not just a \"bitwise\" copy, but it might involve changing the bits of, e.g., the length of the slice (e.g. for going from <code>&amp;[u16]</code> to <code>&amp;[u8]</code>).</p>",
+        "id": 183640456,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576583067
+    },
+    {
+        "content": "<p>The main problem with doing \"some work\" is that the work can fail. I'm not sure if this is true for going from <code>&amp;[u16]</code> to <code>&amp;[u8]</code>, but one thing that could happen is that this coercion could fail if, e.g., doubling the length overflows <code>isize</code>, but whether that can actually happen might depend on which limits we impose to the lengths of allocations (e.g. if an allocation can at most be <code>isize</code> bytes, such overflow cannot happen). So there might be some subtle interaction between coercions that do some work, and unspecified parts of the Rust abstract machine, like the largest size of a Rust object or allocation.</p>",
+        "id": 183640641,
+        "sender_full_name": "gnzlbg",
+        "timestamp": 1576583224
+    },
+    {
+        "content": "<p>that's already a general limit on slices (no more than isize bytes), but I guess it's not an allocation limit in general. Still, if you have any slice in rust it's span is isize::MAX bytes or less</p>",
+        "id": 183657606,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576595905
+    },
+    {
+        "content": "<p>But yeah, that's why I like \"casting\", because people understand fuzzily that a cast is \"free, or maybe a tiny amount of work\"</p>",
+        "id": 183657676,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1576595963
+    }
+]

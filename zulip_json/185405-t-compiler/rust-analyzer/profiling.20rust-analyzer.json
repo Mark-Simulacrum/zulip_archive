@@ -1,0 +1,152 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133169\">@matklad</span>  I've had a look at profiles of rust-analyzer (when adding just whitespace) and I have a hypothesis wrt. the unaccounted time that we saw (or at least some of it). I looked at <code>Module::from_file</code> that regularly takes &gt;60ms and it seems that this is coming from <code>db.crate_def_map</code> even though I haven't seen <code>crate_def_map_query</code> itself being called. I'm wondering if this time could be spent in salsa -- trying to figure out if something needs to be recomputed or not? (and then deciding that it doesn't, so in the end <code>create_def_map_query</code> is never called)<br>\nMy experiment: <a href=\"https://github.com/michalt/rust-analyzer/commit/57dee141c34070e8ddf2c870908a01e3ce073eed\" target=\"_blank\" title=\"https://github.com/michalt/rust-analyzer/commit/57dee141c34070e8ddf2c870908a01e3ce073eed\">https://github.com/michalt/rust-analyzer/commit/57dee141c34070e8ddf2c870908a01e3ce073eed</a><br>\nIf my understanding is correct then it seems that this is a bit of a blind spot for how we currently use <code>ra_prof</code> -- we don't know if some unaccounted recomputation is taking long or if the time is spent in salsa. We could potentially add a bunch of more <code>profile</code> around calls to <code>db</code>, but it does feel that this should belong to salsa itself, which has all the information needed to account the time to the right place.</p>\n<p>What do you think? Perhaps I'm misunderstanding something? (also do you know whether salsa has some similar profiling mechanism that we could use?)</p>",
+        "id": 184729408,
+        "sender_full_name": "michalt",
+        "timestamp": 1578054394
+    },
+    {
+        "content": "<p>Yeah, that does sound like a resaonable hypothesis. Specifically, salsa might spend quite some time validating that the answer has not changed, without actually recomputing the function. I think the best way to test this hypothesis is to point <code>rust-analyzer</code> to a custom build of <code>salsa</code> (using <code>[patch]</code> section in Cargo.toml) and adding profile calls to salsa itself.</p>\n<p>Salsa checks happen here: <a href=\"https://github.com/salsa-rs/salsa/blob/37a3650aef84883f42358d44960a5f2421acb9ba/src/derived/slot.rs#L144-L145\" target=\"_blank\" title=\"https://github.com/salsa-rs/salsa/blob/37a3650aef84883f42358d44960a5f2421acb9ba/src/derived/slot.rs#L144-L145\">https://github.com/salsa-rs/salsa/blob/37a3650aef84883f42358d44960a5f2421acb9ba/src/derived/slot.rs#L144-L145</a></p>",
+        "id": 184729572,
+        "sender_full_name": "matklad",
+        "timestamp": 1578054611
+    },
+    {
+        "content": "<p>A further steps here would be:</p>\n<ul>\n<li>figure out why validation takes so long? Perhaps we, for some reason, have too many dependencies which need to be validated? Validation costs can be reduced by using <a href=\"https://github.com/salsa-rs/salsa/blob/ae9ab75384a6b946263507c71790b8927da05244/src/durability.rs\" target=\"_blank\" title=\"https://github.com/salsa-rs/salsa/blob/ae9ab75384a6b946263507c71790b8927da05244/src/durability.rs\">durability</a></li>\n<li>run some cpu profiling on salsa, to check if there's some low-hanging fruit to optimize validation</li>\n</ul>",
+        "id": 184729721,
+        "sender_full_name": "matklad",
+        "timestamp": 1578054833
+    },
+    {
+        "content": "<p>Cool, sounds like a plan! Thanks for the pointers re using a custom salsa build!</p>",
+        "id": 184729987,
+        "sender_full_name": "michalt",
+        "timestamp": 1578055105
+    },
+    {
+        "content": "<p>Oh, one useful thing to do would be merge the changes in your gist. I think we can do this nicely in this way:</p>\n<ul>\n<li>rename <code>crate_def_map</code> and corresponding profile to <code>compute_crate_def_map</code></li>\n<li>add a <code>#[salsa::transparent]</code> <code>crate_def_map</code> query, which forwards to <code>compute_</code> one, with a profile call on top</li>\n</ul>",
+        "id": 184729991,
+        "sender_full_name": "matklad",
+        "timestamp": 1578055111
+    },
+    {
+        "content": "<p>That way, we'll see somthing like</p>\n<div class=\"codehilite\"><pre><span></span>crate_def_map 9000\n  compute_crate_def_map 9000\n</pre></div>\n\n\n<p>or </p>\n<div class=\"codehilite\"><pre><span></span>crate_def_map 600\n// nothing here, we know it&#39;s validation!\n</pre></div>",
+        "id": 184730022,
+        "sender_full_name": "matklad",
+        "timestamp": 1578055167
+    },
+    {
+        "content": "<p>Oh, nice! I was thinking how we could do this nicely, but didn't know about <code>salsa::transparent</code>.</p>",
+        "id": 184730110,
+        "sender_full_name": "michalt",
+        "timestamp": 1578055232
+    },
+    {
+        "content": "<p><code>crate_def_map</code> probably does have a huge amount of dependencies, doesn't it</p>",
+        "id": 184730932,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1578056249
+    },
+    {
+        "content": "<p>I wouldn't expect a huge amount: most deps should be const, so we should be left with a raw_items per file</p>",
+        "id": 184731438,
+        "sender_full_name": "matklad",
+        "timestamp": 1578056675
+    },
+    {
+        "content": "<p>Here's what I came up with: <a href=\"https://github.com/rust-analyzer/rust-analyzer/pull/2731\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/pull/2731\">https://github.com/rust-analyzer/rust-analyzer/pull/2731</a> -- do let me know if I misunderstood your suggestion! :)</p>",
+        "id": 184731664,
+        "sender_full_name": "michalt",
+        "timestamp": 1578056886
+    },
+    {
+        "content": "<p>I've added some logging to salsa: <a href=\"https://github.com/michalt/salsa/commit/b9c75b79acf9951b8d96011c682cf9c49bdbb49d\" target=\"_blank\" title=\"https://github.com/michalt/salsa/commit/b9c75b79acf9951b8d96011c682cf9c49bdbb49d\">https://github.com/michalt/salsa/commit/b9c75b79acf9951b8d96011c682cf9c49bdbb49d</a> and it does seem that it's mostly validation. But it's not trivial to understand if some particular thing is expensive or if it's just the sheer number of transitive dependencies. (LMK if you have any suggestions/suspicions) Perhaps salsa should also collect some profiling stats itself?<br>\nAnyway, I'll try to do some profiling with <code>perf</code> over the weekend.</p>",
+        "id": 184756121,
+        "sender_full_name": "michalt",
+        "timestamp": 1578076335
+    },
+    {
+        "content": "<blockquote>\n<p>or if it's just the sheer number of transitive dependencies. </p>\n</blockquote>\n<p>A good thing would be to <em>check</em> how many dependencies are there. As I've mentioned above, I wouldn't expect <em>that</em> many dependencies for a crate_def_map query</p>",
+        "id": 184759147,
+        "sender_full_name": "matklad",
+        "timestamp": 1578078614
+    },
+    {
+        "content": "<p>Would it be worth increasing <code>RA_LRU_CAP</code> to be sure that's not causing it?</p>",
+        "id": 184760399,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1578079583
+    },
+    {
+        "content": "<p>We might try to do this to rule it out for sure, but I don't think its an issue: otherwise, we'd see a number of lru queries in the profile</p>",
+        "id": 184760612,
+        "sender_full_name": "matklad",
+        "timestamp": 1578079734
+    },
+    {
+        "content": "<p>I made some progress with understanding what is taking so much time and it seems that the graph is much larger than I expected. It seems that the single <code>ComputeCrateDefMapQuery</code> triggers checking about 62k memoized values in salsa: <a href=\"https://github.com/michalt/rust-analyzer/commit/25167ed846c24de3604a233f0d511237cf363f7c\" target=\"_blank\" title=\"https://github.com/michalt/rust-analyzer/commit/25167ed846c24de3604a233f0d511237cf363f7c\">https://github.com/michalt/rust-analyzer/commit/25167ed846c24de3604a233f0d511237cf363f7c</a><br>\nWe process about ~1.5k <code>FileId</code>s (even though rust-analyzer has less than 600 Rust files..?) and ~19k <code>MacroFile</code>s (!!!), which seem to be the main culprit here (we end up with roughly ~20k checks for each of <code>AstIdMapQuery</code>, <code>RawItemsQuery</code> and <code>MacroArgQuery</code>)<br>\nI have no idea why we have so many<code>FileId</code>s compared to the actual Rust files in rust analyzer. Regarding <code>MacroFile</code>, it seems that we create a separate <code>MacroFile</code> per macro call -- is that correct? What is the reason for this?<br>\nAnyway, please do have a look if I missed/misunderstood something!</p>",
+        "id": 184859348,
+        "sender_full_name": "michalt",
+        "timestamp": 1578249152
+    },
+    {
+        "content": "<blockquote>\n<p>we create a separate MacroFile per macro call -- is that correct? What is the reason for this?</p>\n</blockquote>\n<p>Yes, each macro call creates a virtual file. We use this setup to allow incremental macro exansion, so that in</p>\n<div class=\"codehilite\"><pre><span></span>top_level_macro_call! {\n  fn foo() { body }\n}\n</pre></div>\n\n\n<p>changes to the <code>body</code> do not invalidate the raw items for the containing file</p>",
+        "id": 184859681,
+        "sender_full_name": "matklad",
+        "timestamp": 1578249733
+    },
+    {
+        "content": "<p>And yes, I would expact more macro files than real files, but the numbers you show do seem excessive. Especially given that there are fewer real files at all :D</p>",
+        "id": 184859695,
+        "sender_full_name": "matklad",
+        "timestamp": 1578249796
+    },
+    {
+        "content": "<p>I guess with this logging the next logical step is to minize example and to see why we get such amplification</p>",
+        "id": 184859704,
+        "sender_full_name": "matklad",
+        "timestamp": 1578249830
+    },
+    {
+        "content": "<p>You can use <code>featureFlags: { \"withSysroot\": false }</code> <a href=\"https://github.com/rust-analyzer/rust-analyzer/blob/e4d217074d1f2c922cf8c5a247ca05fa06b0b7ed/editors/code/src/client.ts#L41\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/blob/e4d217074d1f2c922cf8c5a247ca05fa06b0b7ed/editors/code/src/client.ts#L41\">flag</a> to exclude standard library, which should help with minimization</p>",
+        "id": 184859755,
+        "sender_full_name": "matklad",
+        "timestamp": 1578249888
+    },
+    {
+        "content": "<p>Quick question: what happens for nested macros (a macro expands into another macro call) -- do we create 1 or more such virtual files?</p>",
+        "id": 184861066,
+        "sender_full_name": "michalt",
+        "timestamp": 1578252205
+    },
+    {
+        "content": "<p>Yup</p>",
+        "id": 184861146,
+        "sender_full_name": "matklad",
+        "timestamp": 1578252329
+    },
+    {
+        "content": "<p>So, a recursive macro can indeed create a deep tower of files</p>",
+        "id": 184861151,
+        "sender_full_name": "matklad",
+        "timestamp": 1578252345
+    },
+    {
+        "content": "<p>Oh interesting!</p>",
+        "id": 184861284,
+        "sender_full_name": "michalt",
+        "timestamp": 1578252519
+    },
+    {
+        "content": "<p>I'll play around with some small crate (as you suggested) and see what we can learn. Thanks!</p>",
+        "id": 184861368,
+        "sender_full_name": "michalt",
+        "timestamp": 1578252610
+    },
+    {
+        "content": "<p>For the record, the result of <span class=\"user-mention silent\" data-user-id=\"252272\">michalt</span> 's investigation is this this epic win of a PR: <a href=\"https://github.com/rust-analyzer/rust-analyzer/pull/2753#issue-359719510\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/pull/2753#issue-359719510\">https://github.com/rust-analyzer/rust-analyzer/pull/2753#issue-359719510</a></p>",
+        "id": 184960189,
+        "sender_full_name": "matklad",
+        "timestamp": 1578347185
+    }
+]

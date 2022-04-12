@@ -1,0 +1,584 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116883\">@tmandry</span> - here's the hack I mentioned in the meeting earlier: <a href=\"https://github.com/eholk/rust/commit/4ef682c0f63b056423cb69d9caf91b22ed1ba94b\">https://github.com/eholk/rust/commit/4ef682c0f63b056423cb69d9caf91b22ed1ba94b</a></p>",
+        "id": 247743929,
+        "sender_full_name": "eholk",
+        "timestamp": 1627669048
+    },
+    {
+        "content": "<p>It fails several tests in the test suite, so that's good</p>",
+        "id": 247743956,
+        "sender_full_name": "eholk",
+        "timestamp": 1627669063
+    },
+    {
+        "content": "<p>On of the tests it fails is from <a href=\"http://async-fn-nonsend.rs\">async-fn-nonsend.rs</a>:</p>\n<div class=\"codehilite\"><pre><span></span><code>async fn non_send_temporary_in_match() {\n    // We could theoretically make this work as well (produce a `Send` future)\n    // for scrutinees / temporaries that can or will\n    // be dropped prior to the match body\n    // (e.g. `Copy` types).\n    match Some(non_send()) {\n        Some(_) =&gt; fut().await,\n        None =&gt; {}\n    }\n}\n</code></pre></div>\n<p>That looks pretty similar, but I'm not sure whether it should work or not. Are we allowed to drop the result of <code>Some(non_send())</code> before calling <code>fut().await</code>, since even though we technically still have a borrow in the pattern, <code>Some(_)</code>, it's not actually used?</p>",
+        "id": 247744171,
+        "sender_full_name": "eholk",
+        "timestamp": 1627669190
+    },
+    {
+        "content": "<p>hmm, good question</p>",
+        "id": 247771298,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627685891
+    },
+    {
+        "content": "<p>the language semantics are that <code>Some(non_send())</code> lives until the end of the match</p>",
+        "id": 247771575,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627686128
+    },
+    {
+        "content": "<p>so I think we should err on the side of not allowing it for now</p>",
+        "id": 247771584,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627686135
+    },
+    {
+        "content": "<p>it isn't specified how define how captures across await points actually work; I think we <em>could</em> define them to behave this way, but it feels like a special case</p>",
+        "id": 247771876,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627686395
+    },
+    {
+        "content": "<p>borrowing semantics, on the other hand, are clearly defined by control flow</p>",
+        "id": 247771932,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627686466
+    },
+    {
+        "content": "<p>actually, the more I think about it</p>",
+        "id": 247772175,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627686690
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116883\">tmandry</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/.2357017/near/247771932\">said</a>:</p>\n<blockquote>\n<p>borrowing semantics, on the other hand, are clearly defined by control flow</p>\n</blockquote>\n<p>that's not what <a href=\"https://github.com/rust-lang/rust/issues/57017\">#57017</a> is about, it's about holding a value (which happens to be a reference) that isn't <code>Sync</code> over an await point</p>",
+        "id": 247772430,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627686938
+    },
+    {
+        "content": "<p>and control flow analysis for these values is really what we want</p>",
+        "id": 247772626,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627687103
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"127859\">@Taylor Cramer</span> can you explain the comment about <code>Copy</code> types?</p>",
+        "id": 247772845,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627687343
+    },
+    {
+        "content": "<p>I can't find anything that would imply that unused <code>Copy</code> temporaries in scrutinees can be dropped prior to the match body</p>",
+        "id": 247772868,
+        "sender_full_name": "tmandry",
+        "timestamp": 1627687382
+    },
+    {
+        "content": "<p>Okay, I'm finally coming back to this. Looking at the <code>async-fn-nonsend.rs</code> test again, it looks like <code>non_sync_with_method_call</code> is more like the test case from <a href=\"https://github.com/rust-lang/rust/issues/57017\">#57017</a>:</p>\n<div class=\"codehilite\"><pre><span></span><code>async fn non_sync_with_method_call() {\n    // FIXME: it&#39;d be nice for this to work.\n    let f: &amp;mut std::fmt::Formatter = panic!();\n    if non_sync().fmt(f).unwrap() == () {\n        fut().await;\n    }\n}\n</code></pre></div>",
+        "id": 249175292,
+        "sender_full_name": "eholk",
+        "timestamp": 1628719375
+    },
+    {
+        "content": "<p>Anyway, back to <a href=\"https://github.com/rust-lang/rust/issues/57017\">#57017</a>, the test cases I've been looking into is:</p>\n<div class=\"codehilite\"><pre><span></span><code>pub fn wat1() -&gt; impl Future + Send {\n    let client = Client(Box::new(true));\n    assert_send(client);\n    async move {\n        match client.status() {\n            200 =&gt; {\n                get().await;\n            },\n            _ =&gt; (),\n        }\n    }\n}\n</code></pre></div>",
+        "id": 249175516,
+        "sender_full_name": "eholk",
+        "timestamp": 1628719523
+    },
+    {
+        "content": "<p>As I understand it, the <code>match</code> gets simplified into something like this:</p>\n<div class=\"codehilite\"><pre><span></span><code>let client = Client(Box::new(true));\nlet t1: &amp;Client = &amp;client;\nlet t2: u32 = Client::status(t1);\nmatch t2 {\n    100 =&gt; get().await,\n    _ =&gt; (),\n}\n</code></pre></div>",
+        "id": 249175706,
+        "sender_full_name": "eholk",
+        "timestamp": 1628719637
+    },
+    {
+        "content": "<p>So to approximate for the type of the closure for the <code>.await</code>, we basically just look at the types of everything in scope at that point. So in this case, we have a <code>Client</code>, an <code>&amp;Client</code>, and a <code>u32</code>. The problem is that since <code>Client</code> is <code>Send</code> but not <code>Sync</code>, <code>&amp;Client</code> is not <code>Send</code>.</p>",
+        "id": 249176096,
+        "sender_full_name": "eholk",
+        "timestamp": 1628719831
+    },
+    {
+        "content": "<p>But if the rule is that the scrutinee of the match expression must live for the whole match expression, it seems like that should only include <code>t2: u32</code>. Any intermediate temporaries should be able to be dropped, right?</p>",
+        "id": 249176295,
+        "sender_full_name": "eholk",
+        "timestamp": 1628719939
+    },
+    {
+        "content": "<p>So brainstorming a little more, it seems like maybe this scope-based analysis for live-across-yield types shouldn't include temporaries, but only things that are (roughly) bound to some name the program can access. I'm being pretty imprecise about what I mean by bound here though.</p>",
+        "id": 249176585,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720111
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"421986\">eholk</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/.2357017/near/249176295\">said</a>:</p>\n<blockquote>\n<p>But if the rule is that the scrutinee of the match expression must live for the whole match expression, it seems like that should only include <code>t2: u32</code>. Any intermediate temporaries should be able to be dropped, right?</p>\n</blockquote>\n<p>I mean, not according to <a href=\"https://doc.rust-lang.org/reference/destructors.html#temporary-scopes\">the reference</a></p>",
+        "id": 249176767,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720216
+    },
+    {
+        "content": "<blockquote>\n<p>The scrutinee of a match expression is not a temporary scope, so temporaries in the scrutinee can be dropped after the match expression.</p>\n</blockquote>",
+        "id": 249176794,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720236
+    },
+    {
+        "content": "<p>Ah thanks, that reference looks like something I should read :)</p>",
+        "id": 249176803,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720244
+    },
+    {
+        "content": "<p>yeah, so what I'm thinking is that <em>scopes</em> shouldn't actually matter for this analysis, but rather <em>liveness</em></p>",
+        "id": 249176909,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720305
+    },
+    {
+        "content": "<p>i.e. whether a value is actually <em>used</em> after an await point, as opposed to being potentially usable</p>",
+        "id": 249176976,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720350
+    },
+    {
+        "content": "<p>this is what we do for NLL</p>",
+        "id": 249177049,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720389
+    },
+    {
+        "content": "<p>if we were to use scopes, we'd have to change the semantics I linked to do anything about this :-)</p>",
+        "id": 249177168,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720448
+    },
+    {
+        "content": "<p>Yeah, scopes are an overapproximation of liveness.</p>",
+        "id": 249177179,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720455
+    },
+    {
+        "content": "<p>So if the type implements <code>Drop</code>, would that count as a use after the <code>await</code>?</p>",
+        "id": 249177209,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720477
+    },
+    {
+        "content": "<p>good question, and yes!</p>",
+        "id": 249177221,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720494
+    },
+    {
+        "content": "<p>So another thing I don't have a great handle on is why this case does work:</p>\n<div class=\"codehilite\"><pre><span></span><code>pub fn ok() -&gt; impl Future + Send {\n    let client = Client(Box::new(true));\n    async move {\n        if client.status() == 200 {\n            let _x = get().await;\n        }\n    }\n}\n</code></pre></div>",
+        "id": 249177297,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720532
+    },
+    {
+        "content": "<p>I figured it was because <code>if</code> doesn't keep its expression live until the end of the <code>if</code> expression, but I'm not sure</p>",
+        "id": 249177339,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720571
+    },
+    {
+        "content": "<p>right</p>",
+        "id": 249177367,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720588
+    },
+    {
+        "content": "<p>the condition of an <code>if</code> expression is a temporary scope, so the borrow is dropped before entering the body</p>",
+        "id": 249177407,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720616
+    },
+    {
+        "content": "<p>Ah, okay. So (and I'm not saying we should do this, but...) if we made the scrutinee of a <code>match</code> a temporary scope, would that fix this issue?</p>",
+        "id": 249177488,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720664
+    },
+    {
+        "content": "<p>if the analysis is doing what I think it is, yes</p>",
+        "id": 249177549,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720707
+    },
+    {
+        "content": "<p>but the current behavior is load bearing now :)</p>",
+        "id": 249177588,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720733
+    },
+    {
+        "content": "<p>This works:</p>\n<div class=\"codehilite\"><pre><span></span><code>pub fn wat1() -&gt; impl Future + Send {\n    let client = Client(Box::new(true));\n    async move {\n        match {let s = client.status(); s} {\n            200 =&gt; {\n                get().await;\n            },\n            _ =&gt; (),\n        }\n    }\n}\n</code></pre></div>",
+        "id": 249177601,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720740
+    },
+    {
+        "content": "<p>Which I think is manually introducing a temporary scope there, roughly?</p>",
+        "id": 249177611,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720749
+    },
+    {
+        "content": "<p>yeah, specifically the statement <code>let s = client.status();</code></p>",
+        "id": 249177687,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720786
+    },
+    {
+        "content": "<p>Was it intentional that the scrutinee is not a temporary scope, or is that a bug that people started to rely on?</p>",
+        "id": 249177776,
+        "sender_full_name": "eholk",
+        "timestamp": 1628720852
+    },
+    {
+        "content": "<p>I'm not 100% sure of the history here, but now discussions of new language sugar often define themselves in terms of <code>match</code> for this reason; it's a useful tool to have in your toolbox</p>",
+        "id": 249177937,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628720954
+    },
+    {
+        "content": "<p>Sounds good</p>",
+        "id": 249178121,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721087
+    },
+    {
+        "content": "<p>By the time we get to <code>generator_interior.rs</code>, do we know what types implement <code>Drop</code>?</p>",
+        "id": 249178209,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721128
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rfcs/pull/2442#issuecomment-894682987\">recent example</a> if you're interested</p>",
+        "id": 249178212,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721129
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"421986\">eholk</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/.2357017/near/249178209\">said</a>:</p>\n<blockquote>\n<p>By the time we get to <code>generator_interior.rs</code>, do we know what types implement <code>Drop</code>?</p>\n</blockquote>\n<p>for concrete types we can query for this information, I think. for generics we'll have to be conservative</p>",
+        "id": 249178345,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721234
+    },
+    {
+        "content": "<p>Makes sense</p>",
+        "id": 249178390,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721247
+    },
+    {
+        "content": "<p>I'm not sure if this was brought up before actually</p>",
+        "id": 249178395,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721253
+    },
+    {
+        "content": "<p>but yeah I don't see a reason not to make things that should obviously work, work :-)</p>",
+        "id": 249178438,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721290
+    },
+    {
+        "content": "<p>we can always be conservative and target <em>just</em> reference types for now</p>",
+        "id": 249178603,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721436
+    },
+    {
+        "content": "<p>Oh yeah, because reference types never implement <code>Drop</code>?</p>",
+        "id": 249178627,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721462
+    },
+    {
+        "content": "<p>(including <code>&amp;T</code> for generic types <code>T</code>, since it doesn't matter what <code>T</code> is)</p>",
+        "id": 249178629,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721463
+    },
+    {
+        "content": "<p>yeah</p>",
+        "id": 249178636,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721465
+    },
+    {
+        "content": "<p>I bet that would be a lot cheaper actually</p>",
+        "id": 249178711,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721494
+    },
+    {
+        "content": "<p>Yeah, handling just reference types would probably cover a lot of the cases people are hitting so far.</p>",
+        "id": 249178729,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721505
+    },
+    {
+        "content": "<p>yeah, that seems right to me</p>",
+        "id": 249178769,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721528
+    },
+    {
+        "content": "<p>The hard part seems like writing a liveness pass rather than which types we support though</p>",
+        "id": 249178779,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721535
+    },
+    {
+        "content": "<p>I think we have something like this for HIR already</p>",
+        "id": 249178797,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721553
+    },
+    {
+        "content": "<p>niko showed me once</p>",
+        "id": 249178802,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721558
+    },
+    {
+        "content": "<p>not sure if it's quite what you'd want or not</p>",
+        "id": 249178814,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721569
+    },
+    {
+        "content": "<p>Going from reference types to any types seems like it's a matter of replace <code>if ty.is_reference_type()</code> with <code>if ty.has_destructor()</code></p>",
+        "id": 249178827,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721576
+    },
+    {
+        "content": "<p>Is this the <code>ExprUseVisitor</code>?</p>",
+        "id": 249178838,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721586
+    },
+    {
+        "content": "<p>I looked at it briefly when I first started looking at this bug, and it didn't seem like quite what we want, although maybe it will look different now that I understand the issues better.</p>",
+        "id": 249178944,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721641
+    },
+    {
+        "content": "<p>that rings a bell</p>",
+        "id": 249178957,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721660
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"421986\">eholk</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/.2357017/near/249178827\">said</a>:</p>\n<blockquote>\n<p>Going from reference types to any types seems like it's a matter of replace <code>if ty.is_reference_type()</code> with <code>if ty.has_destructor()</code></p>\n</blockquote>\n<p>oh, yeah we have a flag for this of course</p>",
+        "id": 249178978,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721681
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"421986\">eholk</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/.2357017/near/249178838\">said</a>:</p>\n<blockquote>\n<p>Is this the <code>ExprUseVisitor</code>?</p>\n</blockquote>\n<p>there's also <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_passes/liveness/index.html\"><code>rustc_passes::liveness</code></a></p>",
+        "id": 249179019,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721720
+    },
+    {
+        "content": "<p>those docs say AST but I see HIR types in the code</p>",
+        "id": 249179085,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628721746
+    },
+    {
+        "content": "<p>Oh, that sounds more like what I want</p>",
+        "id": 249179088,
+        "sender_full_name": "eholk",
+        "timestamp": 1628721749
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"421986\">eholk</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/meeting.202021-08-13/near/249386035\">said</a>:</p>\n<blockquote>\n<p>I'm still working on the generator capture issue. We talked some the other day. Liveness seems like the way to go. I was hoping to add a little extra to the existing liveness pass to track what's live across yields that we could use in <code>generator_interior.rs</code>, but unfortunately liveness happens after type checking.</p>\n</blockquote>\n<p>hmm, I'm wondering if the uses of typeck in here can all be replaced with conservative assumptions</p>",
+        "id": 249389040,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628876068
+    },
+    {
+        "content": "<p>from a quick skim it wasn't obvious that all of them could, but it seemed like some of them could</p>",
+        "id": 249389081,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628876091
+    },
+    {
+        "content": "<p>I'm thinking about making the code generic on the kind of information it has, not changing how existing uses work</p>",
+        "id": 249389230,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628876163
+    },
+    {
+        "content": "<p>it seems like the alternative is writing a brand new pass, which might be better, I'm not sure</p>",
+        "id": 249389440,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628876283
+    },
+    {
+        "content": "<p><code>generator_interior.rs</code> runs as part of type checking though, right?</p>",
+        "id": 249390074,
+        "sender_full_name": "eholk",
+        "timestamp": 1628876628
+    },
+    {
+        "content": "<p>Or do you mean changing liveness to not require type checking first?</p>",
+        "id": 249390498,
+        "sender_full_name": "eholk",
+        "timestamp": 1628876723
+    },
+    {
+        "content": "<p>My current thinking (and I don't love it) is to add a mini liveness pass that runs in <code>generator_interior::resolve_interior</code> that figures out what's live across yield points, and then uses the results of that to replace the scope tree liveness approximation in <code>InteriorVisitor::record</code>.</p>",
+        "id": 249390864,
+        "sender_full_name": "eholk",
+        "timestamp": 1628876905
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"421986\">eholk</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/.2357017/near/249390498\">said</a>:</p>\n<blockquote>\n<p>Or do you mean changing liveness to not require type checking first?</p>\n</blockquote>\n<p>that's what I meant, yes</p>",
+        "id": 249394179,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628878568
+    },
+    {
+        "content": "<p>Ah, okay.</p>",
+        "id": 249394209,
+        "sender_full_name": "eholk",
+        "timestamp": 1628878589
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"421986\">eholk</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/.2357017/near/249390864\">said</a>:</p>\n<blockquote>\n<p>My current thinking (and I don't love it) is to add a mini liveness pass that runs in <code>generator_interior::resolve_interior</code> that figures out what's live across yield points, and then uses the results of that to replace the scope tree liveness approximation in <code>InteriorVisitor::record</code>.</p>\n</blockquote>\n<p>this is what I meant by \"brand new pass\"</p>",
+        "id": 249394214,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628878591
+    },
+    {
+        "content": "<p>I tried moving <code>typeck::check_crate(tcx)</code> after <code>misc_checking_2</code> yesterday and got a bunch of test failures, but I didn't look into them much yet.</p>",
+        "id": 249394318,
+        "sender_full_name": "eholk",
+        "timestamp": 1628878656
+    },
+    {
+        "content": "<p>It actually looks like we could split out just liveness from <code>misc_checking_2</code> and bring that ahead of type checking.</p>",
+        "id": 249394405,
+        "sender_full_name": "eholk",
+        "timestamp": 1628878686
+    },
+    {
+        "content": "<p>Anyway, at this point my goal is to find a way to ask \"what variables are live across this expression,\" although potentially restricted to just yields.</p>",
+        "id": 249394702,
+        "sender_full_name": "eholk",
+        "timestamp": 1628878825
+    },
+    {
+        "content": "<p>I was more thinking of making that liveness code reusable instead of writing a new pass from scratch</p>",
+        "id": 249420879,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628892986
+    },
+    {
+        "content": "<p>than changing around existing stages, since I'm not sure what implications there are</p>",
+        "id": 249420907,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628893013
+    },
+    {
+        "content": "<p>but it might be easier to start from scratch honestly</p>",
+        "id": 249420919,
+        "sender_full_name": "tmandry",
+        "timestamp": 1628893022
+    },
+    {
+        "content": "<p>Yeah, I could see either way.</p>",
+        "id": 249426147,
+        "sender_full_name": "eholk",
+        "timestamp": 1628897925
+    },
+    {
+        "content": "<p>At the very least, I'm going to crib a lot from the existing liveness pass. It looks like there are a lot of small details in there that may be tricky to get right.</p>",
+        "id": 249426162,
+        "sender_full_name": "eholk",
+        "timestamp": 1628897947
+    },
+    {
+        "content": "<p>So I've got some hacky code that starts to use liveness to figure out what values to capture in the generator: <a href=\"https://github.com/eholk/rust/tree/precise-generator-yield-captures\">https://github.com/eholk/rust/tree/precise-generator-yield-captures</a></p>",
+        "id": 250019128,
+        "sender_full_name": "eholk",
+        "timestamp": 1629394378
+    },
+    {
+        "content": "<p>This repurposes the existing <a href=\"http://liveness.rs\">liveness.rs</a> pass, but I think what that pass needs and what our pass needs are enough different that we should probably write a separate pass.</p>",
+        "id": 250019592,
+        "sender_full_name": "eholk",
+        "timestamp": 1629394590
+    },
+    {
+        "content": "<p>The existing pass only looks at bound variables (let bindings, parameters, captures, etc.), but it doesn't consider temporaries at all. I think temporaries matter for generators, especially if they have a destructor, so we don't want to ignore all of those.</p>",
+        "id": 250019751,
+        "sender_full_name": "eholk",
+        "timestamp": 1629394664
+    },
+    {
+        "content": "<p>Also, since I made <code>typeck_results</code> optional in <a href=\"http://liveness.rs\">liveness.rs</a>, it means we can't see captured variables (I'm guessing there's a way around this), but captures are pretty important to generators.</p>",
+        "id": 250019986,
+        "sender_full_name": "eholk",
+        "timestamp": 1629394745
+    },
+    {
+        "content": "<p>Also, I'm pretty the following case should _not_ work, but I'm not sure.</p>\n<div class=\"codehilite\"><pre><span></span><code>    let g = move || {\n        let client = Client;\n        match status(&amp;client) {\n            _status =&gt; yield,\n        }\n        status(&amp;client)\n    };\n    assert_send(g);\n</code></pre></div>\n<p>Here <code>Client</code> has <code>impl !Sync</code>, although maybe <code>Client</code> is still <code>Send</code> and therefore this example should work?</p>",
+        "id": 250020764,
+        "sender_full_name": "eholk",
+        "timestamp": 1629395050
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"421986\">@eholk</span> btw you can use <a href=\"https://calendly.com/nikomatsakis\">https://calendly.com/nikomatsakis</a> if you want to book some time to talk about this :)</p>",
+        "id": 250052574,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629408986
+    },
+    {
+        "content": "<p>liveness is currently only used to report warnings, I'm a bit nervous about using it for something that is soundness-crucial</p>",
+        "id": 250052629,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1629409034
+    },
+    {
+        "content": "<p>Yeah, I think the existing liveness pass isn't what we want, but I think liveness as a concept would work well to solve this problem.</p>",
+        "id": 250055967,
+        "sender_full_name": "eholk",
+        "timestamp": 1629411180
+    },
+    {
+        "content": "<p>On the bright side, we have a safety net in the MIR translation step, so if we do something unsound here we'll end up with an ICE in MIR generation. Not that we want to introduce more ICEs, but at least this should keep us from silently introducing soundness holes.</p>",
+        "id": 250056071,
+        "sender_full_name": "eholk",
+        "timestamp": 1629411245
+    },
+    {
+        "content": "<p>The current liveness pass doesn't work for this case, from <code>addassign-yield.rs</code>:</p>\n<div class=\"codehilite\"><pre><span></span><code>    let _x = static || {\n        let mut s = String::new();\n        s += { yield; &quot;&quot; };\n    };\n</code></pre></div>",
+        "id": 250056182,
+        "sender_full_name": "eholk",
+        "timestamp": 1629411359
+    },
+    {
+        "content": "<p>Although that may be because I had to neuter some of the liveness analysis around method calls since we didn't have enough type information available yet.</p>",
+        "id": 250056311,
+        "sender_full_name": "eholk",
+        "timestamp": 1629411458
+    },
+    {
+        "content": "<p>Oh wait, no. That part only deals with functions that return <code>!</code>.</p>",
+        "id": 250056492,
+        "sender_full_name": "eholk",
+        "timestamp": 1629411591
+    }
+]

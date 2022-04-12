@@ -1,0 +1,212 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"118594\">@Dylan MacKenzie (ecstatic-morse)</span> I'm looking at compile times of <code>http-0.2.6</code>. It's unusual, spending over 7% of its time doing <code>memcpy</code>. I have determined this is because in <code>iterate_to_fixpoint</code> for <code>MaybeUninitializedPlaces</code> analysis there is one huge function with over 14,000 basic blocks and a <code>Domain</code> bitset with a domain size of 44,564. Unsurprisingly, the bitset <a href=\"https://github.com/rust-lang/rust/blob/d3f300477b89e70dd42379ba53c0e8ff74e9c694/compiler/rustc_mir_dataflow/src/framework/engine.rs#L224\">clone</a> done on the many iterations of the loop add up.</p>",
+        "id": 271209921,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644364307
+    },
+    {
+        "content": "<p>It's good that this clone is already optimized <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>  But I'm wondering if there is scope for more</p>",
+        "id": 271210046,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644364376
+    },
+    {
+        "content": "<p>I also appreciate that a function this extreme is a heavy lift in general</p>",
+        "id": 271210256,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644364491
+    },
+    {
+        "content": "<p>Like, is there a domain-specific observation we can take advantage of, like if <code>state</code> doesn't change, or something</p>",
+        "id": 271211498,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644365147
+    },
+    {
+        "content": "<p>Are the bitsets sparse? We use dense bitsets unconditionally in dataflow due to some API shortcomings that have <a href=\"https://github.com/rust-lang/rust/pull/88272#issuecomment-908549295\">since been resolved</a>. The line you linked to initializes all the (dense) bitsets before the analysis even runs. This is what I would look into first.</p>\n<p>How are the results of that analysis used? Is it only inspected at a few points in the CFG? Are only a subset of the places checked? If it's the latter, we could add a filter to dataflow to only check \"interesting\" indices. If it's the former, we could experiment with computing it via graph reachability, as <code>borrowck</code> does for liveness. That has its own performance pitfalls of course.</p>",
+        "id": 271211756,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1644365303
+    },
+    {
+        "content": "<p>It's not sparse, alas. Maximum <code>count</code> is 29,727, there are a handful of occurrences with a <code>count</code> over 10,000, and dozens over 1,000</p>",
+        "id": 271214864,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644367193
+    },
+    {
+        "content": "<p>And the vast majority have a count of over 8, which IIRC is the threshold for HybridBitSet to switch to a dense representation</p>",
+        "id": 271215062,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644367323
+    },
+    {
+        "content": "<p>I have no idea about how the analysis results are used <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>  This crate is definitely an outlier so I don't think we need to perform heroics if there aren't easy wins. The more I look at it, the more it seems like it's just a case of \"it compiles slow because the function is really big\"</p>",
+        "id": 271215485,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644367482
+    },
+    {
+        "content": "<p>I'm not aware of any obvious micro-optimizations besides sparse bitsets and filtering uninteresting locals. I tried pretty hard to make everything as efficient as possible, though it's always possible that I've missed something. We compute <code>MaybeUninitialized</code> twice AFAIK for normal (non <code>const</code>) functions, once for drop elaboration and once for <code>borrowck</code>. There might be some way to cache the results in between, but the CFG changes pretty significantly between these two passes (in particular <code>FalseEdges</code> are removed), so I'm skeptical.</p>",
+        "id": 271216044,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1644367842
+    },
+    {
+        "content": "<p><code>borrowck</code> (really just checking for move errors) and drop elaboration shouldn't care about places that are <code>Copy</code>, although there might be some complications around things behind a shared reference. That would be an easily computable filter. Not sure how much it would help for <code>http</code>, and computing it plus remapping indices might waste time as well.</p>",
+        "id": 271216673,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1644368312
+    },
+    {
+        "content": "<p>What's the name of the giant function in <code>http</code>?</p>",
+        "id": 271216892,
+        "sender_full_name": "Dylan MacKenzie (ecstatic-morse)",
+        "timestamp": 1644368465
+    },
+    {
+        "content": "<p>I don't know, can I access the fn name easily within iterate_to_fixpoint?</p>",
+        "id": 271217512,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644368990
+    },
+    {
+        "content": "<p>Unsurprisingly, at peak memory usage, the 14k bitsets with 44k entries account for 32% of the heap</p>",
+        "id": 271218817,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644370095
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120989\">@nnethercote</span> do you have a sense of  the spread of the set bits? Would an interval set make some sense?</p>",
+        "id": 271219521,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1644370819
+    },
+    {
+        "content": "<p>I've only printed out the count of set bits so far, not their positions</p>",
+        "id": 271221740,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644372667
+    },
+    {
+        "content": "<p>Oh, turns out <code>MaybeUninitialized</code> and <code>MaybeInitialized</code> are equally huge. And then <code>EverInitialized</code> is about 2/3 the size</p>",
+        "id": 271225047,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644376141
+    },
+    {
+        "content": "<p>Oh, it might be possible to reuse the bitsets from MaybeInitializedPlaces in MaybeUninitializedPlaces</p>",
+        "id": 271225208,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644376273
+    },
+    {
+        "content": "<p>which would help with the allocations, but not the memcpying</p>",
+        "id": 271225670,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644376663
+    },
+    {
+        "content": "<p>All this stuff is used for borrowck</p>",
+        "id": 271226004,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644377085
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116122\">@simulacrum</span> I printed out some contents, they don't look amenable to intervals, lots of gaps</p>",
+        "id": 271228965,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644380178
+    },
+    {
+        "content": "<p>This crate really is a worst case scenario for this code</p>",
+        "id": 271228969,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644380191
+    },
+    {
+        "content": "<p>What <em>would</em> work is some kind of two-level BitSet structure, where you break the range up into, say, 1024 bit sequences, and if a 1024 bit sequence is all 0s or all 1s that gets an optimized representation. Because the set bits tend to be in not-quite-contiguous clusters. E.g. a bunch below a 100, and then a bunch in the 2000s, then a bunch in the 16000s, etc.</p>",
+        "id": 271230427,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644381976
+    },
+    {
+        "content": "<p>Such a ClusterBitSet might also be able to replace the existing HybridBitSet...</p>",
+        "id": 271231421,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644383147
+    },
+    {
+        "content": "<p>there are a few compressed bitmap structures that store sparse and dense chunks in such a way, roaring comes to mind</p>",
+        "id": 271250106,
+        "sender_full_name": "lqd",
+        "timestamp": 1644399216
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"118594\">Dylan MacKenzie (ecstatic-morse)</span> <a href=\"#narrow/stream/131828-t-compiler/topic/.60http.60.20crate/near/271216892\">said</a>:</p>\n<blockquote>\n<p>What's the name of the giant function in <code>http</code>?</p>\n</blockquote>\n<p>eyeballing the CFG sizes, I'd say <a href=\"https://github.com/hyperium/http/blob/1179d6fa90fc6d680c718450b18f223cb0b25aeb/src/header/name.rs#L1062-L1519\">parse_hdr</a></p>",
+        "id": 271254042,
+        "sender_full_name": "lqd",
+        "timestamp": 1644401216
+    },
+    {
+        "content": "<p>Oh, I just skimmed over <a href=\"https://arxiv.org/pdf/1402.6407v4.pdf\">https://arxiv.org/pdf/1402.6407v4.pdf</a>, Roaring has some similarities to what I proposed (a two-level scheme) but also some differences -- larger chunks, support for more-dense and less-dense chunks, is able to grow. I've started writing my own ClusterBitSet, I think I will continue that, it can be tailored more towards rustc's particular needs</p>",
+        "id": 271353765,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644444073
+    },
+    {
+        "content": "<p><code>keccak</code> (in rustc-perf) is even more extreme than <code>http</code>. I rediscovered <a href=\"https://github.com/rust-lang/rust/issues/54208\">#54208</a>, which was a big memory regression when NLL was introduced. (One of the very few notable perf regressions at all.)</p>",
+        "id": 271786243,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644816595
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/issues/93984\">#93984</a> has some draft heroics, with a new <code>ChunkedBitSet</code> type. It definitely reduces memory usage on <code>http</code> and <code>keccak</code> and few others that use very big bitsets, but the perf effects on other benchmarks aren't entirely neutral, so it's not an unambiguous win.</p>",
+        "id": 271786304,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644816667
+    },
+    {
+        "content": "<p>I'm wondering if these bitsets really need to be this big.</p>",
+        "id": 271786314,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644816689
+    },
+    {
+        "content": "<p>E.g. consider the <code>EverInitializedPlaces</code> analysis for <code>http</code></p>\n<ul>\n<li>There are 14,000 BBs in the function</li>\n<li>\n<p>The <code>domain_size</code> of the analysis domain bitset is 29,000</p>\n<ul>\n<li>There is one of these bitsets for every BB</li>\n<li>\n<p><code>domain_size</code> is equal to the number of <code>Init</code>s, i.e. points in the <br>\n   function that initialize an L-value.</p>\n</li>\n<li>\n<p>The number of <code>Init</code>s will correlate strongly with number of BBs</p>\n</li>\n<li>Therefore the size of these bitsets is quadratic-ish</li>\n</ul>\n</li>\n</ul>",
+        "id": 271786465,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644816914
+    },
+    {
+        "content": "<p>For <code>keccak</code> the biggest function has bitsets with domain_size of 83328, and there are 26,000 BBs</p>",
+        "id": 271786483,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644816951
+    },
+    {
+        "content": "<p>And the <code>MaybeInitializedPlaces</code>/<code>MaybeUninitializedPlaces</code> analyses have even bigger bitsets</p>",
+        "id": 271786559,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644817026
+    },
+    {
+        "content": "<p>We should dump the access patterns on the bitsets on keccak and see if it would make sense to use a hashset at a certain point (no entry meaning <code>false</code>) by removing entries when the local is StorageDeaded</p>",
+        "id": 271804557,
+        "sender_full_name": "oli",
+        "timestamp": 1644832580
+    },
+    {
+        "content": "<blockquote>\n<p>There is one of these bitsets for every BB</p>\n</blockquote>\n<p>This is surprising but maybe it’s what dylan was referring to above by them being eagerly allocated. The dataflow framework usually is able to reuse block state along BB-chains.</p>",
+        "id": 271810603,
+        "sender_full_name": "lqd",
+        "timestamp": 1644836050
+    },
+    {
+        "content": "<p>There is a <a href=\"https://github.com/rust-lang/rust/blob/d3f300477b89e70dd42379ba53c0e8ff74e9c694/compiler/rustc_mir_dataflow/src/framework/engine.rs#L221-L224\"><code>state</code></a> variable that gets reused over and over, being <code>clone_from</code>'d on every iteration, which is a form of state reuse. Not sure if that's what you're referring to</p>",
+        "id": 271884177,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1644870651
+    }
+]

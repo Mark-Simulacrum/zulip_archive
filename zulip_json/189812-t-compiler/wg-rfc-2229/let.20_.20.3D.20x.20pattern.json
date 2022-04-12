@@ -1,0 +1,968 @@
+[
+    {
+        "content": "<p>I updated the liveness analysis and realized that <code>let _ = x</code> pattern doesn't seem to compile when the feature gate is set. </p>\n<p>Very simple test file: <a href=\"http://csclub.uwaterloo.ca/~a52arora/test_suite/test.rs\">http://csclub.uwaterloo.ca/~a52arora/test_suite/test.rs</a><br>\nBacktrace: <a href=\"http://csclub.uwaterloo.ca/~a52arora/test_suite/mir_build_err_test\">http://csclub.uwaterloo.ca/~a52arora/test_suite/mir_build_err_test</a><br>\n(Just a side note: We would now warn for <code>let _ = x</code> which could cause builds to fail if the user has treat warn as err, so that would need to be considered in migrations as well.)</p>\n<p>The error happens here: <a href=\"https://github.com/sexxi-goose/rust/blob/min_capture/compiler/rustc_mir_build/src/build/mod.rs#L362\">https://github.com/sexxi-goose/rust/blob/min_capture/compiler/rustc_mir_build/src/build/mod.rs#L362</a></p>\n<p>One of the things in the backtrace is: <a href=\"https://github.com/sexxi-goose/rust/blob/min_capture/compiler/rustc_mir_build/src/build/block.rs#L132\">https://github.com/sexxi-goose/rust/blob/min_capture/compiler/rustc_mir_build/src/build/block.rs#L132</a></p>\n<p>From what I understand the issue is probably around handling the <code>let _ = x</code>, possibly because x isn't being captured. </p>\n<p>I'm not too familiar with that part of the codebase, so I'm not sure what are the best ways to deal with this issue.</p>",
+        "id": 215279130,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604292251
+    },
+    {
+        "content": "<p>Some thoughts</p>\n<ul>\n<li>Update THIR so that such statements within closures are removed if the feature gate is enabled (not sure what would be the impact of doing so)</li>\n<li>or Update the statemen handler in MIR build to ignore such statements (not sure how easy would it be to propagate that we are handling things inside a closure)</li>\n<li>or capture x in such patterns by updating ExprUseVisitor</li>\n</ul>",
+        "id": 215279207,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604292401
+    },
+    {
+        "content": "<p>(Sorry I kind of messed up the testing last week which resulted in the feature gate not being set when the tests were being run, inturn resulting in missing this edge case)</p>",
+        "id": 215279210,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604292439
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> can you clarify what sort of error we are getting?</p>",
+        "id": 215317149,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604323354
+    },
+    {
+        "content": "<p>oh, I guess it's an ICE</p>",
+        "id": 215317166,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604323370
+    },
+    {
+        "content": "<p>I see, hmm, I think the issue is that the <em>THIR</em> still includes <code>let _ = x</code> even though, ultimately, MIR will treat it as a kind of no-op?</p>",
+        "id": 215317214,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604323410
+    },
+    {
+        "content": "<p>It occurs to me that this may not be entirely true</p>",
+        "id": 215317218,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604323415
+    },
+    {
+        "content": "<p>We may include some kind of dummy read</p>",
+        "id": 215317225,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604323421
+    },
+    {
+        "content": "<p>I am <em>somewhat</em> inclined to have <code>let _ = x</code> be treated as potentially using <code>x</code> if that is indeed the case</p>",
+        "id": 215317283,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604323445
+    },
+    {
+        "content": "<p>If I understand this correctly we are building MIR <a href=\"https://github.com/sexxi-goose/rust/blob/min_capture/compiler/rustc_mir_build/src/build/block.rs#L100-L137\">here</a>. We don't exactly disregard if we see Patkind::Wild here. </p>\n<p>On the surface, the code in mir_build is fairly generic, so making changes to handle this case for closure would require pipelining some context. <br>\nI'm assuming it's to handle  wildcards in destructure patterns.</p>\n<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215317283\">said</a>:</p>\n<blockquote>\n<p>I am <em>somewhat</em> inclined to have <code>let _ = x</code> be treated as potentially using <code>x</code> if that is indeed the case</p>\n</blockquote>\n<p>If I understand this correctly we want x to be a capture.</p>",
+        "id": 215371276,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604347575
+    },
+    {
+        "content": "<p>So <span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> most notably we invoke <a href=\"https://github.com/sexxi-goose/rust/blob/min_capture/compiler/rustc_mir_build/src/build/block.rs#L132\"><code>expr_into_pattern</code></a></p>",
+        "id": 215383254,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353440
+    },
+    {
+        "content": "<p>which converts the initializer into a place</p>",
+        "id": 215383401,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353495
+    },
+    {
+        "content": "<p>Note that this code gets an error</p>",
+        "id": 215383407,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353500
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">v</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">v</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">v</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">*</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">+=</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 215383440,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353519
+    },
+    {
+        "content": "<p><a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=fad511a429badcd3d88961d59a9b6cf7\">playground</a></p>",
+        "id": 215383452,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353522
+    },
+    {
+        "content": "<p>er wait</p>",
+        "id": 215383473,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353532
+    },
+    {
+        "content": "<p>but <code>let _ = v</code> doesn't</p>",
+        "id": 215383498,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353542
+    },
+    {
+        "content": "<p>(which is the point)</p>",
+        "id": 215383516,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353551
+    },
+    {
+        "content": "<p>tricky :)</p>",
+        "id": 215383528,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353558
+    },
+    {
+        "content": "<p>anyway what we could do</p>",
+        "id": 215383552,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353563
+    },
+    {
+        "content": "<p>(regardless)</p>",
+        "id": 215383586,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353569
+    },
+    {
+        "content": "<p>is to modify the <code>ExprUseVisitor</code> to add a <code>borrow</code> callback on the initializer of a <code>let</code>, with \"borrow kind\" read</p>",
+        "id": 215383651,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353612
+    },
+    {
+        "content": "<p>I wonder how much will break if we do that ;)</p>",
+        "id": 215383657,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353617
+    },
+    {
+        "content": "<p>(I don't think it should break much, but we may want to add a distinct sort of callback)</p>",
+        "id": 215383682,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353634
+    },
+    {
+        "content": "<p>but the idea is that we could say <code>let _ = v</code> still captures <code>v</code>, that is considered \"as if\" we were to read <code>v</code></p>",
+        "id": 215383701,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353648
+    },
+    {
+        "content": "<p>this is then compatible with the older code as well</p>",
+        "id": 215383718,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353660
+    },
+    {
+        "content": "<p>(i.e., for <code>move</code> closures)</p>",
+        "id": 215383729,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353666
+    },
+    {
+        "content": "<p>but it will make it easier to adapt the MIR builder and so forth</p>",
+        "id": 215383753,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353680
+    },
+    {
+        "content": "<p>Okay yes that's what I was thinking. I was thinking more like we can set a flag so that clippy can turn off those callbacks</p>",
+        "id": 215383765,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604353683
+    },
+    {
+        "content": "<p>I'd prefer a distinct callback</p>",
+        "id": 215383809,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353690
+    },
+    {
+        "content": "<p>then a flag</p>",
+        "id": 215383813,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353691
+    },
+    {
+        "content": "<p>flags are confusing:)</p>",
+        "id": 215383821,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353697
+    },
+    {
+        "content": "<p>Okay that works too I guess</p>",
+        "id": 215383829,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604353702
+    },
+    {
+        "content": "<p>but clippy can just leave the callback empty</p>",
+        "id": 215383847,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353711
+    },
+    {
+        "content": "<p>it seems like it would be quite a lot of work to rejigger MIR construction</p>",
+        "id": 215383891,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353737
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215383498\">said</a>:</p>\n<blockquote>\n<p>but <code>let _ = v</code> doesn't</p>\n</blockquote>\n<p>this is interesting</p>",
+        "id": 215383896,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604353740
+    },
+    {
+        "content": "<p>yeah, I'm not sure what I think the <em>ideal</em> behavior would be</p>",
+        "id": 215383936,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353759
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215383891\">said</a>:</p>\n<blockquote>\n<p>it seems like it would be quite a lot of work to rejigger MIR construction</p>\n</blockquote>\n<p>Yeah I wasn't sure if it will work so I decided to discuss before I make a mess there lol</p>",
+        "id": 215383944,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604353767
+    },
+    {
+        "content": "<p>but I think you can make a \"decent case\" for <code>let _ = v</code> capturing <code>v</code></p>",
+        "id": 215383966,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353782
+    },
+    {
+        "content": "<p>however it's a bit unfortunate for there to be some asymmetry with what the borrow check considers a \"use\"</p>",
+        "id": 215384041,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353807
+    },
+    {
+        "content": "<p>still, I'm inclined to just accept that :)</p>",
+        "id": 215384048,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353814
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215383966\">said</a>:</p>\n<blockquote>\n<p>but I think you can make a \"decent case\" for <code>let _ = v</code> capturing <code>v</code></p>\n</blockquote>\n<p>I feel like the easiest argumentis back compat</p>",
+        "id": 215384054,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604353817
+    },
+    {
+        "content": "<p>(at worst, leave it as a FIXME)</p>",
+        "id": 215384055,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353818
+    },
+    {
+        "content": "<p>yes, back-compat is part of it</p>",
+        "id": 215384062,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353822
+    },
+    {
+        "content": "<p>I can also imagine that there is existing code for example that does <code>let _ = v</code> with a move closure to force a capture.</p>",
+        "id": 215384083,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353838
+    },
+    {
+        "content": "<p>...maybe not... :) but plausible</p>",
+        "id": 215384112,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353850
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215384083\">said</a>:</p>\n<blockquote>\n<p>I can also imagine that there is existing code for example that does <code>let _ = v</code> with a move closure to force a capture.</p>\n</blockquote>\n<p>Yeah it's used in 3 tests, tho those are fixable by just changing <code>_</code> to <code>_x</code></p>",
+        "id": 215384289,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604353930
+    },
+    {
+        "content": "<p>right</p>",
+        "id": 215384375,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353987
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215383440\">said</a>:</p>\n<blockquote>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">v</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">v</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"n\">v</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">*</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">+=</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n</blockquote>\n<p>Why do we process the borrow here but not when it's a move. (I tried it with a string and same result).</p>",
+        "id": 215384376,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604353988
+    },
+    {
+        "content": "<p>but that's the non-back-compat part :)</p>",
+        "id": 215384392,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604353994
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281950\">Aman Arora</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215384376\">said</a>:</p>\n<blockquote>\n<p>Why do we process the borrow here but not when it's a move. (I tried it with a string and same result).</p>\n</blockquote>\n<p>answer: we still <strong>evaluate</strong> the right hand side to make a temporary</p>",
+        "id": 215384415,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354011
+    },
+    {
+        "content": "<p>i.e., <code>&amp;v</code> is not a place expression</p>",
+        "id": 215384417,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354016
+    },
+    {
+        "content": "<p>so we have to evaluate it to get a value</p>",
+        "id": 215384429,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354023
+    },
+    {
+        "content": "<p>and it's the <em>evaluation</em> that triggers the read</p>",
+        "id": 215384435,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354030
+    },
+    {
+        "content": "<p>but <code>let _ = v</code>, the <code>v</code> is a place expression, so we can just match against <em>that place</em></p>",
+        "id": 215384452,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354041
+    },
+    {
+        "content": "<p>put another way, if you did <code>let ref p = v</code>, that is equivalent to <code>let p = &amp;v</code></p>",
+        "id": 215384509,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354053
+    },
+    {
+        "content": "<p>but <code>let ref p = &amp;v</code> is going to be like <code>let tmp = &amp;v; let p = &amp;tmp;</code></p>",
+        "id": 215384538,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354073
+    },
+    {
+        "content": "<p>not sure if that helps :)</p>",
+        "id": 215384546,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354077
+    },
+    {
+        "content": "<p>(ref patterns, while semi-deprecated, are one of the easiest ways to illustrate the difference between a place expression and not...)</p>",
+        "id": 215384602,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354109
+    },
+    {
+        "content": "<p>I think it sort of makes sense</p>",
+        "id": 215384640,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604354130
+    },
+    {
+        "content": "<p>(remember: a \"place expression\" is one that names some place in memory that could be assigned to; also called an lvalue sometimes)</p>",
+        "id": 215384746,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354180
+    },
+    {
+        "content": "<p>so like <code>&amp;v</code> is not a \"place in memory\", it's a value, much like <code>1 + 2</code></p>",
+        "id": 215384768,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354193
+    },
+    {
+        "content": "<p>but <code>v</code> is a place in memory</p>",
+        "id": 215384774,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354196
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215384746\">said</a>:</p>\n<blockquote>\n<p>(remember: a \"place expression\" is one that names some place in memory that could be assigned to; also called an lvalue sometimes)</p>\n</blockquote>\n<p>Yeah I think this really helps.</p>",
+        "id": 215384833,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604354228
+    },
+    {
+        "content": "<p>Interestingly you can't use _ with <code>ref</code></p>",
+        "id": 215384856,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604354243
+    },
+    {
+        "content": "<p>So I was trying to validate if that would force a read</p>",
+        "id": 215384884,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604354255
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281950\">Aman Arora</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215384856\">said</a>:</p>\n<blockquote>\n<p>Interestingly you can't use _ with <code>ref</code></p>\n</blockquote>\n<p>yeah <code>ref</code> has to be attachd to a binding name like <code>x</code> or <code>_x</code></p>",
+        "id": 215385384,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354502
+    },
+    {
+        "content": "<p><code>_</code> means \"ignore\"</p>",
+        "id": 215385391,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354508
+    },
+    {
+        "content": "<p><code>_x</code> means \"bind to an unused variable\"</p>",
+        "id": 215385408,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354517
+    },
+    {
+        "content": "<p>subtle distinction</p>",
+        "id": 215385414,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354520
+    },
+    {
+        "content": "<p>Yeah, I guess you can't have 2 patterns together</p>",
+        "id": 215385420,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604354522
+    },
+    {
+        "content": "<p>(arguably too subtle)</p>",
+        "id": 215385425,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604354522
+    },
+    {
+        "content": "<p>I feel it's common in some other languages (scala IIRC) to use _ as a reserved expression</p>",
+        "id": 215385561,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604354592
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215383651\">said</a>:</p>\n<blockquote>\n<p>is to modify the <code>ExprUseVisitor</code> to add a <code>borrow</code> callback on the initializer of a <code>let</code>, with \"borrow kind\" read</p>\n</blockquote>\n<p>So if we have <code>let &lt;&gt;  = x</code> , we want to indicate a read for <code>x</code>. </p>\n<p>If I understand correctly we want to modify this <a href=\"https://github.com/sexxi-goose/rust/blob/master/compiler/rustc_typeck/src/expr_use_visitor.rs#L353\">https://github.com/sexxi-goose/rust/blob/master/compiler/rustc_typeck/src/expr_use_visitor.rs#L353</a></p>\n<p>to essentially <code>borrow(init_place, ImmBorrow)</code> but via different API. (essentially indicating that it's being read), regardless of the lhs of the let?</p>\n<p>I think that will limit the amount of disjoint capture we can do with destructure patterns.</p>",
+        "id": 215498660,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604431039
+    },
+    {
+        "content": "<p>So the different cases we have are: </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"w\">  </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">;</span><span class=\"w\">  </span><span class=\"c1\">// 1</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">tuple</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// 2</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">Point</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">y</span>: <span class=\"nc\">_</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">point</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// 3</span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">t1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">tuple</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// 4</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">Point</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">x</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">y</span>: <span class=\"nc\">_</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">point</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// 5</span>\n</code></pre></div>",
+        "id": 215498847,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604431142
+    },
+    {
+        "content": "<p>It makes sense for 1 to completely read the variable. But if in 4, 5 we are providing precise capture it makes sense for 2 and 3 to capture nothing.</p>",
+        "id": 215499037,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604431230
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> that's a good point. I am not sure I had considered those full repercussions.</p>",
+        "id": 215513382,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604439560
+    },
+    {
+        "content": "<p>I guess we could do something quite special to handle the case where it's a distinct callback</p>",
+        "id": 215513399,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604439576
+    },
+    {
+        "content": "<p>But it's worth thinking about what it would take to refactor MIR building and \"do this properly\"</p>",
+        "id": 215513414,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604439588
+    },
+    {
+        "content": "<p>After having thought about it, I personally don't think this a problem we should be solving in ExprUseVisitor</p>",
+        "id": 215513478,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604439610
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281950\">Aman Arora</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215499037\">said</a>:</p>\n<blockquote>\n<p>It makes sense for 1 to completely read the variable. But if in 4, 5 we are providing precise capture it makes sense for 2 and 3 to capture nothing.</p>\n</blockquote>\n<p>mostly because of this^</p>\n<p>I feel the current implementation keeps 2-3 consistent with 4-5.</p>",
+        "id": 215514244,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604440224
+    },
+    {
+        "content": "<p>I think at least in the case of 2-3 not capturing tuple/point is part of enabling 2229, rather than breaking backcompat.</p>",
+        "id": 215514312,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604440298
+    },
+    {
+        "content": "<p>Another interesting example would be arrays </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">some_arr</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// 1</span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">d</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">some_arr</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// 2</span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">some_arr</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// 3</span>\n</code></pre></div>\n<p>Since arrays are completely captured, it kind of makes sense for all of the three to be equivalent i.e. capture some_arr entirely.</p>",
+        "id": 215514453,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604440393
+    },
+    {
+        "content": "<p>So the problrm with MIR building (and THIR) is that you can have variables that appear in thie HIR but which are not ultimately going to be used</p>",
+        "id": 215578991,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604496235
+    },
+    {
+        "content": "<p>I guess what this means is that we would need to introduce some way to represent an upvar that was <em>not captured</em> -- a kind of \"poison pill\" expression</p>",
+        "id": 215581995,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497684
+    },
+    {
+        "content": "<p>such that if we wind up <em>actually trying to read from it</em> we get an error</p>",
+        "id": 215582010,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497693
+    },
+    {
+        "content": "<p>(a <code>span_bug</code>, presumably)</p>",
+        "id": 215582021,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497698
+    },
+    {
+        "content": "<p>that way when you have <code>let _ = x</code> and we don't wind up capturing <code>x</code>, we can still translate that <code>let</code> statement. The reference to <code>x</code> would become a reference to <code>UncapturedUpvar(x)</code> or something</p>",
+        "id": 215582082,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497728
+    },
+    {
+        "content": "<p>the problem is that then, in MIR building, we'd have to convert <code>UncapturedUpvar</code> into a place</p>",
+        "id": 215582118,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497752
+    },
+    {
+        "content": "<p>it's just that this place would never <em>actually</em> wind up in the MIR itself</p>",
+        "id": 215582131,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497759
+    },
+    {
+        "content": "<p>this is annoying</p>",
+        "id": 215582137,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497761
+    },
+    {
+        "content": "<p>we could extend the concept of MIR place with \"dummy place\" or something but .. ugh</p>",
+        "id": 215582151,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497773
+    },
+    {
+        "content": "<p>so I guess this is why I was leaning towards -- <em>at least temporarily</em> -- ensuring that we capture every variable we reference</p>",
+        "id": 215582248,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497812
+    },
+    {
+        "content": "<p>but really I agree with you it's not the right behavior</p>",
+        "id": 215582257,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497817
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215582118\">said</a>:</p>\n<blockquote>\n<p>the problem is that then, in MIR building, we'd have to convert <code>UncapturedUpvar</code> into a place</p>\n</blockquote>\n<p>of course we <em>could</em> generate a place that would just be patently <em>wrong</em>, such as the return place</p>",
+        "id": 215582293,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497841
+    },
+    {
+        "content": "<p>I'm not super keen on that either</p>",
+        "id": 215582302,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604497851
+    },
+    {
+        "content": "<p>Why do we keep let statements that introduce 0 bindings in THIR/MIR?</p>",
+        "id": 215620676,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604513684
+    },
+    {
+        "content": "<p>Nvm, if someone has <code>let _ = init_with_side_effs(capture_var)</code>, or <br>\n<code>let _ = { print(...); capture_var }</code></p>",
+        "id": 215620789,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604513758
+    },
+    {
+        "content": "<p>Well something more useful that this but regardless these are valid rust let statements, which require the assigned place to be evaluated</p>",
+        "id": 215620913,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604513806
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281950\">Aman Arora</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215620789\">said</a>:</p>\n<blockquote>\n<p>Nvm, if someone has <code>let _ = init_with_side_effs(capture_var)</code>, or <br>\n<code>let _ = { print(...); capture_var }</code></p>\n</blockquote>\n<p>I was trying to go for capture_path more than captured_var. Also this is interesting we don't currently have test cases where we call a function with a precise capture as a function argument.</p>",
+        "id": 215638908,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604522687
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> there are also interesting cases like </p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">)</span><span class=\"w\"></span>\n</code></pre></div>\n<p>although I guess that this will actually construct the tuple first</p>",
+        "id": 215642883,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524845
+    },
+    {
+        "content": "<p>my initial thought was that it would be very hard to detect the cases where we can just \"drop the let statement altogether\"</p>",
+        "id": 215642919,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524869
+    },
+    {
+        "content": "<p>but now I am wondering if that's true</p>",
+        "id": 215642922,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524873
+    },
+    {
+        "content": "<p>the right-hand-side has to be a place expression</p>",
+        "id": 215642934,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524880
+    },
+    {
+        "content": "<p>and the pattern has to have no bindings</p>",
+        "id": 215642946,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524887
+    },
+    {
+        "content": "<p>well</p>",
+        "id": 215642968,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524903
+    },
+    {
+        "content": "<p>yeah I guess if it's a <code>let</code>, then the pattern has to be irrefutable, so it can't have \"tests\"</p>",
+        "id": 215642993,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524922
+    },
+    {
+        "content": "<p>so probably just any pattern with no bindings and a right-hand-side that is a place expression can just be ignored--well-- interesting--</p>",
+        "id": 215643048,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524941
+    },
+    {
+        "content": "<p>overloaded deref and indexing may make that less true :)</p>",
+        "id": 215643058,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524949
+    },
+    {
+        "content": "<p>i.e., <code>let _ = *x</code> where <code>*x</code> is overloaded</p>",
+        "id": 215643074,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524959
+    },
+    {
+        "content": "<p>but I think that this will be registered as a \"read\" of <code>x</code> in any case</p>",
+        "id": 215643093,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524970
+    },
+    {
+        "content": "<p>I guess I am now thinking that we should detect this case and just drop such <code>let</code> statements from the THIR, but we'll have to craft the conditions \"just right\"</p>",
+        "id": 215643134,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604524996
+    },
+    {
+        "content": "<p>I wonder if we can rely on the fact that we don't have any captured variable for the upvar</p>",
+        "id": 215643154,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604525011
+    },
+    {
+        "content": "<p>e.g., check if the right-hand-side is a place expression whose root variable is not captured</p>",
+        "id": 215643174,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604525021
+    },
+    {
+        "content": "<p>if so, assert that the left-hand-side has no bindings</p>",
+        "id": 215643183,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604525025
+    },
+    {
+        "content": "<p>and skip the let</p>",
+        "id": 215643189,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604525029
+    },
+    {
+        "content": "<p>something like that</p>",
+        "id": 215643192,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604525030
+    },
+    {
+        "content": "<p>Yeah it's going to be a bit tricky.</p>",
+        "id": 215643264,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604525053
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215643174\">said</a>:</p>\n<blockquote>\n<p>e.g., check if the right-hand-side is a place expression whose root variable is not captured</p>\n</blockquote>\n<p>this might not be so tricky</p>",
+        "id": 215643285,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604525064
+    },
+    {
+        "content": "<p>it's a little bit more \"linked\" than I would like</p>",
+        "id": 215643323,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604525085
+    },
+    {
+        "content": "<p>in that we're assuming the upvar analysis code is correct</p>",
+        "id": 215643337,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604525091
+    },
+    {
+        "content": "<p>but the assertion helps there</p>",
+        "id": 215643349,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604525097
+    },
+    {
+        "content": "<p>/me still thinking</p>",
+        "id": 215643428,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604525141
+    },
+    {
+        "content": "<p>I don't exactly know what would get captured in case of <code>let _ = (upvar1, upvar2)</code> with the new analysis. Because we have an Rvalue on the right side, which when evaluated might not find the Places it needs to evaluate correctly.</p>",
+        "id": 215643595,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604525217
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281950\">Aman Arora</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215643595\">said</a>:</p>\n<blockquote>\n<p>I don't exactly know what would get captured in case of <code>let _ = (upvar1, upvar2)</code> with the new analysis. Because we have an Rvalue on the right side, which when evaluated might not find the Places it needs to evaluate correctly.</p>\n</blockquote>\n<p>Actually this works out fine </p>\n<ul>\n<li><a href=\"http://csclub.uwaterloo.ca/~a52arora/test_suite/tuple_rvalue.rs\">http://csclub.uwaterloo.ca/~a52arora/test_suite/tuple_rvalue.rs</a></li>\n<li><a href=\"http://csclub.uwaterloo.ca/~a52arora/test_suite/tuple_rvalue.rs.stderr\">http://csclub.uwaterloo.ca/~a52arora/test_suite/tuple_rvalue.rs.stderr</a></li>\n</ul>",
+        "id": 215646583,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604527037
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281950\">Aman Arora</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215643595\">said</a>:</p>\n<blockquote>\n<p>I don't exactly know what would get captured in case of <code>let _ = (upvar1, upvar2)</code> with the new analysis. Because we have an Rvalue on the right side, which when evaluated might not find the Places it needs to evaluate correctly.</p>\n</blockquote>\n<p>yes, it should work out fine</p>",
+        "id": 215649121,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604528847
+    },
+    {
+        "content": "<p>it'll treat the RHS as an expression to be evaluated</p>",
+        "id": 215649127,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604528856
+    },
+    {
+        "content": "<p>Will it be fine to have some capture analysis code merged in before <code>let _ = x</code> patterns are completely handled? The last PR before that has been r+'d <a href=\"https://github.com/rust-lang/rust/pull/78662\">https://github.com/rust-lang/rust/pull/78662</a>. </p>\n<p>Benefits would be:</p>\n<ul>\n<li>Get some feedback since it's mostly been us who have looked at the code, especially since the analysis being correct is important for <code>let _ = x</code> handling</li>\n<li>Saves us from merge conflicts <span aria-label=\"joy\" class=\"emoji emoji-1f602\" role=\"img\" title=\"joy\">:joy:</span></li>\n</ul>",
+        "id": 215649450,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604529062
+    },
+    {
+        "content": "<p>Also <code>let _ = x</code> only breaks with the feature gate enabled</p>",
+        "id": 215649783,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604529268
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215643174\">said</a>:</p>\n<blockquote>\n<p>e.g., check if the right-hand-side is a place expression whose root variable is not captured</p>\n</blockquote>\n<p>This might be trickly I think we want the right hand side to be place that isn't captured. </p>\n<p>Consider</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">Point</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"n\">x</span>: <span class=\"kt\">i32</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"n\">y</span>: <span class=\"kt\">i32</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">struct</span> <span class=\"nc\">Rectangle</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"n\">top_left</span>: <span class=\"nc\">Point</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"n\">bottom_right</span>: <span class=\"nc\">Point</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p1</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Point</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p2</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Point</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">rect</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Rectange</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">p1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">p2</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">c</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">||</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">   </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">Point</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">y</span>: <span class=\"nc\">_</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"p\">.</span><span class=\"n\">top_left</span><span class=\"p\">;</span><span class=\"w\">  </span><span class=\"c1\">// L1, Nothing is captured</span>\n<span class=\"w\">   </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">Point</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">y</span>: <span class=\"nc\">y</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"p\">.</span><span class=\"n\">bottom_right</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// L2, p.bottom_right.y is captured</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Now L1 still doesn't compile since the place on the right isn't captured. </p>\n<p>I didn't really see <code>Place</code> being used in THIR, if we have to use hir::Place, then we might need to bring in MemCat to determine the Place properly. If we need to use mir::Place then we would need to determine equivalance relation b/w mir and hir Place.</p>",
+        "id": 215666400,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604544847
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> I think it is fine to have <code>let _ = x</code> ICE or otherwise break, so long as it is confined to the feature gate, we can just file a FIXME issue to address it</p>",
+        "id": 215715807,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604585393
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> hmm, when I said \"if the root variable is captured\", I think I was imagining that as a temporary solution, i.e., only for the case where we have not yet implemented 'minimal capture'. Once we do implement minimal capture, the test would indeed be more complicated, but the same premise could be applied. Basically I think what I am proposing is that we would modify the THIR-construction code so that when you lower a HIR expression to THIR, you get back a <code>Result</code>, essentially, with one possible outcome being \"unrepresentable\". This would be the case for an upvar that was not captured.</p>\n<p>The hope is that most of the time we can just <code>unwrap</code> the result (well, we might make a dedicated helper so that we get a better ICE, but that's the idea), because it should never happen. However, <strong>in the case of <code>let x = initializer</code> specifically</strong>, if the initializer comes back as unrepresentable, then we can assert that there are no bindings in the LHS.</p>",
+        "id": 215716193,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604585592
+    },
+    {
+        "content": "<p>I guess though that we have to think indeed about cases where the initializer is \"partly representable\"</p>",
+        "id": 215716230,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604585611
+    },
+    {
+        "content": "<p>This is a bit tricky, I hadn't thought this part through</p>",
+        "id": 215716260,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604585628
+    },
+    {
+        "content": "<p>well, hmm, OK I'm paging this back in</p>",
+        "id": 215716332,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604585647
+    },
+    {
+        "content": "<p>I guess we should just discuss this in our meeting today :)</p>",
+        "id": 215716349,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604585653
+    },
+    {
+        "content": "<p>I have some other things to do right now</p>",
+        "id": 215716362,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604585660
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> joining</p>",
+        "id": 215741916,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604595685
+    },
+    {
+        "content": "<p>Leaving this here so that we don't lose track: <a href=\"https://hackmd.io/aD41lqdMSmG7mvHJYt-mtg\">https://hackmd.io/aD41lqdMSmG7mvHJYt-mtg</a></p>",
+        "id": 215803487,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604634347
+    },
+    {
+        "content": "<p>We had briefly mentioned this earlier but <code>let _ = x</code> will have effect on closure -&gt; fn coercion</p>",
+        "id": 215809480,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604643017
+    },
+    {
+        "content": "<p>I think that we would have to do the obligation thing we had previously discussed since we can't decide on the number of captures until typeck is done. (Right now it depends on upvars mentioned)</p>",
+        "id": 215809496,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604643100
+    },
+    {
+        "content": "<p>(deleted)</p>",
+        "id": 215811370,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604645908
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> Yes, although I think that can live as a FIXME -- using \"upvars mentioned\" for this check feels acceptable to me.</p>",
+        "id": 215882782,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604686100
+    },
+    {
+        "content": "<p>btw do we want this <a href=\"https://github.com/rust-lang/rust/issues/72457\">#72457</a>? I ended up implementing it before I realised that it would need to be changed in the near future. (It's sub 20 LOC)</p>",
+        "id": 215883026,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604686246
+    },
+    {
+        "content": "<p>(deleted)</p>",
+        "id": 216052036,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1604908837
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281950\">Aman Arora</span> <a href=\"#narrow/stream/189812-t-compiler.2Fwg-rfc-2229/topic/let.20_.20.3D.20x.20pattern/near/215883026\">said</a>:</p>\n<blockquote>\n<p>btw do we want this <a href=\"https://github.com/rust-lang/rust/issues/72457\">#72457</a>? I ended up implementing it before I realised that it would need to be changed in the near future. (It's sub 20 LOC)</p>\n</blockquote>\n<p>seems useful</p>",
+        "id": 216091119,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1604932323
+    },
+    {
+        "content": "<p>I think this could exaggerate the <code>let _ = x</code> issue.  <a href=\"https://github.com/rust-lang/rust/pull/71156\">https://github.com/rust-lang/rust/pull/71156</a></p>\n<p>Essentially any pattern that used <code>_</code> will have an issue if  I understand correctly</p>",
+        "id": 216307956,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1605070715
+    },
+    {
+        "content": "<p>Nvm, if that is correct <a href=\"https://github.com/rust-lang/rust/pull/71156#issuecomment-725195572\">https://github.com/rust-lang/rust/pull/71156#issuecomment-725195572</a> then we can't capture disjoint fields there, because the first line will make it look like <code>tup</code> is used in entirety</p>",
+        "id": 216308111,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1605070920
+    },
+    {
+        "content": "<p>Actually got a reply on that thread, looks like it won't affect us <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 216310795,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1605074768
+    },
+    {
+        "content": "<p>Joining in 2 mins</p>",
+        "id": 216496899,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1605200422
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> be there in 2 minutes</p>",
+        "id": 216497258,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1605200588
+    },
+    {
+        "content": "<p>sorry running a bit late</p>",
+        "id": 216497268,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1605200592
+    },
+    {
+        "content": "<p>no problem</p>",
+        "id": 216497685,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1605200772
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> ok</p>",
+        "id": 216498432,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1605201134
+    },
+    {
+        "content": "<p><a href=\"/user_uploads/4715/vbzg7LQDtytHWlJYJAS6gNnD/image.png\">image.png</a> <br>\nread in match</p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/4715/vbzg7LQDtytHWlJYJAS6gNnD/image.png\" title=\"image.png\"><img src=\"/user_uploads/4715/vbzg7LQDtytHWlJYJAS6gNnD/image.png\"></a></div>",
+        "id": 216503411,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1605203472
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span>  can you upload the video from today before the weekend?</p>",
+        "id": 216516185,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1605209388
+    },
+    {
+        "content": "<p>yep</p>",
+        "id": 216521197,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1605211995
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> <a href=\"https://youtu.be/BvPIpfa27TY\">https://youtu.be/BvPIpfa27TY</a> (not yet fully uploaded)</p>\n<div class=\"youtube-video message_inline_image\"><a data-id=\"BvPIpfa27TY\" href=\"https://youtu.be/BvPIpfa27TY\"><img src=\"https://i.ytimg.com/vi/BvPIpfa27TY/default.jpg\"></a></div>",
+        "id": 216530156,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1605216000
+    },
+    {
+        "content": "<p>So for <a href=\"https://github.com/rust-lang/rust/pull/79149\">https://github.com/rust-lang/rust/pull/79149</a> I had name <a href=\"https://github.com/rust-lang/rust/issues/30\">#30</a> when I copied the PR from our fork to rust-lang. </p>\n<p>Apparantly chaning the name makes the PR not mergable (on bors build queue). Can you r+ it again? Thanks</p>",
+        "id": 217094858,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1605673103
+    },
+    {
+        "content": "<p>nvm</p>",
+        "id": 217103558,
+        "sender_full_name": "Aman Arora",
+        "timestamp": 1605684857
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"281950\">@Aman Arora</span> ok, everything is good there?</p>",
+        "id": 217145706,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1605711753
+    }
+]

@@ -1,0 +1,158 @@
+[
+    {
+        "content": "<p>Where can I learn more about \"false edges\" in MIR CFG? I searched for it in rustc guide, I also checked the rustdocs:</p>\n<div class=\"codehilite\"><pre><span></span><code>    /// A block where control flow only ever takes one real path, but borrowck\n    /// needs to be more conservative.\n    FalseEdge {\n        /// The target normal control flow will take.\n        real_target: BasicBlock,\n        /// A block control flow could conceptually jump to, but won&#39;t in\n        /// practice.\n        imaginary_target: BasicBlock,\n    },\n</code></pre></div>\n<p>The variant documentation doesn't say why borrowck needs to be more conservative and needs <code>imaginary_target</code>. The field documentation is also confusing. It says \"control flow could conceptually jump to\", but when I look at some actual MIR like</p>\n<div class=\"codehilite\"><pre><span></span><code>fn test(_1: [u32; 2]) -&gt; () {\n    debug dwords =&gt; _1;                  // in scope 0 at test.rs:3:13: 3:19\n    let mut _0: ();                      // return place in scope 0 at test.rs:3:31: 3:31\n    let _2: u32;                         // in scope 0 at test.rs:5:17: 5:20\n    scope 1 {\n        debug _ip =&gt; _2;                 // in scope 1 at test.rs:5:17: 5:20\n    }\n\n    bb0: {\n        FakeRead(ForMatchedPlace, _1);   // scope 0 at test.rs:4:11: 4:17\n        switchInt(_1[0 of 2]) -&gt; [0_u32: bb1, 1_u32: bb2, otherwise: bb3]; // scope 0 at test.rs:5:10: 5:11\n    }\n\n    bb1: {\n        falseEdge -&gt; [real: bb5, imaginary: bb2]; // scope 0 at test.rs:5:10: 5:11\n    }\n\n    bb2: {\n        falseEdge -&gt; [real: bb6, imaginary: bb3]; // scope 0 at test.rs:5:14: 5:15\n    }\n\n    bb3: {\n        _0 = ();                         // scope 0 at test.rs:6:14: 6:16\n        goto -&gt; bb7;                     // scope 0 at test.rs:4:5: 7:6\n    }\n\n    bb4: {\n        _0 = ();                         // scope 1 at test.rs:5:25: 5:27\n        StorageDead(_2);                 // scope 0 at test.rs:5:26: 5:27\n        goto -&gt; bb7;                     // scope 0 at test.rs:4:5: 7:6\n    }\n\n    bb5: {\n        StorageLive(_2);                 // scope 0 at test.rs:5:17: 5:20\n        _2 = _1[1 of 2];                 // scope 0 at test.rs:5:17: 5:20\n        goto -&gt; bb4;                     // scope 0 at test.rs:4:5: 7:6\n    }\n\n    bb6: {\n        StorageLive(_2);                 // scope 0 at test.rs:5:17: 5:20\n        _2 = _1[1 of 2];                 // scope 0 at test.rs:5:17: 5:20\n        goto -&gt; bb4;                     // scope 0 at test.rs:4:5: 7:6\n    }\n\n    bb7: {\n        return;                          // scope 0 at test.rs:8:2: 8:2\n    }\n}\n</code></pre></div>\n<p>Here <code>bb2</code> can't \"conceptually\" jump to <code>bb3</code>, right? That path would be <code>bb2-&gt;bb3-&gt;bb7</code> which is different than <code>bb2-&gt;bb6-&gt;bb4-&gt;bb7</code>, because the first path doesn't update <code>_2</code> but the second path does.</p>\n<p>Do we have any documentation on this stuff?</p>",
+        "id": 226237579,
+        "sender_full_name": "osa1",
+        "timestamp": 1613210791
+    },
+    {
+        "content": "<p>If you would for example have</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// some code</span>\n<span class=\"w\">    </span><span class=\"k\">loop</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// some other code</span>\n</code></pre></div>\n<p>\"some other code\" wouldn't be borrow checked if it weren't for the false edge from the loop to \"some other code\".</p>",
+        "id": 226237738,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1613211115
+    },
+    {
+        "content": "<p>This might be a bad example, since the code that follows isn't borrow checked.</p>",
+        "id": 226237928,
+        "sender_full_name": "tm",
+        "timestamp": 1613211447
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">f</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"nb\">String</span>::<span class=\"n\">new</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">loop</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">a</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 226237985,
+        "sender_full_name": "tm",
+        "timestamp": 1613211513
+    },
+    {
+        "content": "<p>Yeah it seems like 'some other code' is not really borrow checked. Would be good to see an example where these \"imaginary\" edges are really necessary.</p>",
+        "id": 226238137,
+        "sender_full_name": "osa1",
+        "timestamp": 1613211828
+    },
+    {
+        "content": "<p>If you are interested in the answer I would look where in <code>rustc_mir_build</code> the <code>TerminatorKind::FalseEdge</code> is constructed.</p>",
+        "id": 226238188,
+        "sender_full_name": "tm",
+        "timestamp": 1613211928
+    },
+    {
+        "content": "<p><code>ui/borrowck/borrowck-drop-from-guard.rs</code> would be one example</p>",
+        "id": 226240679,
+        "sender_full_name": "tm",
+        "timestamp": 1613215722
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"119169\">@osa1</span> Does <a href=\"https://rust-lang.github.io/rfcs/2094-nll.html#layer-2-avoiding-infinite-loops\">this section</a> of the NLL RFC help in any way?</p>",
+        "id": 226254799,
+        "sender_full_name": "Gwaihir Thorondorsen",
+        "timestamp": 1613235237
+    },
+    {
+        "content": "<p>That's for false unwinds.</p>",
+        "id": 226254848,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613235261
+    },
+    {
+        "content": "<p>False edges are used to make match statements borrow check as if they were if-else chains</p>",
+        "id": 226254922,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613235364
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span> could you say more please? Why would match expressions be borrow checked differently than if expressions?</p>",
+        "id": 226255146,
+        "sender_full_name": "osa1",
+        "timestamp": 1613235641
+    },
+    {
+        "content": "<p>let me find an example...</p>",
+        "id": 226255174,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613235689
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/issues/58646\">#58646</a></p>",
+        "id": 226255281,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613235794
+    },
+    {
+        "content": "<p>Relevant example is</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">all_previous_tests_may_be_done</span><span class=\"p\">(</span><span class=\"n\">y</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"kt\">bool</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">bool</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">r</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">.</span><span class=\"mi\">1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// We don't actually test y.1 to select the second arm, but we don't want</span>\n<span class=\"w\">    </span><span class=\"c1\">// borrowck results to be based on the order we match patterns.</span>\n<span class=\"w\">    </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">(</span><span class=\"kc\">false</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kc\">true</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"c1\">//~ ERROR cannot use `y.1` because it was mutably borrowed</span>\n<span class=\"w\">        </span><span class=\"p\">(</span><span class=\"kc\">true</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">r</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"c1\">// (use of \"above\" borrow)</span>\n<span class=\"w\">        </span><span class=\"p\">(</span><span class=\"kc\">false</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 226255294,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613235816
+    },
+    {
+        "content": "<p>History: <a href=\"https://github.com/rust-lang/rust/issues/45043\">#45043</a> &amp; <a href=\"https://github.com/rust-lang/rust/issues/45184\">#45184</a> introduced false edges for <code>match</code>, then they were <a href=\"https://github.com/rust-lang/rust/issues/46036#issuecomment-358400433\">considered</a> when implementing false <em>unwind</em> edges for <code>loop</code> but <a href=\"https://github.com/rust-lang/rust/issues/47802\">eventually</a> got implemented separately. Is that more accurate? The terminology is definitely confusing.</p>",
+        "id": 226255656,
+        "sender_full_name": "Gwaihir Thorondorsen",
+        "timestamp": 1613236207
+    },
+    {
+        "content": "<p>Thanks <span class=\"user-mention\" data-user-id=\"116118\">@Matthew Jasper</span>  for the example. In the MIR for that example, if I remove all false edges, it would still not borrow check, no? Because the place y.1 is borrowed mutably when used for switching. Relevant parts of the MIR:</p>\n<div class=\"codehilite\"><pre><span></span><code>fn all_previous_tests_may_be_done(_1: &amp;mut (bool, bool)) -&gt; () {\n    debug y =&gt; _1;                       // in scope 0 at test.rs:1:39: 1:40\n    let mut _0: ();                      // return place in scope 0 at test.rs:1:61: 1:61\n    let _2: &amp;mut bool;                   // in scope 0 at test.rs:2:9: 2:10\n    let _3: i32;                         // in scope 0 at test.rs:3:5: 10:6\n    let _4: &amp;mut bool;                   // in scope 0 at test.rs:6:13: 6:14\n    scope 1 {\n        debug r =&gt; _2;                   // in scope 1 at test.rs:2:9: 2:10\n    }\n\n    bb0: {\n        StorageLive(_2);                 // scope 0 at test.rs:2:9: 2:10\n        _2 = &amp;mut ((*_1).1: bool);       // scope 0 at test.rs:2:13: 2:21\n        FakeRead(ForLet, _2);            // scope 0 at test.rs:2:9: 2:10\n        StorageLive(_3);                 // scope 1 at test.rs:3:5: 10:6\n        FakeRead(ForMatchedPlace, _1);   // scope 1 at test.rs:3:11: 3:12\n        switchInt(((*_1).0: bool)) -&gt; [false: bb1, otherwise: bb4]; // scope 1 at test.rs:4:10: 4:15\n    }\n\n    bb1: {\n        switchInt(((*_1).1: bool)) -&gt; [false: bb3, otherwise: bb2]; // scope 1 at test.rs:4:17: 4:21\n    }\n\n    ...\n</code></pre></div>\n<p>Here, in <code>bb1</code>, <code>_2</code> is still live.</p>",
+        "id": 226255782,
+        "sender_full_name": "osa1",
+        "timestamp": 1613236346
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"369545\">@Gwaihir Thorondorsen</span> thanks, I'll read the issues for background.</p>",
+        "id": 226255818,
+        "sender_full_name": "osa1",
+        "timestamp": 1613236411
+    },
+    {
+        "content": "<p><code>_2</code> isn't live in bb1 if you don't consider false edges (<code>StorageDead</code> is not a use)</p>",
+        "id": 226257612,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613238376
+    },
+    {
+        "content": "<p>OK, I think <a href=\"https://github.com/rust-lang/rust/issues/45184\">#45184</a> is the best documentation on this. Why I was curious about this is because I think these false edges prevent some optimizations. For example, they're considered as successors in <a href=\"https://github.com/rust-lang/rust/blob/7e0241c63755ea28045d512b742f50b307874419/compiler/rustc_middle/src/mir/terminator.rs#L331-L333\">https://github.com/rust-lang/rust/blob/7e0241c63755ea28045d512b742f50b307874419/compiler/rustc_middle/src/mir/terminator.rs#L331-L333</a> , as a result <a href=\"https://github.com/rust-lang/rust/blob/7e0241c63755ea28045d512b742f50b307874419/compiler/rustc_mir/src/transform/simplify.rs#L119-L121\">https://github.com/rust-lang/rust/blob/7e0241c63755ea28045d512b742f50b307874419/compiler/rustc_mir/src/transform/simplify.rs#L119-L121</a> can't optimize some trivial goto chains.</p>",
+        "id": 226258248,
+        "sender_full_name": "osa1",
+        "timestamp": 1613239091
+    },
+    {
+        "content": "<p>The false edges should have been removed after borrowck. As far as I know.</p>",
+        "id": 226258297,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1613239169
+    },
+    {
+        "content": "<p>It's not really a trivial goto chain if there are false edges into it</p>",
+        "id": 226258316,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613239194
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116118\">Matthew Jasper</span> <a href=\"#narrow/stream/182449-t-compiler.2Fhelp/topic/FalseEdges.20in.20MIR.20CFG/near/226257612\">said</a>:</p>\n<blockquote>\n<p><code>_2</code> isn't live in bb1 if you don't consider false edges (<code>StorageDead</code> is not a use)</p>\n</blockquote>\n<p>Hmm, I thought it's live between <code>StorageLive(_2)</code> in <code>bb0</code> and <code>StorageDead(_2)</code> in <code>bb7</code>, and to visit <code>bb1</code> you have to go through <code>StorageLive(_2)</code> in <code>bb0</code>. So it's not dead yet in <code>bb1</code>.</p>",
+        "id": 226258401,
+        "sender_full_name": "osa1",
+        "timestamp": 1613239249
+    },
+    {
+        "content": "<p>It's  \"storage live\", but that's not the notion of liveness that the borrow checker uses to infer lifetimes.</p>",
+        "id": 226258445,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613239311
+    },
+    {
+        "content": "<p>Using storage liveness to determine lifetimes would be lexical lifetimes.</p>",
+        "id": 226258498,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1613239339
+    },
+    {
+        "content": "<p>simplify-branches turns <code>FalseEdge</code> and <code>FalseUnwind</code> into <code>Goto</code>: <a href=\"https://github.com/rust-lang/rust/blob/89fdb30892dbe330730ad1a1c1fe45b9046c2973/compiler/rustc_mir/src/transform/simplify_branches.rs#L56-L61\">https://github.com/rust-lang/rust/blob/89fdb30892dbe330730ad1a1c1fe45b9046c2973/compiler/rustc_mir/src/transform/simplify_branches.rs#L56-L61</a></p>",
+        "id": 226258507,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1613239353
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> interesting, thanks. I'll see why that can't optimize the MIR I'm looking at.</p>",
+        "id": 226258567,
+        "sender_full_name": "osa1",
+        "timestamp": 1613239415
+    }
+]

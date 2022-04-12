@@ -1,0 +1,404 @@
+[
+    {
+        "content": "<p>Hopefully that's the right place to ask - let me know if there's a better one. When I experimented with low level stuff on embedded systems, I created a minimal project which does things similar to <a href=\"https://github.com/rust-embedded/cortex-m-rt/blob/master/src/lib.rs\">https://github.com/rust-embedded/cortex-m-rt/blob/master/src/lib.rs</a> and <a href=\"https://github.com/rust-embedded/r0/blob/master/src/lib.rs\">https://github.com/rust-embedded/r0/blob/master/src/lib.rs</a>. I found that my project did not result in the code it should. Unfortunately  got code that overwrote the rest of the memory in an endless loop. Slight, unrelated changes changed the compiler output of this loop. I boiled it down to this: <a href=\"https://github.com/rust-embedded/embedonomicon/issues/69\">https://github.com/rust-embedded/embedonomicon/issues/69</a></p>\n<p>The symbols exported from the linker are declared as </p>\n<div class=\"codehilite\"><pre><span></span><code>extern &quot;C&quot; {\n        static mut _sdata: u32;\n        static mut _edata: u32;\n        ...\n</code></pre></div>\n<p>This is cast to raw pointers:</p>\n<div class=\"codehilite\"><pre><span></span><code>    let mut sdata = &amp;mut _sdata as *mut u32;\n    let edata = &amp;mut _edata as *mut u32;\n    let mut sidata = &amp;_sidata as *const u32;\n</code></pre></div>\n<div class=\"codehilite\"><pre><span></span><code>    while sdata &lt; edata {\n        ptr::write(sdata, ptr::read(sidata));\n        sdata = sdata.offset(1);\n        sidata = sidata.offset(1);\n</code></pre></div>\n<p>While discussing this issue we found two bad things that are UB: a) The two pointers sdata and edata may be considered to be from two different allocations and b) if there is more than one u32 word on these segments it is out of bounds. Additionally there is c) potential aliasing, more about this later.</p>\n<p>I tried to find a clean solution which is described here: <a href=\"https://gist.github.com/skoe/dbd3add2fc3baa600e9ebc995ddf0302\">https://gist.github.com/skoe/dbd3add2fc3baa600e9ebc995ddf0302</a> It uses a pointer + length concept like I saw it at some FFI examples.</p>\n<p>From what I understand it solves a) and b) - but I'm not sure. There is still c) - potential aliasing which I think it's acceptable in this special case:</p>\n<p>The init code is the first code executed _before_ main(). It sets BSS to 0 and copies DATA from ROM (Flash) to RAM. Which means that it writes to all space where all global/static variables will be placed. But after this initialization, when entering main, it will not touch this memory anymore. This means that the memory is written first (but not read) and after that the usual Rust rules apply. The only way not to do this may be to write the start-up code in Assembly. This would be a pity - I got used to write it in C and hope there's a good way to write it in Rust too :)</p>\n<p>The questions are (numbered for easy reference):</p>\n<p>1) Are my/our assumption about the reason for the initial problems correct?<br>\n2) Do you think the new version is correct (except for the aliasing story)<br>\n3) Is the aliasing issue a real issue or acceptable in this special use case?<br>\n4) Is there an easy way to find out what the compiler \"thinks\" about a certain value/pointer to understand why it optimizes something?<br>\n5) Does this make a difference (UnsafeCell) or does it have the same potential issues like the original code? <a href=\"https://github.com/rust-embedded/rust-raspberrypi-OS-tutorials/blob/master/02_runtime_init/src/bsp/raspberrypi/memory.rs\">https://github.com/rust-embedded/rust-raspberrypi-OS-tutorials/blob/master/02_runtime_init/src/bsp/raspberrypi/memory.rs</a></p>\n<p>Sorry for the long text, but there are so many details to tell... :D</p>",
+        "id": 217684120,
+        "sender_full_name": "skoe",
+        "timestamp": 1606166400
+    },
+    {
+        "content": "<p><code>*mut</code> (raw pointers) don't have stringent aliasing requirements that references have, do they? As long as you're able to say that your static is a pointer and not a <code>u32</code> you should be fine. So even something like <code>extern \"C\" { static _sdata: *mut _; static _edata: *mut _; }</code> would be fine.</p>",
+        "id": 217740472,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606216941
+    },
+    {
+        "content": "<p>Aliasing of these memory regions with all the other things is, I guess, somewhat problematic. It would be valid for LLVM to reorder reads of global variables in your program to before your loop copying memory populates data for these statics. As thus at the very least you need to add a barrier or two somewhere after your intiialization code (which is a good idea nevertheless, esp. if you're initializing a multi-core mcu)</p>",
+        "id": 217740667,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606217114
+    },
+    {
+        "content": "<p>The <code>_sdata</code> and <code>_edata</code> symbols directly point to the start and end of the <code>.data</code> section. They do not point to a global that contains a pointer.</p>",
+        "id": 217740695,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1606217138
+    },
+    {
+        "content": "<p>Right, but at the language level they are statics of type u32 (as specified)</p>",
+        "id": 217740719,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606217162
+    },
+    {
+        "content": "<p>There are ways to get linker to put address of those symbols into another place that you can then refer to as <code>*mut _</code>.</p>",
+        "id": 217740771,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606217177
+    },
+    {
+        "content": "<p>(At least I'd be surprised if  there wasn’t – I did something of the sort, although it was with IAR's linker, not GNU's)</p>",
+        "id": 217740811,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606217225
+    },
+    {
+        "content": "<p>You can use something like <code>#[linkage = \"external\"] static _sdata: *mut u8;</code> I think.</p>",
+        "id": 217740820,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1606217233
+    },
+    {
+        "content": "<p>That will make rustc create an anonymous data object where that contains a relocation for <code>_sdata</code>. All uses of <code>_sdata</code> from the rust code will then use that anonymous data object.</p>",
+        "id": 217740950,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1606217319
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"123586\">nagisa</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/217740667):</p>\n<blockquote>\n<p>Aliasing of these memory regions with all the other things is, I guess, somewhat problematic. It would be valid for LLVM to reorder reads of global variables in your program to before your loop copying memory populates data for these statics. As thus at the very least you need to add a barrier or two somewhere after your intiialization code (which is a good idea nevertheless, esp. if you're initializing a multi-core mcu)</p>\n</blockquote>\n<p>This would still be UB even with barriers though, right?</p>",
+        "id": 217793265,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606241821
+    },
+    {
+        "content": "<p>Yes, the reordering of read accesses to before the copy loop sounds problematic, although it appears to be quite unlikely. Well, even then it's no perfect solution. <br>\nIs the compiler aware of such barriers? Aren't they just for the machine level?</p>",
+        "id": 217808710,
+        "sender_full_name": "skoe",
+        "timestamp": 1606249409
+    },
+    {
+        "content": "<p>they're mostly for the compiler, even</p>",
+        "id": 217810825,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606250574
+    },
+    {
+        "content": "<p>we have a fence <em>only</em> for the compiler: <a href=\"https://doc.rust-lang.org/core/sync/atomic/fn.compiler_fence.html\">https://doc.rust-lang.org/core/sync/atomic/fn.compiler_fence.html</a></p>",
+        "id": 217810841,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606250588
+    },
+    {
+        "content": "<p>well, in theory. in practice it can generate fence instructions.</p>",
+        "id": 217810863,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606250601
+    },
+    {
+        "content": "<p>It can? Is there an issue on file for this or is it intentional (if it's intentional, can it be documented?)</p>",
+        "id": 217823031,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1606257404
+    },
+    {
+        "content": "<p>yeah: <a href=\"https://github.com/rust-lang/rust/issues/62256\">https://github.com/rust-lang/rust/issues/62256</a></p>",
+        "id": 217823130,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606257476
+    },
+    {
+        "content": "<p>Hmm, this code is miscompiled into an infinite loop, but I don't immediately see the UB. Can someone spot it?</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">init</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">extern</span><span class=\"w\"> </span><span class=\"s\">\"C\"</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">_sdata</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">_edata</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">_sidata</span>: <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"c1\">// Copy DATA</span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">sdata</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">_sdata</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">edata</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">_edata</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">sidata</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">_sidata</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">while</span><span class=\"w\"> </span><span class=\"n\">sdata</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"n\">edata</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">ptr</span>::<span class=\"n\">write</span><span class=\"p\">(</span><span class=\"n\">sdata</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ptr</span>::<span class=\"n\">read</span><span class=\"p\">(</span><span class=\"n\">sidata</span><span class=\"p\">));</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">sdata</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">sdata</span><span class=\"p\">.</span><span class=\"n\">offset</span><span class=\"p\">(</span><span class=\"mi\">1</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">sidata</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">sidata</span><span class=\"p\">.</span><span class=\"n\">offset</span><span class=\"p\">(</span><span class=\"mi\">1</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 217870942,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606302550
+    },
+    {
+        "content": "<p>Could you give a godbolt link? I can't replicate the miscompile</p>",
+        "id": 217872370,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1606303407
+    },
+    {
+        "content": "<p><a href=\"https://godbolt.org/z/6x1Mrx\">https://godbolt.org/z/6x1Mrx</a></p>",
+        "id": 217872455,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606303445
+    },
+    {
+        "content": "<p>the loop turns into an infinite loop</p>",
+        "id": 217872499,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606303476
+    },
+    {
+        "content": "<p>oh, nevermind, it's because of the infinite loop getting miscompiled (as usual)</p>",
+        "id": 217872624,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606303570
+    },
+    {
+        "content": "<p>I am pretty sure you need to use</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">extern</span><span class=\"w\"> </span><span class=\"s\">\"C\"</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"cp\">#[linkage = </span><span class=\"s\">\"external\"</span><span class=\"cp\">]</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">_sdata</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"cp\">#[linkage = </span><span class=\"s\">\"external\"</span><span class=\"cp\">]</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">_edata</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"cp\">#[linkage = </span><span class=\"s\">\"external\"</span><span class=\"cp\">]</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">_sidata</span>: <span class=\"o\">*</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"kt\">u32</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 217873306,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1606304074
+    },
+    {
+        "content": "<p>It looks like that just removes the indirection that was added</p>",
+        "id": 217873567,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606304293
+    },
+    {
+        "content": "<p>Correct</p>",
+        "id": 217873580,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1606304306
+    },
+    {
+        "content": "<p>What's the default linkage?</p>",
+        "id": 217873592,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606304320
+    },
+    {
+        "content": "<p>The very existence of <code>#[linkage]</code> forces the static to contain a pointer to the symbol with the name of the static instead of referring directly to the symbol as it it is a regular static.</p>",
+        "id": 217873788,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1606304447
+    },
+    {
+        "content": "<p>Oh, this is a bug <a href=\"https://github.com/rust-lang/rust/issues/31508\">https://github.com/rust-lang/rust/issues/31508</a></p>",
+        "id": 217873889,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606304520
+    },
+    {
+        "content": "<p>Without <code>#[linkage]</code> you are saying that <code>_sdata</code> is a pointer sized symbol that points to a <code>*mut u32</code>, while with <code>#[linkage]</code> you are saying that the <code>_sdata</code> static contains a pointer to the <code>_sdata</code> symbol, which may be of arbitrary size.</p>",
+        "id": 217873957,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1606304545
+    },
+    {
+        "content": "<p>I wouldn't call it a bug. It is useful for cases like this where the indirection must not happen.</p>",
+        "id": 217874005,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1606304592
+    },
+    {
+        "content": "<p>I don't currently mind having to put the start/end addresses behind a pointer, that's solvable with linker script changes</p>",
+        "id": 217874131,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606304704
+    },
+    {
+        "content": "<p>The biggest remaining question is whether this sort of initialization is an aliasing violation</p>",
+        "id": 217874175,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606304731
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/217874175):</p>\n<blockquote>\n<p>The biggest remaining question is whether this sort of initialization is an aliasing violation</p>\n</blockquote>\n<p>With <span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> 's suggestion, it shouldn't be, since at that point only out-of-thin-air raw pointers are involved: the compiler cannot assume anything about them, except at each <code>ptr::write() / ptr::read()</code> call, where and when it may assume they point to, resp. at least one writeable / readable and well aligned <code>u32</code>.</p>",
+        "id": 217884888,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1606311550
+    },
+    {
+        "content": "<p>But is it not necessary to ensure that those accesses don't alias any memory used by <code>static</code>s?</p>",
+        "id": 217885005,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606311611
+    },
+    {
+        "content": "<p>Like, you can't use an out-of-thin-air pointer to write to local variables that have live references either, right?</p>",
+        "id": 217885166,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606311697
+    },
+    {
+        "content": "<p>And if statics are considered always live, then this might cause issues?</p>",
+        "id": 217885206,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606311720
+    },
+    {
+        "content": "<p>Are you sure your example is not \"just\" an infinite loop because <code>main</code> gets inlined into the call location and LLVM optimises out everything else?</p>",
+        "id": 217885543,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606311874
+    },
+    {
+        "content": "<p>No, that was it:</p>\n<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/217872624):</p>\n<blockquote>\n<p>oh, nevermind, it's because of the infinite loop getting miscompiled (as usual)</p>\n</blockquote>",
+        "id": 217885581,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606311897
+    },
+    {
+        "content": "<p>Whether <code>linkage</code> is external or some other kind doesn't matter for that example in particular, because LLVM doesn't really have insight into what these statics really is.</p>",
+        "id": 217885642,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606311923
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/217885581):</p>\n<blockquote>\n<p>No, that was it:</p>\n<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/217872624):</p>\n<blockquote>\n<p>oh, nevermind, it's because of the infinite loop getting miscompiled (as usual)<br>\n</p>\n</blockquote>\n</blockquote>\n<p>Ah yeah, nightly has it \"fixed\" (due to trivial loops getting side_effect in them) and it compiles the right thing.</p>",
+        "id": 217885758,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606311966
+    },
+    {
+        "content": "<p>I just picked <code>external</code> linkage at random. It is the presence of an <code>#[linkage]</code> attribute that is important in this case.</p>",
+        "id": 217885764,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1606311974
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"211727\">Jonas Schievink</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/217885166):</p>\n<blockquote>\n<p>Like, you can't use an out-of-thin-air pointer to write to local variables that have live references either, right?</p>\n</blockquote>\n<p>I don't know if it is possible to reliably forge an out-of-thin-air pointer that points to a local variable, but if it were possible (maybe doing a volatile read or smth like that), I think that a usage of such pointer would break the aliasing guarantees of the Rust references that are still alive.</p>\n<p>When using these <code>#[linkage]</code> statics, there are no Rust references to the actual static data anywhere, so such an issue cannot happen. In a way, this is like doing <code>let _sdata = malloc(…); let _sidata = ffi_fun(…);</code>.</p>\n<p>There is <em>one</em> point which could be problematic, though, and I don't know enough about it: the <code>sdata &lt; edata</code> comparison. I'd like to think that given the out-of-thin-air nature of these pointers, the addresses should be comparable, but pointer comparison seems to be a tricky subject too <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 217886609,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1606312414
+    },
+    {
+        "content": "<p>You can put references to statics into other statics</p>",
+        "id": 217886690,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606312446
+    },
+    {
+        "content": "<p>Oh yes, if you do that, then IIUC, you could get into trouble. More precisely, if you create a <code>extern { static VAR_NAME: &lt;impl Freeze&gt;; }</code> (or \"worse\", <code>static VAR_NAME: &lt;impl Freeze&gt; = &lt;const value&gt;;</code>) that happens to be in the region that is overwritten by <code>_sdata</code>, then, I <em>believe</em> that would be UB. To avoid that, you should only use <code>static mut</code>s or <code>static</code> with a <code>RacyCell</code> type for statics that may end in that region.</p>",
+        "id": 217887060,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1606312653
+    },
+    {
+        "content": "<p>Well, the big problem here is that <strong>ALL</strong> statics with mutable interior end up in that region, so the initialization code has to soundly handle any static you can create in safe Rust.</p>",
+        "id": 217887509,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606312863
+    },
+    {
+        "content": "<p>If they are <code>impl !Freeze</code> or <code>static mut</code>s, then I'd <em>think</em> it should be fine, but I do see your concern. This seems like something that warrants an associated issue, at least to clarify the situation, if it doesn't have one yet (cc <span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span>)</p>",
+        "id": 217888119,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1606313098
+    },
+    {
+        "content": "<p>I think I'm trying to do something related. I'm trying to move beyond the bounds of a reference to a static. To do so I launder the pointer via external linkage: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=dd792d19b90bf9e89ca992fa77f6aece\">playground link</a>.  Is this actually safe to do? I know mutable statics would be trickier.</p>",
+        "id": 217893677,
+        "sender_full_name": "Chris Denton",
+        "timestamp": 1606315798
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"123586\">nagisa</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/217885543):</p>\n<blockquote>\n<p>Are you sure your example is not \"just\" an infinite loop because <code>main</code> gets inlined into the call location and LLVM optimizes out everything else?</p>\n</blockquote>\n<p>The point is that the generated code is not just an infinite loop... actually it's not infinite at all: It overwrites the rest of the memory until it hits a hole and crashes - well, the it ends :) With the fix of <a href=\"https://github.com/rust-lang/rust/issues/28728\">https://github.com/rust-lang/rust/issues/28728</a> it works (tested on nightly). </p>\n<p>I updated the Gist with the latest insights: <a href=\"https://gist.github.com/skoe/dbd3add2fc3baa600e9ebc995ddf0302/revisions\">https://gist.github.com/skoe/dbd3add2fc3baa600e9ebc995ddf0302/revisions</a><br>\nLet me know if you think it's worse than before and what you think about the assumptions.</p>\n<p>Still the discussion about the rest of the code. I'm aware that our use case is at the edge of what \"normal code\" does. That's why I'm interested whether there is UB and why (and how bad it is :D ) and if there is a way to solve it w/o dropping into assembly. Maybe it's a bit academic, because 10 lines of assembly don't hurt, but it may be useful for future questions and similar issues like bank switching, page handling or whatever.</p>\n<p>One of the questions: Unfortunately the feature  #[linkage = \"external\"] is in nightly only. </p>\n<div class=\"codehilite\"><pre><span></span><code>    #[linkage = &quot;external&quot;]\n    static _sdata: *mut u32;\n    #[linkage = &quot;external&quot;]\n    static _edata: *mut u32;\n</code></pre></div>\n<p>With this, one could access the pointers without the indirection I use currently and without saying they are two u32 values (and going beyond their bounds) like in the old code.</p>\n<p>The compiler must neither assume they are from different allocations nor that they are from the same allocation. It doesn't know anything about them. So _edata.offset_from(_s_data) and creating a slice from them should just work and be no UB, is this correct? (Ignoring the aliasing topic for now, just concentrate on the pointers :D ).</p>",
+        "id": 217944332,
+        "sender_full_name": "skoe",
+        "timestamp": 1606341626
+    },
+    {
+        "content": "<blockquote>\n<p>The point is that the generated code is not just an infinite loop... actually it's not infinite at all: It overwrites the rest of the memory until it hits a hole and crashes - well, the it ends <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>\n</blockquote>\n<p>since <code>loop {}</code> was ultimately generated as <code>unreachable</code> (a typical \"this is UB\" indication) LLVM was free to assume that the loop writing memory would never terminate, hence it just going on to write the rest of the memory. So in your original example <code>loop {}</code> itself was the most problematic (well, not by Rust rules, by a bug) of everything in the snippets I've seen.</p>",
+        "id": 217952915,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606348818
+    },
+    {
+        "content": "<p>I would suggest for whatever further exploration to utilize nightly, where this bug is fixed for <code>loop {}</code> in particular. Or make <code>main</code> something that's not just a plain <code>loop {}</code> (by e.g. adding volatile memory ops to it, or a <code>WFI</code>).</p>",
+        "id": 217952932,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606348847
+    },
+    {
+        "content": "<p>FWIW your producing a structure with pointers like you did in your original example is quite equivalent to <code>#[linkage=\"external\"]</code> and other such similar proposals AFAICT.</p>",
+        "id": 217952999,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606348911
+    },
+    {
+        "content": "<blockquote>\n<p>since loop {} was ultimately generated as unreachable (a typical \"this is UB\" indication)</p>\n</blockquote>\n<p>Wait, what? I assume this is a remnant of C's ridiculous \"all loops are finite\" rule, but I thought LLVM had the vocabulary to be able to distinguish C-style UB infinite loops from actual infinite loops</p>",
+        "id": 217962952,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1606362192
+    },
+    {
+        "content": "<p>They do not, and that's why Rust gets miscompiled :/ there's a patch for it stuck in llvm review hell iirc.</p>",
+        "id": 217966812,
+        "sender_full_name": "Quy Nguyen",
+        "timestamp": 1606367984
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/217962952):</p>\n<blockquote>\n<blockquote>\n<p>since loop {} was ultimately generated as unreachable (a typical \"this is UB\" indication)</p>\n</blockquote>\n<p>Wait, what? I assume this is a remnant of C's ridiculous \"all loops are finite\" rule, but I thought LLVM had the vocabulary to be able to distinguish C-style UB infinite loops from actual infinite loops</p>\n</blockquote>\n<p>Correction: C++'s rule</p>",
+        "id": 218117757,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1606500708
+    },
+    {
+        "content": "<p>C says you may only do this if the loop condition is not a constant. But LLVM/clang doesn't implement C correctly, unfortunately.</p>",
+        "id": 218117834,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1606500744
+    },
+    {
+        "content": "<p>and no LLVM doesn't really have that vocabulary, or only since very recently.<br>\nSee <a href=\"https://github.com/rust-lang/rust/issues/28728\">https://github.com/rust-lang/rust/issues/28728</a> for all the details.</p>",
+        "id": 218117887,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1606500787
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"232018\">Daniel Henry-Mantilla</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/217888119):</p>\n<blockquote>\n<p>If they are <code>impl !Freeze</code> or <code>static mut</code>s, then I'd <em>think</em> it should be fine, but I do see your concern. This seems like something that warrants an associated issue, at least to clarify the situation, if it doesn't have one yet (cc <span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span>)</p>\n</blockquote>\n<p>I haven't seen an issue for this, no.<br>\nThis question is indeed well outside the usual abstract machine model, so I find it hard to say much. It quite clearly violates the aliasing rules, but also in some sense it happens before the abstract machine is even initialized and the aliasing rules start making sense. A compiler barrier is strongly advised, is unfortunately all I can say -- sorry.<br>\nOnce we have all of \"normal\" Rust on solid footing, I'm happy to get back to the edge cases, but right this this is just scifi and way beyond anything I can make definite statements about.^^<br>\nIOW, the theorist has nothing to say and is happy to defer to the practioners. ;)</p>",
+        "id": 218118160,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1606500973
+    },
+    {
+        "content": "<p>Thanks for the feedback!</p>",
+        "id": 218118227,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1606501050
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/218117887):</p>\n<blockquote>\n<p>and no LLVM doesn't really have that vocabulary, or only since very recently.<br>\nSee <a href=\"https://github.com/rust-lang/rust/issues/28728\">https://github.com/rust-lang/rust/issues/28728</a> for all the details.</p>\n</blockquote>\n<p><a href=\"https://godbolt.org/z/svdhn9\">https://godbolt.org/z/svdhn9</a><br>\n<a href=\"https://godbolt.org/z/x8fdnc\">https://godbolt.org/z/x8fdnc</a><br>\nSeems to have been fixed since llvm-10, so there is hope for rust in the future. (Though note that this only tests the <code>loop{}</code> case, and not anything more complex).</p>",
+        "id": 218118912,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1606501734
+    },
+    {
+        "content": "<p>Yeah, some improvements happened recently, finally.</p>",
+        "id": 218120032,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1606502773
+    },
+    {
+        "content": "<p>But AFAIK the fundamental problem remains open, it's just less likely now that people run into it. (Which is great! But not good enough.)</p>",
+        "id": 218120054,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1606502809
+    },
+    {
+        "content": "<p>Thanks for looking into it. So I get the message that the proposed solution is definitely not in the defined zone of Rust but there are no (other) serious concerns about using it as long as it works <span aria-label=\"grinning face with smiling eyes\" class=\"emoji emoji-1f601\" role=\"img\" title=\"grinning face with smiling eyes\">:grinning_face_with_smiling_eyes:</span> </p>\n<blockquote>\n<p>but right this this is just scifi and way beyond anything I can make definite statements about.</p>\n</blockquote>\n<p>Has some parallels with time traveling, yes.</p>",
+        "id": 218128610,
+        "sender_full_name": "skoe",
+        "timestamp": 1606510567
+    },
+    {
+        "content": "<p>you could use an empty inline asm before the fill-memory loop where the pointers of where to write are passed through the inline asm as inputs/outputs, then the fill loop runs, then there's another inline asm that Rust thinks can write to all visible memory, then you can run main.</p>",
+        "id": 218135839,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1606519043
+    },
+    {
+        "content": "<p>that should make the pointers be disconnected (in terms of aliasing/memory model) from the variables you took the addresses of, since inline asm is opaque to the compiler. you don't actually have to have any instructions in the inline asm, it just has to be there.</p>",
+        "id": 218135931,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1606519200
+    },
+    {
+        "content": "<p>asm with a memory clobber is quite similar, if not equivalent, to a compiler barrier.</p>",
+        "id": 218137272,
+        "sender_full_name": "nagisa",
+        "timestamp": 1606521311
+    },
+    {
+        "content": "<p>i think asm with memory clobber is stronger than compiler barriers usually, although it's certainly preferable to actually emitting an honest-to-god fence instruction</p>",
+        "id": 218137333,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1606521389
+    },
+    {
+        "content": "<p>It still can't write to read-only memory (either static !Freeze, or behind a &amp;T somewhere T: !Freeze), though can it?</p>",
+        "id": 218144934,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1606534067
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"257758\">Connor Horman</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/The.20least.20incorrect.20init.20code.20.3A\">said</a>/near/218144934):</p>\n<blockquote>\n<p>It still can't write to read-only memory (either static !Freeze, or behind a &amp;T somewhere T: !Freeze), though can it?</p>\n</blockquote>\n<p>my view of this is that that memory is not read-only yet. after all, something has to put these values there, so this memory is only read-only \"for the duration of the normal program execution\", but this code here happens before that -- it's basically part of setting up the initial state.</p>",
+        "id": 218156863,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1606556843
+    }
+]

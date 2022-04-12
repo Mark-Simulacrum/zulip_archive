@@ -1,0 +1,56 @@
+[
+    {
+        "content": "<p>Clippy got 2 really similar ICE reports recently, that don't seem to be caused by changes in Clippy:</p>\n<ol>\n<li><a href=\"https://github.com/rust-lang/rust-clippy/issues/6139\">clippy#6139</a> (when calling <code>is_sized</code> on a <code>ty::Ty</code> produced by <code>hir_ty_to_ty</code>)</li>\n<li><a href=\"https://github.com/rust-lang/rust-clippy/issues/6153\">clippy#6153</a> (when calling <code>is_freeze</code> on a <code>ty::Ty</code> produced by <code>.pat_ty</code> or from a <code>FnSig</code>)</li>\n</ol>\n<p>The backtraces both go into <code>rustc_infer/../canonical</code> through multiple <code>TypeFoldable::fold_with</code> and similar. And the ICE occurs with <code>ReLateBound</code> when the <code>DebruijnIndex</code> is too big. </p>\n<ol>\n<li>ICEd here: <a href=\"https://github.com/rust-lang/rust/blob/5ddef544fa26c5535376fa424baf30cb985f7cb1/compiler/rustc_infer/src/infer/canonical/canonicalizer.rs#L308-L314\">https://github.com/rust-lang/rust/blob/5ddef544fa26c5535376fa424baf30cb985f7cb1/compiler/rustc_infer/src/infer/canonical/canonicalizer.rs#L308-L314</a></li>\n<li>ICEd here: <a href=\"https://github.com/rust-lang/rust/blob/5ddef544fa26c5535376fa424baf30cb985f7cb1/compiler/rustc_infer/src/infer/canonical/substitute.rs#L75\">https://github.com/rust-lang/rust/blob/5ddef544fa26c5535376fa424baf30cb985f7cb1/compiler/rustc_infer/src/infer/canonical/substitute.rs#L75</a> (The indexing)</li>\n</ol>\n<p>The issue with 1. occurred on a trait object with a lifetime (<code>(dyn T&lt;'_&gt;)</code>), which <code>ty::TyKind</code> was <code>ty::Dynamic(.., ReStatic)</code>. Removing the LT prevented the ICE</p>\n<p>For 2. I didn't go as deep in the debugging, but when printing the debug info of the <code>ty::Ty</code> I get:</p>\n<div class=\"codehilite\"><pre><span></span><code>[clippy_lints/src/mut_key.rs:124] ty.kind() = Adt(\n    params::types::Base,\n    [\n        ReLateBound(DebruijnIndex(0), BrAnon(2)),\n    ],\n)\n[clippy_lints/src/mut_key.rs:125] ty = params::types::Base&lt;&#39;_&gt;\n</code></pre></div>\n\n\n<p>So it seems to be a similar issue.</p>\n<p>Are there any preconditions that Clippy has to check before calling <code>ty::Ty::is_sized</code> or <code>ty::Ty::is_freeze</code>?</p>",
+        "id": 212909303,
+        "sender_full_name": "flip1995",
+        "timestamp": 1602325208
+    },
+    {
+        "content": "<p>Are regions getting erased before invoking those queries?</p>",
+        "id": 212909655,
+        "sender_full_name": "oli",
+        "timestamp": 1602325906
+    },
+    {
+        "content": "<p>rustc_middle::ty::TyCtxt - Rust - <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.erase_late_bound_regions\">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.erase_late_bound_regions</a></p>",
+        "id": 212909772,
+        "sender_full_name": "oli",
+        "timestamp": 1602326076
+    },
+    {
+        "content": "<p>That function should at least fix the first ICE</p>",
+        "id": 212909775,
+        "sender_full_name": "oli",
+        "timestamp": 1602326094
+    },
+    {
+        "content": "<p>The second one may require just <code>erase_regions</code></p>",
+        "id": 212909843,
+        "sender_full_name": "oli",
+        "timestamp": 1602326169
+    },
+    {
+        "content": "<p>I don't think that <code>erase_later_bound_regions</code> is correct here because it only erases regions bound at exactly the level of the binder. Clippy should probably skip calling those methods if <code>ty.has_escaping_bound_vars()</code>. <code>ty.needs_infer()</code> and <code>ty.has_placeholders()</code> should also be false before calling them, but if either of those is true you should have an <code>InferCtxt</code>and can call <code>type_known_to_meet_bound_modulo_regions</code> instead.</p>",
+        "id": 212910726,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1602327595
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116118\">Matthew Jasper</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Clippy.20started.20ICEing.20in.20rustc_infer.2F.2E.2E.2Fcanonicalize/near/212910726\">said</a>:</p>\n<blockquote>\n<p>but if either of those is true you should have an <code>InferCtxt</code>and can call <code>type_known_to_meet_bound_modulo_regions</code> instead.</p>\n</blockquote>\n<p>Both <code>is_sized</code> and <code>is_freeze</code> call this function under the hood. And this then panics later. I'll try checking <code>ty.has_escaping_bound_vars()</code> before the calls though.</p>\n<p>I'll also try the <code>erase_*regions</code> functions, but if they only remove the first layer of bounds, I don't have much hope.</p>",
+        "id": 212911628,
+        "sender_full_name": "flip1995",
+        "timestamp": 1602329069
+    },
+    {
+        "content": "<p><code>is_sized</code> and <code>is_freeze</code> first go through the query cache though, which shouldn't contain inference variables or placeholders.</p>",
+        "id": 212912322,
+        "sender_full_name": "Matthew Jasper",
+        "timestamp": 1602330316
+    },
+    {
+        "content": "<p>Alright, placing <code>ty.has_escaping_bound_vars()</code> in front of those calls fixed the ICEs. My question now is: How do we know if we have to place this before those queries? Should we just check that every time we call one of those queries? Only if an ICE occurs? ...?</p>",
+        "id": 212912929,
+        "sender_full_name": "flip1995",
+        "timestamp": 1602331396
+    }
+]

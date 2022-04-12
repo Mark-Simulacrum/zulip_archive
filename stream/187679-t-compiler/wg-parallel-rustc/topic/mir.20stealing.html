@@ -1,0 +1,972 @@
+<html>
+<head><meta charset="utf-8"><title>mir stealing · t-compiler/wg-parallel-rustc · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/index.html">t-compiler/wg-parallel-rustc</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html">mir stealing</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="175089354"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089354" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Paul Faria <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089354">(Sep 06 2019 at 18:14)</a>:</h4>
+<p>Re: Mir Stealing, not sure if this makes sense, but would something like Event Sourcing be a viable alternative to stealing? I think this would really only be useful if the intermediate states of MIR transformation needed to be accessed after some optimizations had already been performed. Would be helpful in keeping space small-ish, but would take some (not sure if this would be small or large in the rustc scale) perf hits to recompute intermediate/final states</p>
+
+
+
+<a name="175089391"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089391" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Turon <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089391">(Sep 06 2019 at 18:14)</a>:</h4>
+<p><span class="user-mention" data-user-id="116122">@simulacrum</span> yeah i think we're ready to open issues for tracking. i do want to think a bit about the audit/doc strategy as well, but we can develop that organically</p>
+
+
+
+<a name="175089582"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089582" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089582">(Sep 06 2019 at 18:16)</a>:</h4>
+<p><span class="user-mention" data-user-id="116114">@Paul Faria</span> what do you mean by "event sourcing"?</p>
+
+
+
+<a name="175089659"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089659" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089659">(Sep 06 2019 at 18:17)</a>:</h4>
+<p>So this is the set of queries for MIR right now</p>
+<div class="codehilite"><pre><span></span>        /// Fetch the MIR for a given `DefId` right after it&#39;s built - this includes
+        /// unreachable code.
+        query mir_built(_: DefId) -&gt; &amp;&#39;tcx Steal&lt;mir::Body&lt;&#39;tcx&gt;&gt; {}
+
+        /// Fetch the MIR for a given `DefId` up till the point where it is
+        /// ready for const evaluation.
+        ///
+        /// See the README for the `mir` module for details.
+        query mir_const(_: DefId) -&gt; &amp;&#39;tcx Steal&lt;mir::Body&lt;&#39;tcx&gt;&gt; {
+            no_hash
+        }
+
+        query mir_validated(_: DefId) -&gt; &amp;&#39;tcx Steal&lt;mir::Body&lt;&#39;tcx&gt;&gt; {
+            no_hash
+        }
+
+        /// MIR after our optimization passes have run. This is MIR that is ready
+        /// for codegen. This is also the only query that can fetch non-local MIR, at present.
+        query optimized_mir(key: DefId) -&gt; &amp;&#39;tcx mir::Body&lt;&#39;tcx&gt; {
+            cache_on_disk_if { key.is_local() }
+            load_cached(tcx, id) {
+                let mir: Option&lt;crate::mir::Body&lt;&#39;tcx&gt;&gt; = tcx.queries.on_disk_cache
+                                                            .try_load_query_result(tcx, id);
+                mir.map(|x| &amp;*tcx.arena.alloc(x))
+            }
+        }
+
+        query promoted_mir(key: DefId) -&gt; &amp;&#39;tcx IndexVec&lt;mir::Promoted, mir::Body&lt;&#39;tcx&gt;&gt; { }
+</pre></div>
+
+
+
+<a name="175089662"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089662" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089662">(Sep 06 2019 at 18:17)</a>:</h4>
+<p><span class="user-mention" data-user-id="116010">@Aaron Turon</span> sounds good -- do you want to open issues? should we hold off on any work until we can have another meeting to maybe get a broader sense of goals and such?</p>
+
+
+
+<a name="175089736"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089736" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089736">(Sep 06 2019 at 18:18)</a>:</h4>
+<p>from <a href="https://github.com/rust-lang/rust/blob/4894123d21ed4b153a2e5c32c0870cb2d97f9b46/src/librustc/query/mod.rs#L101-L142" target="_blank" title="https://github.com/rust-lang/rust/blob/4894123d21ed4b153a2e5c32c0870cb2d97f9b46/src/librustc/query/mod.rs#L101-L142">librustc/query/mod.rs</a> -- well, a mildly outdated copy, apparently</p>
+
+
+
+<a name="175089749"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089749" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089749">(Sep 06 2019 at 18:18)</a>:</h4>
+<p>also this file has changed a lot since I last looked at it :)</p>
+
+
+
+<a name="175089779"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089779" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Paul Faria <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089779">(Sep 06 2019 at 18:19)</a>:</h4>
+<p>It's a pattern used in some backend web system for tracking lots of state changes over time. <a href="https://martinfowler.com/eaaDev/EventSourcing.html" target="_blank" title="https://martinfowler.com/eaaDev/EventSourcing.html">https://martinfowler.com/eaaDev/EventSourcing.html</a> is a good reference from that perspective. Another way to think about it might be commits in a repo. You have a base state, which might be the original MIR, and you store the "patches" to the MIR. Then when you need the MIR at a specific point, you apply the patches in order. This becomes more complicated if you have to account for conflicts</p>
+
+
+
+<a name="175089783"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089783" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089783">(Sep 06 2019 at 18:19)</a>:</h4>
+<p>Is there a reason for having the separate queries? If we don't expect them to run in parallel with each other on a given DefId might it make sense to move all this into a single query that dispatches to calling mir_const etc in a non-query fashion, with <code>&amp;mut Mir</code>?</p>
+
+
+
+<a name="175089798"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089798" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Turon <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089798">(Sep 06 2019 at 18:19)</a>:</h4>
+<p><span class="user-mention" data-user-id="116122">@simulacrum</span> I'm happy to open issues, and set up a tracking issue for the overview. my gut feeling is that we shouldn't <em>block</em> on another meeting, but rather get a topic here going on how we want to approach audit/documentation. i think it's best for us to dive in, see how things are feeling, and coordinate as we go on developing the approach. how does that sound to you?</p>
+
+
+
+<a name="175089805"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089805" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089805">(Sep 06 2019 at 18:19)</a>:</h4>
+<p>I was just thinking about it</p>
+
+
+
+<a name="175089811"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089811" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089811">(Sep 06 2019 at 18:19)</a>:</h4>
+<p>there is some reason</p>
+
+
+
+<a name="175089835"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089835" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Paul Faria <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089835">(Sep 06 2019 at 18:19)</a>:</h4>
+<p>It might be overkill though for rustc's needs.</p>
+
+
+
+<a name="175089838"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089838" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089838">(Sep 06 2019 at 18:19)</a>:</h4>
+<p>e.g., in an IDE, you want be able to do the borrow check</p>
+
+
+
+<a name="175089889"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089889" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089889">(Sep 06 2019 at 18:20)</a>:</h4>
+<p>(to produce errors)</p>
+
+
+
+<a name="175089905"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089905" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089905">(Sep 06 2019 at 18:20)</a>:</h4>
+<p>without necessarily doing all the optimizations</p>
+
+
+
+<a name="175089926"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089926" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Turon <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089926">(Sep 06 2019 at 18:20)</a>:</h4>
+<p><span class="user-mention" data-user-id="116114">@Paul Faria</span> note: looks like there's a "mir stealing" topic now</p>
+
+
+
+<a name="175089938"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089938" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089938">(Sep 06 2019 at 18:20)</a>:</h4>
+<p>the current setup allows for that fairly gracefully</p>
+
+
+
+<a name="175089940"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089940" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089940">(Sep 06 2019 at 18:20)</a>:</h4>
+<p>that said, I'm not sure how imp't that is, especially since we don't do any real optimization right now</p>
+
+
+
+<a name="175089950"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089950" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089950">(Sep 06 2019 at 18:20)</a>:</h4>
+<p>sounds reasonable to me -- I'd be willing to spend some time trying to refactor the handler in librustc_errors simultaneously with an audit of sorts to try and come up with some docs on how to do it and such</p>
+
+
+
+<a name="175089956"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089956" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089956">(Sep 06 2019 at 18:20)</a>:</h4>
+<p>iow if just had one <code>optimized_mir</code> query that did all the things, it would sometimes do more work than is needed</p>
+
+
+
+<a name="175089963"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089963" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089963">(Sep 06 2019 at 18:20)</a>:</h4>
+<p>presuming that's useful?</p>
+
+
+
+<a name="175089967"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089967" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Turon <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089967">(Sep 06 2019 at 18:21)</a>:</h4>
+<p><span class="user-mention" data-user-id="116114">@Paul Faria</span> i think you can <em>move</em>  your messages if you want</p>
+
+
+
+<a name="175089989"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175089989" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175089989">(Sep 06 2019 at 18:21)</a>:</h4>
+<p>probably also for <code>cargo check</code></p>
+
+
+
+<a name="175090045"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090045" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090045">(Sep 06 2019 at 18:22)</a>:</h4>
+<p>so we also have an abstraction -- for the non-tcx queries -- that essentially wraps a generator such that you can "access" a piece of state, and then move on to the next piece of the function (optionally)</p>
+
+
+
+<a name="175090164"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090164" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Paul Faria <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090164">(Sep 06 2019 at 18:23)</a>:</h4>
+<p>I might have messed up some messages in this topic. I assumed (incorrectly) that moving "later replies" would just be my own, and not everyone else's as well.</p>
+
+
+
+<a name="175090222"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090222" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090222">(Sep 06 2019 at 18:23)</a>:</h4>
+<p>heh, I was wondering what happened there</p>
+
+
+
+<a name="175090299"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090299" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090299">(Sep 06 2019 at 18:24)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/blob/master/src/librustc_data_structures/box_region.rs" target="_blank" title="https://github.com/rust-lang/rust/blob/master/src/librustc_data_structures/box_region.rs">https://github.com/rust-lang/rust/blob/master/src/librustc_data_structures/box_region.rs</a> is the data structure</p>
+
+
+
+<a name="175090303"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090303" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090303">(Sep 06 2019 at 18:24)</a>:</h4>
+<p>in any case, <span class="user-mention" data-user-id="116114">@Paul Faria</span>, I think that would be too hard to do in practice, we did think about things like this; you could also (for example) build MIR out of persistent data structures, but that'd be a big change</p>
+
+
+
+<a name="175090322"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090322" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090322">(Sep 06 2019 at 18:24)</a>:</h4>
+<p>but essentially it's quite similar to async/await except without the "not ready" (i.e., it's synchronous)</p>
+
+
+
+<a name="175090360"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090360" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090360">(Sep 06 2019 at 18:25)</a>:</h4>
+<p>so that could allow some form of "linearizability" where you can ask for things but we guarantee in one place that you're always &gt;= the previous so to speak</p>
+
+
+
+<a name="175090369"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090369" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090369">(Sep 06 2019 at 18:25)</a>:</h4>
+<p><span class="user-mention" data-user-id="116122">@simulacrum</span> interesting. this gets into the direction of the more ambitious proposals where we extend the query system somewhat</p>
+
+
+
+<a name="175090426"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090426" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Paul Faria <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090426">(Sep 06 2019 at 18:26)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> no worries, I might stick with the predecessors issue then if no one else is hoping to pick it up</p>
+
+
+
+<a name="175090431"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090431" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090431">(Sep 06 2019 at 18:26)</a>:</h4>
+<p>you could certainly imagine having some process that encapaulates some state (including the mir)</p>
+
+
+
+<a name="175090436"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090436" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090436">(Sep 06 2019 at 18:26)</a>:</h4>
+<p>and can be pushed along to various points</p>
+
+
+
+<a name="175090439"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090439" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090439">(Sep 06 2019 at 18:26)</a>:</h4>
+<p>and caches the results of those points</p>
+
+
+
+<a name="175090445"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090445" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090445">(Sep 06 2019 at 18:26)</a>:</h4>
+<p>hmm so e.g. you could have like</p>
+
+
+
+<a name="175090461"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090461" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090461">(Sep 06 2019 at 18:26)</a>:</h4>
+<div class="codehilite"><pre><span></span><span class="k">fn</span> <span class="nf">mir</span><span class="p">(</span><span class="n">def_id</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">MirBox</span><span class="w"></span>
+</pre></div>
+
+
+
+<a name="175090499"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090499" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Wesley Wiser <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090499">(Sep 06 2019 at 18:27)</a>:</h4>
+<blockquote>
+<p>iow if just had one <code>optimized_mir</code> query that did all the things, it would sometimes do more work than is needed</p>
+</blockquote>
+<p>It was also necessary add a new query so that miri (the const eval engine not the tool) could access promoted MIR while we're processing the body those promotions came from during <code>optimize_mir</code>. This is part of the ongoing work to deduplicate code between miri and <code>rustc_mir::transform::ConstProp</code>.</p>
+
+
+
+<a name="175090501"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090501" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090501">(Sep 06 2019 at 18:27)</a>:</h4>
+<p>and then </p>
+<div class="codehilite"><pre><span></span><span class="k">struct</span> <span class="nc">MirBox</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">borrow_check</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">BorrowCheckResult</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">optimized_mir</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kp">&amp;</span><span class="nc">Mir</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+<p>and whatever the major outputs are</p>
+
+
+
+<a name="175090556"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090556" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090556">(Sep 06 2019 at 18:27)</a>:</h4>
+<p>(the idea being that <code>MirBox</code> kind of encapsulates and hides this state that moves monotonically along, but only as far as it needs to)</p>
+
+
+
+<a name="175090624"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090624" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090624">(Sep 06 2019 at 18:28)</a>:</h4>
+<p>it'd be sort of a mini query system I guess ;)</p>
+
+
+
+<a name="175090673"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090673" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090673">(Sep 06 2019 at 18:28)</a>:</h4>
+<p>Yeah, that was what I was thinking</p>
+
+
+
+<a name="175090678"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090678" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090678">(Sep 06 2019 at 18:28)</a>:</h4>
+<blockquote>
+<p>It was also necessary add a new query so that miri (the const eval engine not the tool) could access promoted MIR ...</p>
+</blockquote>
+<p>yeah, we'd have to accommodate this</p>
+
+
+
+<a name="175090679"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090679" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090679">(Sep 06 2019 at 18:28)</a>:</h4>
+<p>In some sense though this doesn't quite work out</p>
+
+
+
+<a name="175090700"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090700" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090700">(Sep 06 2019 at 18:28)</a>:</h4>
+<p>what sense do you mean?</p>
+
+
+
+<a name="175090735"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090735" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090735">(Sep 06 2019 at 18:29)</a>:</h4>
+<p>well</p>
+
+
+
+<a name="175090739"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090739" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090739">(Sep 06 2019 at 18:29)</a>:</h4>
+<p>well, you always have the potential for panic or some similar functionality -- if you make the "subqueries" public then it's hard to audit precisely I guess</p>
+
+
+
+<a name="175090746"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090746" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090746">(Sep 06 2019 at 18:29)</a>:</h4>
+<p>the thing that I exactly proposed is "not great" because it's <em>still</em> shared mutable state and is going to play poorly with incremental etc</p>
+
+
+
+<a name="175090751"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090751" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090751">(Sep 06 2019 at 18:29)</a>:</h4>
+<p>in that anyone can come along and call a prior state</p>
+
+
+
+<a name="175090766"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090766" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090766">(Sep 06 2019 at 18:29)</a>:</h4>
+<p>oh, that's not an issue the way I specified it</p>
+
+
+
+<a name="175090781"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090781" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090781">(Sep 06 2019 at 18:30)</a>:</h4>
+<p>the idea would be that you <em>will</em> cache the results of (say) borrow-check</p>
+
+
+
+<a name="175090833"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090833" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090833">(Sep 06 2019 at 18:30)</a>:</h4>
+<p>and any outputs "publicly vislble"</p>
+
+
+
+<a name="175090860"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090860" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090860">(Sep 06 2019 at 18:30)</a>:</h4>
+<p>right, I'm talking about the inputs -- borrow check wants unoptimized MIR</p>
+
+
+
+<a name="175090870"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090870" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090870">(Sep 06 2019 at 18:30)</a>:</h4>
+<p>that's not a problem</p>
+
+
+
+<a name="175090877"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090877" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090877">(Sep 06 2019 at 18:30)</a>:</h4>
+<p>unless I'm misunderstanding you</p>
+
+
+
+<a name="175090889"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090889" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090889">(Sep 06 2019 at 18:30)</a>:</h4>
+<p>I guess you're saying that we'd always run it if someone asked for optimized MIR?</p>
+
+
+
+<a name="175090894"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090894" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090894">(Sep 06 2019 at 18:30)</a>:</h4>
+<p>yes, same as today</p>
+
+
+
+<a name="175090902"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090902" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090902">(Sep 06 2019 at 18:30)</a>:</h4>
+<p>basically internally there is a series of steps</p>
+
+
+
+<a name="175090905"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090905" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090905">(Sep 06 2019 at 18:31)</a>:</h4>
+<p>that are ALWAYS run in a fixed order</p>
+
+
+
+<a name="175090916"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090916" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090916">(Sep 06 2019 at 18:31)</a>:</h4>
+<p>and never go backwards</p>
+
+
+
+<a name="175090921"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090921" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090921">(Sep 06 2019 at 18:31)</a>:</h4>
+<p>but we only run through as many as we have to</p>
+
+
+
+<a name="175090938"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090938" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090938">(Sep 06 2019 at 18:31)</a>:</h4>
+<p>to satisfy the things requested thus far</p>
+
+
+
+<a name="175090945"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090945" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090945">(Sep 06 2019 at 18:31)</a>:</h4>
+<p>Ah, okay -- so I misunderstood then -- I guess my thinking was that we do want the ability to say "get me optimized MIR, don't run borrowck"</p>
+
+
+
+<a name="175090949"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090949" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090949">(Sep 06 2019 at 18:31)</a>:</h4>
+<p>if you ask for optimized-mir first, it'll do them all (and produce all the outputs alon the way)</p>
+
+
+
+<a name="175090955"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090955" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090955">(Sep 06 2019 at 18:31)</a>:</h4>
+<p>ah, no</p>
+
+
+
+<a name="175090981"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090981" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090981">(Sep 06 2019 at 18:31)</a>:</h4>
+<p>I think I might like to think of it as a "query group"</p>
+
+
+
+<a name="175090982"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175090982" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175090982">(Sep 06 2019 at 18:31)</a>:</h4>
+<p>but if that's not a desirable outcome, then a MirBox of sorts seems like a very reasonable thing to have</p>
+
+
+
+<a name="175091042"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091042" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091042">(Sep 06 2019 at 18:32)</a>:</h4>
+<p>i.e., you define a linear set of queries that will have some "shared, hidden state"</p>
+
+
+
+<a name="175091078"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091078" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091078">(Sep 06 2019 at 18:32)</a>:</h4>
+<p>Right, but that state is essentially a bunch of <code>Onces</code> and a single <code>Lock&lt;Mir&gt;</code> that is acquired for the duration of the query</p>
+
+
+
+<a name="175091079"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091079" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091079">(Sep 06 2019 at 18:32)</a>:</h4>
+<p>and in their provider functions, they get ownership of this state and they return a tuple (their result for the outside world, and the state for next step)</p>
+
+
+
+<a name="175091085"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091085" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091085">(Sep 06 2019 at 18:32)</a>:</h4>
+<p>(or equivalent, I guess)</p>
+
+
+
+<a name="175091100"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091100" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091100">(Sep 06 2019 at 18:33)</a>:</h4>
+<p>yeah, somehow behind the scenes the query engine can track how far along you are</p>
+
+
+
+<a name="175091112"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091112" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091112">(Sep 06 2019 at 18:33)</a>:</h4>
+<p>the advantage of this would be that it is well exposed to incremental</p>
+
+
+
+<a name="175091130"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091130" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091130">(Sep 06 2019 at 18:33)</a>:</h4>
+<p>so e.g. we can see that at some point we can skip over the remaining steps</p>
+
+
+
+<a name="175091138"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091138" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091138">(Sep 06 2019 at 18:33)</a>:</h4>
+<p>hm, so I feel like integrating with incremental might be somewhat of a non-goal?</p>
+
+
+
+<a name="175091150"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091150" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091150">(Sep 06 2019 at 18:33)</a>:</h4>
+<p>why?</p>
+
+
+
+<a name="175091159"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091159" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091159">(Sep 06 2019 at 18:33)</a>:</h4>
+<p>like, you only ever do all/nothing it feels like for some given compilation</p>
+
+
+
+<a name="175091192"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091192" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091192">(Sep 06 2019 at 18:34)</a>:</h4>
+<p>not at all</p>
+
+
+
+<a name="175091210"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091210" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091210">(Sep 06 2019 at 18:34)</a>:</h4>
+<p>though I guess that might not be true for e.g. IDEs and such</p>
+
+
+
+<a name="175091220"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091220" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091220">(Sep 06 2019 at 18:34)</a>:</h4>
+<p>no, it's not true in rustc</p>
+
+
+
+<a name="175091225"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091225" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091225">(Sep 06 2019 at 18:34)</a>:</h4>
+<p>like, if I only change the body of one function</p>
+
+
+
+<a name="175091234"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091234" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091234">(Sep 06 2019 at 18:34)</a>:</h4>
+<p>why should I have to reoptimize all the rest?</p>
+
+
+
+<a name="175091259"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091259" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091259">(Sep 06 2019 at 18:34)</a>:</h4>
+<p>ah, so I meant all/nothing (for a given DefId)</p>
+
+
+
+<a name="175091275"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091275" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091275">(Sep 06 2019 at 18:34)</a>:</h4>
+<p>so sort of less granular than today, presumably</p>
+
+
+
+<a name="175091281"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091281" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091281">(Sep 06 2019 at 18:34)</a>:</h4>
+<p>ah. yes, it might be sufficient to track the "query series" as a unit, but that's not obvious to me</p>
+
+
+
+<a name="175091301"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091301" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091301">(Sep 06 2019 at 18:35)</a>:</h4>
+<p>it's probably true</p>
+
+
+
+<a name="175091326"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091326" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091326">(Sep 06 2019 at 18:35)</a>:</h4>
+<p>I mean there's no <em>theoretical</em> reason for it, just probably true enough in practice</p>
+
+
+
+<a name="175091367"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091367" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091367">(Sep 06 2019 at 18:35)</a>:</h4>
+<p>I guess internally it'd potentially serialize and deserialize to w/e state it was in, too, so maybe it just all sort of works out anyway to fine-grained tracking</p>
+
+
+
+<a name="175091370"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091370" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091370">(Sep 06 2019 at 18:35)</a>:</h4>
+<p>(you could e.g. have made some change that desugars into the same MIR, or which winds up with equivalent MIR after some optimization is done)</p>
+
+
+
+<a name="175091448"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091448" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091448">(Sep 06 2019 at 18:36)</a>:</h4>
+<p>I guess I think that if it makes life easier, then foregoing incremental/parallelization between members of a "query series" is fine</p>
+
+
+
+<a name="175091461"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091461" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091461">(Sep 06 2019 at 18:36)</a>:</h4>
+<p>the main thing is that I don't think this should live "on the side"</p>
+
+
+
+<a name="175091468"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091468" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091468">(Sep 06 2019 at 18:36)</a>:</h4>
+<p>with some shared mutable state not exposed to the query system</p>
+
+
+
+<a name="175091498"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091498" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091498">(Sep 06 2019 at 18:37)</a>:</h4>
+<p>/me ponders</p>
+
+
+
+<a name="175091500"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091500" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091500">(Sep 06 2019 at 18:37)</a>:</h4>
+<p>wait</p>
+
+
+
+<a name="175091501"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091501" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091501">(Sep 06 2019 at 18:37)</a>:</h4>
+<p>maybe I'm wrong</p>
+
+
+
+<a name="175091513"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091513" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091513">(Sep 06 2019 at 18:37)</a>:</h4>
+<p>So you mean like that the mutable state should be inside the MirBox? That was sort of implied, I felt?</p>
+
+
+
+<a name="175091519"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091519" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091519">(Sep 06 2019 at 18:37)</a>:</h4>
+<p>I'm not sure where the "on the side" would be / what we'd put there</p>
+
+
+
+<a name="175091528"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091528" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091528">(Sep 06 2019 at 18:37)</a>:</h4>
+<p>in the mir box <em>is</em> "on the side" in my terminology :)</p>
+
+
+
+<a name="175091540"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091540" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091540">(Sep 06 2019 at 18:38)</a>:</h4>
+<p>it's not stored in the query hashmaps</p>
+
+
+
+<a name="175091589"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091589" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091589">(Sep 06 2019 at 18:38)</a>:</h4>
+<p>the query system doesn't know about it or manage it</p>
+
+
+
+<a name="175091590"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091590" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091590">(Sep 06 2019 at 18:38)</a>:</h4>
+<p>hm, but the mirbox is? Right?</p>
+
+
+
+<a name="175091614"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091614" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091614">(Sep 06 2019 at 18:38)</a>:</h4>
+<p>Like, the <code>mir(DefId) -&gt; &amp;MirBox</code> query is a proper query</p>
+
+
+
+<a name="175091616"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091616" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091616">(Sep 06 2019 at 18:38)</a>:</h4>
+<p>yes I somewhat take back what I said</p>
+
+
+
+<a name="175091628"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091628" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091628">(Sep 06 2019 at 18:38)</a>:</h4>
+<p>well, no, it's not proper in the sense we mean oday</p>
+
+
+
+<a name="175091634"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091634" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091634">(Sep 06 2019 at 18:38)</a>:</h4>
+<p>in that query results are supposed to be "pure values"</p>
+
+
+
+<a name="175091635"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091635" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091635">(Sep 06 2019 at 18:38)</a>:</h4>
+<p>it's just that it evaluates to some state that can change down the road (like Steal, today) but in some non-stealing fashion</p>
+
+
+
+<a name="175091639"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091639" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091639">(Sep 06 2019 at 18:39)</a>:</h4>
+<p>that never cahnge</p>
+
+
+
+<a name="175091648"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091648" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091648">(Sep 06 2019 at 18:39)</a>:</h4>
+<p>otherwise, the whole premise of incremental falls apart</p>
+
+
+
+<a name="175091657"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091657" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091657">(Sep 06 2019 at 18:39)</a>:</h4>
+<p>but I think you can <em>make</em> it work</p>
+
+
+
+<a name="175091682"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091682" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091682">(Sep 06 2019 at 18:39)</a>:</h4>
+<p>hm, okay, so I was thinking that it's fine for the return to change so long as the _query_ always resolves to the "same" thing</p>
+
+
+
+<a name="175091707"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091707" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091707">(Sep 06 2019 at 18:39)</a>:</h4>
+<p>like, I don't see why it'd be a problem for incremental, since presumably it'd still work out</p>
+
+
+
+<a name="175091784"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091784" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091784">(Sep 06 2019 at 18:40)</a>:</h4>
+<p>it basically depends on what hash/eq mean</p>
+
+
+
+<a name="175091788"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091788" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091788">(Sep 06 2019 at 18:40)</a>:</h4>
+<p>though we might need some custom code to unify an old MirBox and a possible new one</p>
+
+
+
+<a name="175091826"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091826" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091826">(Sep 06 2019 at 18:40)</a>:</h4>
+<p>I think what you could do is this</p>
+
+
+
+<a name="175091833"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091833" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091833">(Sep 06 2019 at 18:40)</a>:</h4>
+<p>the "identity" of a MirBox is some fresh uuid</p>
+
+
+
+<a name="175091852"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091852" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091852">(Sep 06 2019 at 18:41)</a>:</h4>
+<p>(and/or maybe a hash of the initial mir that you made)</p>
+
+
+
+<a name="175091866"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091866" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091866">(Sep 06 2019 at 18:41)</a>:</h4>
+<p>when we serialize a mirbox, we capture whatever values we cached so far</p>
+
+
+
+<a name="175091879"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091879" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091879">(Sep 06 2019 at 18:41)</a>:</h4>
+<p>now when incremental re-runs --</p>
+
+
+
+<a name="175091899"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091899" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091899">(Sep 06 2019 at 18:41)</a>:</h4>
+<p>if the inputs to the <code>mir</code> query have changed (basically, the HIR of the function, or relevant types etc)</p>
+
+
+
+<a name="175091919"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091919" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091919">(Sep 06 2019 at 18:42)</a>:</h4>
+<p>we'll rebuild the MIR</p>
+
+
+
+<a name="175091949"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091949" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091949">(Sep 06 2019 at 18:42)</a>:</h4>
+<p>since it's identity is a fresh UUID (let's run with that for a sec)</p>
+
+
+
+<a name="175091958"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091958" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091958">(Sep 06 2019 at 18:42)</a>:</h4>
+<p>it will <em>always</em> be dirty relative to the previous, cached mir</p>
+
+
+
+<a name="175091962"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091962" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091962">(Sep 06 2019 at 18:42)</a>:</h4>
+<p>but that's ok</p>
+
+
+
+<a name="175091969"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091969" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091969">(Sep 06 2019 at 18:42)</a>:</h4>
+<p>that means we'll just have none of the "downstream steps" (borrow-check, etc)</p>
+
+
+
+<a name="175091975"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091975" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091975">(Sep 06 2019 at 18:42)</a>:</h4>
+<p>cached</p>
+
+
+
+<a name="175091981"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091981" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091981">(Sep 06 2019 at 18:42)</a>:</h4>
+<p>and hence we will re-run them</p>
+
+
+
+<a name="175091999"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175091999" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175091999">(Sep 06 2019 at 18:42)</a>:</h4>
+<p>but if the inputs to the mir did <em>not</em> change, we can deserialize the mir box as normal</p>
+
+
+
+<a name="175092031"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092031" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092031">(Sep 06 2019 at 18:43)</a>:</h4>
+<p>I think this would also work fine if you used instead a hash of the MIR as the "identity" of the mir-box</p>
+
+
+
+<a name="175092044"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092044" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092044">(Sep 06 2019 at 18:43)</a>:</h4>
+<p>except that maybe you'd get a hair more re-use, because sometimes your serialized value would be found to be equal</p>
+
+
+
+<a name="175092070"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092070" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092070">(Sep 06 2019 at 18:43)</a>:</h4>
+<p>because MIR encodes a "lower" form than HIR and such?</p>
+
+
+
+<a name="175092073"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092073" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092073">(Sep 06 2019 at 18:43)</a>:</h4>
+<p>in any case the key point is that the "identity" is tied to the initial output from the <code>mir</code> query -- the other, derived work (optimized form, etc) are all pure functions from that</p>
+
+
+
+<a name="175092077"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092077" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092077">(Sep 06 2019 at 18:43)</a>:</h4>
+<blockquote>
+<p>because MIR encodes a "lower" form than HIR and such?</p>
+</blockquote>
+<p>yes</p>
+
+
+
+<a name="175092088"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092088" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092088">(Sep 06 2019 at 18:43)</a>:</h4>
+<p>that doesn't strike mas a very realistic proposition in most cases</p>
+
+
+
+<a name="175092119"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092119" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092119">(Sep 06 2019 at 18:44)</a>:</h4>
+<p>but a hash may still be better just because uuid is a drag and non-reproducible</p>
+
+
+
+<a name="175092158"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092158" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092158">(Sep 06 2019 at 18:44)</a>:</h4>
+<blockquote>
+<p>that doesn't strike mas a very realistic proposition in most cases</p>
+</blockquote>
+<p>(as you suggested)</p>
+
+
+
+<a name="175092194"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092194" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092194">(Sep 06 2019 at 18:44)</a>:</h4>
+<p>I think the derive work being pure from that is -- perhaps -- not true? And can't be true?</p>
+
+
+
+<a name="175092229"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092229" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092229">(Sep 06 2019 at 18:45)</a>:</h4>
+<p>e.g. I would assume we depend on bits from HIR?</p>
+
+
+
+<a name="175092246"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092246" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092246">(Sep 06 2019 at 18:45)</a>:</h4>
+<p>yeah so the problem is that they want to invoke other queries in some cases</p>
+
+
+
+<a name="175092256"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092256" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092256">(Sep 06 2019 at 18:45)</a>:</h4>
+<p>e.g., inlining</p>
+
+
+
+<a name="175092278"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092278" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092278">(Sep 06 2019 at 18:45)</a>:</h4>
+<p>and so the set of inputs that go into the mir box actually grows over time</p>
+
+
+
+<a name="175092297"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092297" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092297">(Sep 06 2019 at 18:46)</a>:</h4>
+<p>actually, I want something very similar to this for salsa + chalk</p>
+
+
+
+<a name="175092354"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092354" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092354">(Sep 06 2019 at 18:46)</a>:</h4>
+<p>well, for chalk (but I was thining about adding it to salsa)</p>
+
+
+
+<a name="175092388"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092388" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092388">(Sep 06 2019 at 18:46)</a>:</h4>
+<p>that is, some mechanism for saying "I have a process that has advanced some of the way; it will resume later, and may grow more inputs as it goes"</p>
+
+
+
+<a name="175092411"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092411" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092411">(Sep 06 2019 at 18:46)</a>:</h4>
+<p>that's encouraging, that there is more than one use</p>
+
+
+
+<a name="175092416"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092416" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092416">(Sep 06 2019 at 18:46)</a>:</h4>
+<p>anyway, I need to run -- but it does sound like getting a more general structure here for sort of "long-term" queries or "stateful queries" is useful</p>
+
+
+
+<a name="175092440"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092440" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092440">(Sep 06 2019 at 18:47)</a>:</h4>
+<p>yeah, it seems useful, though in the <em>short term</em> we could fix the <em>immediate problem</em> in the simpler way</p>
+
+
+
+<a name="175092442"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092442" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092442">(Sep 06 2019 at 18:47)</a>:</h4>
+<p>I also should go</p>
+
+
+
+<a name="175092505"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092505" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092505">(Sep 06 2019 at 18:47)</a>:</h4>
+<p>I can try and type up some of this in a shorter form in the doc when I get a chance, probably later tonight</p>
+
+
+
+<a name="175092515"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092515" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092515">(Sep 06 2019 at 18:47)</a>:</h4>
+<p>(unless of course someone beats me to it)</p>
+
+
+
+<a name="175092911"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187679-t-compiler/wg-parallel-rustc/topic/mir%20stealing/near/175092911" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187679-t-compiler/wg-parallel-rustc/topic/mir.20stealing.html#175092911">(Sep 06 2019 at 18:51)</a>:</h4>
+<blockquote>
+<p>no worries, I might stick with the predecessors issue then if no one else is hoping to pick it up</p>
+</blockquote>
+<p>(<span class="user-mention" data-user-id="116114">@Paul Faria</span> seems good)</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

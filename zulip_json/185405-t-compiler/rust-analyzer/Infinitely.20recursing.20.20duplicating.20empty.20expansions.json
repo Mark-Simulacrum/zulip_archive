@@ -1,0 +1,488 @@
+[
+    {
+        "content": "<p>So in <a href=\"https://github.com/rust-analyzer/rust-analyzer/issues/10544\">https://github.com/rust-analyzer/rust-analyzer/issues/10544</a> we get a hang due to specific macro invocations(caused by parser recovery),<br>\nignoring the parser part, for the following macro</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"fm\">macro_rules!</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">error</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">error</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"n\">error</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>rust analyzer will hang and just eat more and more memory, this obviously creates a <a href=\"https://www.wolframalpha.com/input/?i=sum+2%5Ei%2C+i%3D1+to+128\"><strong><em>lot</em></strong></a>(if my math isn't wrong) of expansions with a depth limit of 128(this is basically a fork bomb is it not?).</p>\n<p>And since these macros don't emit more tokens than whats in the expander we also never hit the <code>TOKEN_LIMIT</code></p>",
+        "id": 258392649,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634745217
+    },
+    {
+        "content": "<p>rustc hits a recursion limit here but we don't which I assume is due to us doing things differently here</p>",
+        "id": 258392819,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634745281
+    },
+    {
+        "content": "<p>Interestingly the hang can be observed when putting that snippet into a test, but for</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"fm\">macro_rules!</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">error</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">error</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">error</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>a test expands this once and then finishes while putting that snippet into RA also hangs for me</p>",
+        "id": 258393600,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634745530
+    },
+    {
+        "content": "<p>This should hit macro depth limit</p>",
+        "id": 258395435,
+        "sender_full_name": "matklad",
+        "timestamp": 1634746142
+    },
+    {
+        "content": "<p>I think what might be happening here is that we have two infras for macro expansion. One \"normal expanision\" during lowering, and one \"let me guess it \" expansion for IDE features. And we had a bug once where the second kind of expanion didn't enforce recursion limit</p>",
+        "id": 258395613,
+        "sender_full_name": "matklad",
+        "timestamp": 1634746202
+    },
+    {
+        "content": "<p><code>const EXPANSION_RECURSION_LIMIT: Limit = Limit::new(32);</code> is what I am talking about.</p>",
+        "id": 258396045,
+        "sender_full_name": "matklad",
+        "timestamp": 1634746340
+    },
+    {
+        "content": "<p>For the item case it hits the <code>EXPANSION_DEPTH_LIMIT</code> but in that case we only stop expanding the macros that are at that depth if I see this right, so we still try to expand them all(at least thats what logging me the depth tells). And for the expression case ye I guess some ide layer thing is doing something wonky there since the test doesn't even try to expand it past the first level.</p>",
+        "id": 258396573,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634746526
+    },
+    {
+        "content": "<p>So there are multiple problems at work here I imagine</p>",
+        "id": 258396785,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634746594
+    },
+    {
+        "content": "<p><del>(Oh dear I assume <code>descend_into_macros</code> is the IDE level problem)</del></p>",
+        "id": 258396865,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634746629
+    },
+    {
+        "content": "<p>Ahh.... So we need to check the limit for <em>both</em> <code>error!()</code> calls? On every level? Oh dear</p>",
+        "id": 258396956,
+        "sender_full_name": "matklad",
+        "timestamp": 1634746671
+    },
+    {
+        "content": "<p>Ye the depth logs for item collection are basically</p>\n<div class=\"codehilite\"><pre><span></span><code>[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 1\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 2\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 3\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 4\n...\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 125\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 126\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 127\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 128\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 128\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 127\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 128\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 128\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 126\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 127\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 128\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 129\n[crates\\hir_def\\src\\nameres\\collector.rs:1207] depth = 128\n...\n</code></pre></div>",
+        "id": 258397198,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634746751
+    },
+    {
+        "content": "<p>Because we only stop looking at that depth, then we go back up one and look at the second branch. Back out there again go up one even further and repeat visiting all branches until depth 128</p>",
+        "id": 258397358,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634746802
+    },
+    {
+        "content": "<p>feels pretty bad. Like we have to add some kind of <em>global</em> limit here, which is hard to square with inremental expansion of a single macro</p>",
+        "id": 258398445,
+        "sender_full_name": "matklad",
+        "timestamp": 1634747184
+    },
+    {
+        "content": "<p>You could decrease the limit in the DefCollector for <em>every</em> macro you expand, not just while descending into one</p>",
+        "id": 258491259,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1634795166
+    },
+    {
+        "content": "<p>We could, but then the limit becomes a part of MacroCallLoc -- you need to be able to get the limit in the <code>expand_macro(MacroCallId)</code> query. And the limit is volatile (unlike depth)</p>",
+        "id": 258508773,
+        "sender_full_name": "matklad",
+        "timestamp": 1634805922
+    },
+    {
+        "content": "<p>Hmm, I think I broke the test case here. <a href=\"https://github.com/rust-analyzer/rust-analyzer/pull/10585#issuecomment-946678952\">Last time I tried</a>, I needed an <code>#[error]</code> on the struct for it to trigger. Are we looking at MBE macros there?</p>",
+        "id": 258510907,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634806974
+    },
+    {
+        "content": "<p>This is solely about MBE macros yes</p>",
+        "id": 258514111,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634808601
+    },
+    {
+        "content": "<p>I wasn't able to reproduce this with an attribute like in your snippet</p>",
+        "id": 258514202,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634808626
+    },
+    {
+        "content": "<p>Uh-oh..</p>",
+        "id": 258514226,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634808642
+    },
+    {
+        "content": "<p>My theory was that we're doing something with the <code>error</code> MBE when we see <code>#[error]</code>. And in the original test case there was a <code>#[thiserror]</code> on the type, so I don't think we should have been doing anything with the attribute</p>",
+        "id": 258514398,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634808723
+    },
+    {
+        "content": "<p>Just checked again, it hangs iff I have the attribute on the struct.</p>",
+        "id": 258514535,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634808799
+    },
+    {
+        "content": "<p>Yeah, the logs look the same, we hang around depth 128. Can I print a human-readable <code>MacroCallLoc</code>?</p>",
+        "id": 258514770,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634808920
+    },
+    {
+        "content": "<p>Oh, now I get the behaviour for the attribute as well</p>",
+        "id": 258515405,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634809205
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>[DEBUG hir_def::nameres::collector] non-builtin attribute error\n[DEBUG hir_def::nameres::path_resolution] resolving Name(Text(&quot;error&quot;)) in module\n[crates/hir_def/src/nameres/collector.rs:1207] depth = 1\n[WARN hir_expand::db] fail on macro_parse: (reason: BindingError(&quot;leftover tokens&quot;) macro_call: #[error]\nstruct LoadSourcesError;) parents:\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[crates/hir_def/src/nameres/collector.rs:1207] depth = 2\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[DEBUG hir_expand::db] parse = MACRO_ITEMS\n[crates/hir_def/src/nameres/collector.rs:1207] depth = 3\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[DEBUG hir_expand::db] parse = MACRO_ITEMS\n[crates/hir_def/src/nameres/collector.rs:1207] depth = 4\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[DEBUG hir_expand::db] parse = MACRO_ITEMS\n[crates/hir_def/src/nameres/collector.rs:1207] depth = 5\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[DEBUG hir_expand::db] parse = MACRO_ITEMS\n[crates/hir_def/src/nameres/collector.rs:1207] depth = 6\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[DEBUG hir_expand::db] parse = MACRO_ITEMS\n[crates/hir_def/src/nameres/collector.rs:1207] depth = 7\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[DEBUG hir_expand::db] parse = MACRO_ITEMS\n[crates/hir_def/src/nameres/collector.rs:1207] depth = 8\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[DEBUG hir_expand::db] parse = MACRO_ITEMS\n[crates/hir_def/src/nameres/collector.rs:1207] depth = 9\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[DEBUG hir_expand::db] parse = MACRO_ITEMS\n</code></pre></div>",
+        "id": 258515736,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634809350
+    },
+    {
+        "content": "<p>Ye so thats basically the same problem, just that we we use an attribute invocation with an mbe macro</p>",
+        "id": 258515866,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634809422
+    },
+    {
+        "content": "<p>vs.</p>\n<div class=\"codehilite\"><pre><span></span><code>[DEBUG hir_def::nameres::collector] non-builtin attribute error2\n[DEBUG hir_def::nameres::path_resolution] resolving Name(Text(&quot;error2&quot;)) in module\n</code></pre></div>",
+        "id": 258515968,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634809455
+    },
+    {
+        "content": "<p>Yeah, but why do we try to expand the macro?</p>",
+        "id": 258516003,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634809471
+    },
+    {
+        "content": "<p>Because attributes can be specified as macro 2.0 macros at least with the <code>rustc_builtin_macro</code> attribute, and I assume this was the case for mbe macros before as well? I imagine we just don't check for the attribute maybe</p>",
+        "id": 258516146,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634809552
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"300586\">Lukas Wirth</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/Infinitely.20recursing.20.20duplicating.20empty.20expansions/near/258516146\">said</a>:</p>\n<blockquote>\n<p>Because attributes can be specified as macro 2.0 macros at least with the <code>rustc_builtin_macro</code> attribute, and I assume this was the case for mbe macros before as well? I imagine we just don't check for the attribute maybe</p>\n</blockquote>\n<p>Huh, TIL.</p>",
+        "id": 258516565,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634809754
+    },
+    {
+        "content": "<p>I think so at least? or was this only for derives</p>",
+        "id": 258516589,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634809770
+    },
+    {
+        "content": "<p>I'm not sure anymroe actually but maybe we are also just forgetting to do this check in general then</p>",
+        "id": 258516616,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634809785
+    },
+    {
+        "content": "<p>Ye that's only the case for derives, so we are just missing a check for the macro kind when resolving for attributes I guess</p>",
+        "id": 258516904,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634809920
+    },
+    {
+        "content": "<p>I'm also looking at the original case (with <code>#[derive(Error)] #[error] struct ...</code>). I didn't expect it, but ever <code>cargo expand</code>  shows:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[error(</span><span class=\"s\">\"xxx\"</span><span class=\"cp\">)]</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">LoadSourcesError</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"cp\">#[automatically_derived]</span><span class=\"w\"></span>\n<span class=\"cp\">#[allow(unused_qualifications)]</span><span class=\"w\"></span>\n<span class=\"k\">impl</span><span class=\"w\"> </span>::<span class=\"n\">core</span>::<span class=\"n\">fmt</span>::<span class=\"n\">Debug</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">LoadSourcesError</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">fn</span> <span class=\"nf\">fmt</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"bp\">self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">f</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span>::<span class=\"n\">core</span>::<span class=\"n\">fmt</span>::<span class=\"n\">Formatter</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; ::<span class=\"n\">core</span>::<span class=\"n\">fmt</span>::<span class=\"nb\">Result</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"bp\">self</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"n\">LoadSourcesError</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span>::<span class=\"n\">core</span>::<span class=\"n\">fmt</span>::<span class=\"n\">Formatter</span>::<span class=\"n\">write_str</span><span class=\"p\">(</span><span class=\"n\">f</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"s\">\"LoadSourcesError\"</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"cp\">#[allow(unused_qualifications)]</span><span class=\"w\"></span>\n<span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">error</span>::<span class=\"n\">Error</span><span class=\"w\"> </span><span class=\"k\">for</span><span class=\"w\"> </span><span class=\"n\">LoadSourcesError</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"c1\">// ...</span>\n</code></pre></div>",
+        "id": 258517060,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634809983
+    },
+    {
+        "content": "<p>For some reason, it doesn't strip the <code>#[error]</code> attribute. Of course, if I try to compile that, <code>rustc</code> complains.</p>",
+        "id": 258517117,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810012
+    },
+    {
+        "content": "<p>That's because <code>error</code> is a registered derive helper there right? Those don't get stripped on expansion</p>",
+        "id": 258517233,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810054
+    },
+    {
+        "content": "<p>They don't? The proc macro needs to see them, but shouldn't they be stripped from the original item?</p>",
+        "id": 258517290,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810091
+    },
+    {
+        "content": "<p>They don't because multiple derives can see the same helpers, or rather all macros can see the helper attributes <a href=\"https://doc.rust-lang.org/reference/procedural-macros.html#derive-macro-helper-attributes\">https://doc.rust-lang.org/reference/procedural-macros.html#derive-macro-helper-attributes</a></p>",
+        "id": 258517383,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810146
+    },
+    {
+        "content": "<p>and since a derive doesn't modify the original item they stay due to derive helpers being so called <code>inert</code> attributes</p>",
+        "id": 258517498,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810186
+    },
+    {
+        "content": "<p><span aria-label=\"confused\" class=\"emoji emoji-1f615\" role=\"img\" title=\"confused\">:confused:</span> macros are hard</p>",
+        "id": 258517631,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810252
+    },
+    {
+        "content": "<p>Yes they are <span aria-label=\"grimacing\" class=\"emoji emoji-1f62c\" role=\"img\" title=\"grimacing\">:grimacing:</span></p>",
+        "id": 258517668,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810275
+    },
+    {
+        "content": "<p>Oh, and originally it failed because we can't expand <code>error</code> when it's an attribute? I mean here:</p>",
+        "id": 258518066,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810456
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">use</span><span class=\"w\"> </span><span class=\"n\">thiserror</span>::<span class=\"n\">Error</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"fm\">macro_rules!</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">(</span><span class=\"cp\">$error</span>:<span class=\"nc\">ident</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">struct</span> <span class=\"cp\">$error</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"cp\">$error</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"cp\">#[derive(Debug, Error)]</span><span class=\"w\"></span>\n<span class=\"cp\">#[error(</span><span class=\"s\">\"xxx\"</span><span class=\"cp\">)]</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">LoadSourcesError</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"n\">error</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">Foo</span><span class=\"p\">);</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">main</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 258518082,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810467
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>#[derive(Debug, Error)]\n#[error(&quot;xxx&quot;)]\nstruct LoadSourcesError;\n[DEBUG hir_expand::db] expanded =  struct$error{}impl$error{}\n[DEBUG hir_expand::db] kind = Items\n[WARN hir_expand::db] fail on macro_parse: (reason: BindingError(&quot;expected ident&quot;) macro_call: error{}) parents: error{}\n</code></pre></div>",
+        "id": 258518133,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810504
+    },
+    {
+        "content": "<p>I imagine that caused the problem because we invoked the <code>error</code> macro through the attribute with an invalid input(either the item or the string literal) causing us not to bind $error fragment, giving us the raw expansion with <code>$error</code> in there. Which then kicked off the recursion since the parsers fallback creates two new macro invocations there</p>",
+        "id": 258518367,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810622
+    },
+    {
+        "content": "<p>Yeah, sounds reasonable.</p>",
+        "id": 258518442,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810647
+    },
+    {
+        "content": "<p>And because of the <code>error</code> mbe macro definition we probably didn't resolve the derive helper as a derive helper</p>",
+        "id": 258518454,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810653
+    },
+    {
+        "content": "<p>There's also this case:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"fm\">macro_rules!</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">(</span><span class=\"cp\">$error</span>:<span class=\"nc\">ident</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">struct</span> <span class=\"cp\">$error</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"cp\">$error</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"c1\">//error!(Foo);</span>\n<span class=\"n\">error</span><span class=\"o\">!</span><span class=\"p\">();</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Here <code>rustc</code> complains that the invocation is incorrect, but we hang.</p>",
+        "id": 258518558,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810705
+    },
+    {
+        "content": "<p>Ah, that's our error recovery? Instead of rejecting it from the start, we still try to expand it?</p>",
+        "id": 258518607,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810734
+    },
+    {
+        "content": "<p>So we still expand macros even if we don't match any arms?</p>",
+        "id": 258518640,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810754
+    },
+    {
+        "content": "<p>How do we know which arm to pick if we don't match any? <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 258518725,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810784
+    },
+    {
+        "content": "<p>Even hangs with <code>error!(\"xxx\")</code>.</p>",
+        "id": 258518765,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810813
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"300586\">Lukas Wirth</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/Infinitely.20recursing.20.20duplicating.20empty.20expansions/near/258518725\">said</a>:</p>\n<blockquote>\n<p>How do we know which arm to pick if we don't match any? <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>\n</blockquote>\n<p>Well, none of them?</p>",
+        "id": 258518795,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810830
+    },
+    {
+        "content": "<p>Well we have to pick an arm to get this expansion, if we didn't we wouldn't be expanding the macrocall no?</p>",
+        "id": 258518875,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810873
+    },
+    {
+        "content": "<p>How can we expand it if there's no match? <span aria-label=\"smiley\" class=\"emoji emoji-1f603\" role=\"img\" title=\"smiley\">:smiley:</span></p>",
+        "id": 258518972,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810907
+    },
+    {
+        "content": "<p>Macros are cursed.</p>",
+        "id": 258519010,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810937
+    },
+    {
+        "content": "<p>I don't know but we are hanging as you said so that means we are expanding that one arm for some reason <span aria-label=\"big smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"big smile\">:big_smile:</span></p>",
+        "id": 258519024,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634810948
+    },
+    {
+        "content": "<p>So there are two issues here:</p>\n<ul>\n<li>we try to expand a declarative macro when there's no matching arm</li>\n<li>we try to expand attributes as declarative macros</li>\n<li>bonus: we somehow hang in recursive macros</li>\n</ul>",
+        "id": 258519043,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634810958
+    },
+    {
+        "content": "<ul>\n<li>we are vulnerable to this macro expansion </li>\n</ul>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"fm\">macro_rules!</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">error</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">error</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"n\">error</span><span class=\"o\">!</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 258519200,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811034
+    },
+    {
+        "content": "<p>I think we try to expand the best-matching arm</p>",
+        "id": 258519202,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1634811034
+    },
+    {
+        "content": "<p>even if it doesn't match without errors</p>",
+        "id": 258519220,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1634811043
+    },
+    {
+        "content": "<p>But this one isn't recursive, is it? And we still hang.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"fm\">macro_rules!</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">(</span><span class=\"cp\">$error</span>:<span class=\"nc\">ident</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">struct</span> <span class=\"cp\">$error</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"cp\">$error</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 258519403,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634811137
+    },
+    {
+        "content": "<p>It is is recursive</p>",
+        "id": 258519446,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811162
+    },
+    {
+        "content": "<p>because of parser recovery</p>",
+        "id": 258519454,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811165
+    },
+    {
+        "content": "<p>the <code>$</code> causes the parser to recover, then we parse the <code>error {}</code> as a macro invocation</p>",
+        "id": 258519487,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811186
+    },
+    {
+        "content": "<p>Shouldn't we parse it as <code>$error</code> instead of thinking it's a call even without the <code>!</code>?</p>",
+        "id": 258519558,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634811230
+    },
+    {
+        "content": "<p>there is nothing in rust outside of macros that parses with the $ token</p>",
+        "id": 258519650,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811254
+    },
+    {
+        "content": "<p>and at the sourcefile/module level we parse an identifier/path as a macro call</p>",
+        "id": 258519696,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811284
+    },
+    {
+        "content": "<p>as all items start with a keyword</p>",
+        "id": 258519715,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811297
+    },
+    {
+        "content": "<p>Yeah.. so how does <code>$x</code> work, for some placeholder <code>x</code>?</p>",
+        "id": 258519724,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634811303
+    },
+    {
+        "content": "<p><code>$x</code> currently gets pasted into the expansion if we didn't bind it to any input(which happens here as florian said by taking the best matching arm)</p>",
+        "id": 258519776,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811337
+    },
+    {
+        "content": "<p>so calling that macro gives us the literal</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"k\">struct</span> <span class=\"cp\">$error</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">impl</span><span class=\"w\"> </span><span class=\"cp\">$error</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>expansion</p>",
+        "id": 258519799,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811355
+    },
+    {
+        "content": "<p>No, assuming<code>$x</code> is a valid input</p>",
+        "id": 258519897,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634811389
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>SOURCE_FILE@0..31\n  STRUCT@0..8\n    STRUCT_KW@0..6 &quot;struct&quot;\n    WHITESPACE@6..7 &quot; &quot;\n    ERROR@7..8\n      DOLLAR@7..8 &quot;$&quot;\n  MACRO_CALL@8..16\n    PATH@8..13\n      PATH_SEGMENT@8..13\n        NAME_REF@8..13\n          IDENT@8..13 &quot;error&quot;\n    WHITESPACE@13..14 &quot; &quot;\n    TOKEN_TREE@14..16\n      L_CURLY@14..15 &quot;{&quot;\n      R_CURLY@15..16 &quot;}&quot;\n  WHITESPACE@16..17 &quot;\\n&quot;\n  IMPL@17..23\n    IMPL_KW@17..21 &quot;impl&quot;\n    WHITESPACE@21..22 &quot; &quot;\n    ERROR@22..23\n      DOLLAR@22..23 &quot;$&quot;\n  MACRO_CALL@23..31\n    PATH@23..28\n      PATH_SEGMENT@23..28\n        NAME_REF@23..28\n          IDENT@23..28 &quot;error&quot;\n    WHITESPACE@28..29 &quot; &quot;\n    TOKEN_TREE@29..31\n      L_CURLY@29..30 &quot;{&quot;\n      R_CURLY@30..31 &quot;}&quot;\n</code></pre></div>",
+        "id": 258519901,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811392
+    },
+    {
+        "content": "<p>corresponding rast</p>",
+        "id": 258519908,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811395
+    },
+    {
+        "content": "<p>assuming its valid we replace it with the matched input token</p>",
+        "id": 258519948,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811423
+    },
+    {
+        "content": "<p>We see <code>$x</code>, first try to expand an <code>x</code> macro, don't find it, give up and emit <code>$x</code>, then go over this and replace <code>$x</code> with the macro input?</p>",
+        "id": 258519958,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634811428
+    },
+    {
+        "content": "<p>(deleted)</p>",
+        "id": 258519960,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811429
+    },
+    {
+        "content": "<p>No, we first replace all fragments with their matched inputs, if any fragment doesn't have a matched input we keep it as <code>$fragment_name</code> in the tree. Then we do name resolution on this new tree.<br>\nSo if <code>$x</code> has an input we replace it with it and all is well, if it doesn't we keep it as the <code>$x</code> tokens in the tree, which could cause parser recovery causing it to be parsed as a macro invocation depending on the surrounding syntax which then could be resolved in in name res</p>",
+        "id": 258520254,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811589
+    },
+    {
+        "content": "<p><a href=\"https://github.com/rust-analyzer/rust-analyzer/pull/10603\">https://github.com/rust-analyzer/rust-analyzer/pull/10603</a> fixes the attribute problem</p>",
+        "id": 258520738,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811832
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"129457\">Florian Diebold</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/Infinitely.20recursing.20.20duplicating.20empty.20expansions/near/258519202\">said</a>:</p>\n<blockquote>\n<p>I think we try to expand the best-matching arm</p>\n</blockquote>\n<p>Doing this makes sense I suppose but I wonder if we should try to replace unmatched fragments with defaults so that we don't literally paste <code>$fragment</code> into the expansion.</p>",
+        "id": 258520918,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1634811912
+    },
+    {
+        "content": "<p>And maybe we shouldn't try to expand macros which are missing <code>!</code>?</p>",
+        "id": 258521929,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1634812512
+    }
+]

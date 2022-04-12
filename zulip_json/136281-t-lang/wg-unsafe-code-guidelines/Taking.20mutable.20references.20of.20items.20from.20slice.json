@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>Hello, i want to ask a question about borrowing items from a slice. Imagine i have a <code>&amp;'a mut [T]</code> which has <code>N</code> items. I want to borrow all the elements at the same time, but in random order. Effectively I'm split borrowing the slice. I will do bookkeeping by storing all borrowed indexes inside a btreeset and reject any indexes that occured more than once. Is there anything i need to specially pay attention to when implementing this if i want it be accepted by the stacked borrows model?</p>",
+        "id": 210768923,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1600707244
+    },
+    {
+        "content": "<p>This sounds like a slight refactoring around a <code>Vec&lt;RefCell&lt;&amp;mut T&gt;&gt;</code></p>",
+        "id": 210772820,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1600709003
+    },
+    {
+        "content": "<p>As long as you actually don't access a <code>&amp;mut T</code> twice at once I think there are no problems here</p>",
+        "id": 210773079,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1600709127
+    },
+    {
+        "content": "<p>Sure! I can call <code>iter_mut()</code> and collect up all the mutable references. This will achieve full \"split borrowing\". It's just that this will come with O(n) space complexity, because i have to prepare all references ahead of time for them to \"take away\".</p>",
+        "id": 210774023,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1600709546
+    },
+    {
+        "content": "<p>I'm not confident here, but I suspect you might need to get all the <code>&amp;mut T</code>s via a raw pointer -- if you go back to the <code>&amp;mut [T]</code> to get another one, it's non-obvious to me whether using that again invalidates the others, since IIRC it \"claims\" the whole slice again.</p>",
+        "id": 210776437,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1600710733
+    },
+    {
+        "content": "<p><del>mumble mumble provenance</del></p>",
+        "id": 210776474,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1600710756
+    },
+    {
+        "content": "<p>(I would also note that a BTreeSet seems really awkward compared to pre-allocating a bitset)</p>",
+        "id": 210777539,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1600711206
+    },
+    {
+        "content": "<p>I'm pretty sure <span class=\"user-mention\" data-user-id=\"125270\">@scottmcm</span> is right that you need to, once, cast the whole slice to a pointer to T (note: critical that it be the whole slice) and then offset from that to each element</p>",
+        "id": 210777623,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1600711254
+    },
+    {
+        "content": "<p>Agreed with <span class=\"user-mention\" data-user-id=\"125270\">@scottmcm</span>, I'd propably use the following helper as the intermediate object to obtain the references without violating provenance:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">use</span><span class=\"w\"> </span><span class=\"n\">safety_boundary</span>::<span class=\"n\">SliceMut</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"k\">mod</span> <span class=\"nn\">safety_boundary</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">use</span><span class=\"w\"> </span>::<span class=\"n\">core</span>::<span class=\"p\">{</span><span class=\"n\">marker</span>::<span class=\"n\">PhantomData</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">ptr</span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"k\">pub</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">struct</span> <span class=\"nc\">SliceMut</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;lt</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">ptr</span>: <span class=\"nc\">ptr</span>::<span class=\"n\">NonNull</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">len</span>: <span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">_lifetime</span>: <span class=\"nc\">PhantomData</span><span class=\"o\">&lt;&amp;</span><span class=\"na\">&#39;lt</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">T</span><span class=\"p\">]</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"k\">impl</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;lt</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"n\">SliceMut</span><span class=\"o\">&lt;</span><span class=\"na\">&#39;lt</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">pub</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">fn</span> <span class=\"nf\">new</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"n\">slice</span>: <span class=\"kp\">&amp;</span><span class=\"na\">&#39;lt</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">T</span><span class=\"p\">])</span><span class=\"w\"></span>\n<span class=\"w\">          </span>-&gt; <span class=\"nc\">Self</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"bp\">Self</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"n\">len</span>: <span class=\"nc\">slice</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">(),</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"n\">ptr</span>: <span class=\"nc\">ptr</span>::<span class=\"n\">NonNull</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">slice</span><span class=\"p\">.</span><span class=\"n\">as_mut_ptr</span><span class=\"p\">()).</span><span class=\"n\">unwrap</span><span class=\"p\">(),</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"n\">_lifetime</span>: <span class=\"nc\">PhantomData</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"w\">        </span><span class=\"k\">pub</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"c1\">// Safety: must not be called with the same `idx` multiple times.</span>\n<span class=\"w\">        </span><span class=\"k\">fn</span> <span class=\"nf\">at</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"bp\">self</span>: <span class=\"kp\">&amp;</span><span class=\"nb\">&#39;_</span><span class=\"w\"> </span><span class=\"bp\">Self</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">idx</span>: <span class=\"kt\">usize</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"w\">          </span>-&gt; <span class=\"nb\">Option</span><span class=\"o\">&lt;&amp;</span><span class=\"na\">&#39;lt</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">idx</span><span class=\"w\"> </span><span class=\"o\">&lt;</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">ptr</span><span class=\"p\">.</span><span class=\"n\">as_ptr</span><span class=\"p\">().</span><span class=\"n\">add</span><span class=\"p\">(</span><span class=\"n\">idx</span><span class=\"p\">))</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"nb\">None</span><span class=\"w\"></span>\n<span class=\"w\">            </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 210777779,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1600711315
+    },
+    {
+        "content": "<p>Thanks!</p>",
+        "id": 210827239,
+        "sender_full_name": "Charles Lew",
+        "timestamp": 1600749073
+    },
+    {
+        "content": "<p>Why not just use <code>Vec&lt;Cell&lt;T&gt;&gt;</code>? <br>\nYou can easily then get references to the inner part, this sounds like a better safer solution to me,<br>\nunless you can't change the <code>&amp;'a mut [T]</code> part</p>",
+        "id": 210936473,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1600811836
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"249222\">@Elichai Turkel</span> that's also an interesting idea: from a <code>&amp;mut [T]</code> you can <a href=\"https://doc.rust-lang.org/core/cell/struct.Cell.html#method.as_slice_of_cells\">construct a <code>&amp;[Cell&lt;T&gt;]</code></a>, which is an <code>unsafe</code>-free solution, and does not even need the set property (although it is still _advisable_)</p>",
+        "id": 210937212,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1600812246
+    },
+    {
+        "content": "<p>That looks like it's from <code>Cell&lt;[T]&gt;</code>?</p>",
+        "id": 210937332,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1600812326
+    },
+    {
+        "content": "<p>Oh, so you call <code>Cell::from_mut(&amp;mut [T]).as_slice_of_cells()</code> cool!</p>",
+        "id": 210937502,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1600812418
+    },
+    {
+        "content": "<p>Example at <a href=\"https://stackoverflow.com/a/62564887/155423\">Simultaneous mutable access to arbitrary indices of a large vector that are guaranteed to be disjoint</a></p>",
+        "id": 210952723,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1600827113
+    },
+    {
+        "content": "<p>You can see my <code>BTreeSet</code> version there as well.</p>",
+        "id": 210952786,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1600827144
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116155\">Jake Goulding</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Taking.20mutable.20references.20of.20items.20from.20slice/near/210952723\">said</a>:</p>\n<blockquote>\n<p>Example at <a href=\"https://stackoverflow.com/a/62564887/155423\">Simultaneous mutable access to arbitrary indices of a large vector that are guaranteed to be disjoint</a></p>\n<p>A <code>&amp;[Cell&lt;T&gt;]</code> is almost like a <code>&amp;[&amp;mut T]</code>,</p>\n</blockquote>\n<p>I'm not super fond of that comparison, since the right hand-side has an extra indirection; what about:</p>\n<blockquote>\n<p>A <code>&amp;[Cell&lt;T&gt;]</code> is a <code>&amp;[mut T]</code>, if that were possible to write: a <em>shared</em> reference to a slice of <em>mutable</em> elements.</p>\n</blockquote>\n<p>You could then even add something along the lines of:</p>\n<blockquote>\n<p>This is safe since the <code>Cell</code> type is a wrapper type with a limited API that makes mutation within a single thread be always safe, and is also a type that Rust knows is not thread-safe (not <code>Sync</code>)</p>\n</blockquote>\n<hr>\n<p>But in all cases, let's avoid adding an indirection where there isn't one, since some beginners mix up all these \"smart pointers\" <code>Rc, Cell, RefCell, ...</code> <span aria-label=\"big smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"big smile\">:big_smile:</span></p>",
+        "id": 211014139,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1600872584
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232018\">@Daniel Henry-Mantilla</span> I passed that along to the author and <a href=\"https://stackoverflow.com/posts/62564887/revisions\">they made changes</a>. Thoughts?</p>",
+        "id": 211018434,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1600874375
+    }
+]

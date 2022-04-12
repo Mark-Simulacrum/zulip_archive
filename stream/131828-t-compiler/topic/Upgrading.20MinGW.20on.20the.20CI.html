@@ -1,0 +1,115 @@
+<html>
+<head><meta charset="utf-8"><title>Upgrading MinGW on the CI · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html">Upgrading MinGW on the CI</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="208843263"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/208843263" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mati865 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#208843263">(Sep 02 2020 at 15:34)</a>:</h4>
+<p>As at least some of you know Rust is using quite old mingw-w64 5.0.1 paired with GCC 6.3.0 and Binutils 2.27 and this is effectively the oldest mingw-w64 version that <a href="https://github.com/rust-lang/rust/pull/73999">can build Rust</a> (<a href="https://github.com/rust-lang/rust/pull/73902#issuecomment-652414502">the issue</a>). Upgrading MinGW has been mentioned at least couple time in different locations but did nothing has changed.</p>
+<p>There are few issues with that toolchain:</p>
+<ol>
+<li>32-bit LLVM doesn't build on mingw-w64 older than version 7.0.0, <a href="https://github.com/rust-lang/llvm-project/commit/08116dc16957b736cf1f83e793c4236f5d2035d1">hack</a> that disables threading support in LLVM was applied. This hopefully does not affect Rust itself but it disables threading in <code>rust-lld</code>.</li>
+<li>profiler library used by PGO and Code Coverage segfaults when build by MinGW GCC+Binutils, before <a href="https://github.com/rust-lang/llvm-project/pull/72">this fix</a> trying to use PGO or Code Coverage was either causing link error or resulting profile data was malformed, both of those issues are <a href="https://github.com/rust-lang-ci/rust/runs/1010894381">reproducible on the CI</a> when <a href="https://github.com/rust-lang/rust/pull/75184">enabling profiler for MinGW tests</a></li>
+<li>winpthreads has multiple bugs fixed in newer releases (and some of the fixes are not yet released), this often causes <code>rust-lld</code> to <a href="https://github.com/rust-lang/rust/pull/76127#issuecomment-685165341">hang</a></li>
+<li>Binutils older than 2.32 <a href="https://sourceware.org/bugzilla/show_bug.cgi?id=23872">misalign <code>rdata_runtime_pseudo_relocs</code></a>, this <a href="https://github.com/rust-lang/rust/pull/75604">prevents Rust from enabling function sections</a> for MinGW targets</li>
+<li>I have <a href="https://github.com/rust-lang/rust/pull/75406">open PR</a> for enabling ASLR (better late than never <span aria-label="wink" class="emoji emoji-1f609" role="img" title="wink">:wink:</span>), it works for me locally with newer toolchain and passed tests on try build on CI for i686-pc-windows-gnu but Binutils older than 2.34 can strip reloc data for executables resulting in crashes</li>
+</ol>
+<p>Possible solutions for specific issues:</p>
+<ol>
+<li>Upgrading mingw-w64 is obviously easiest fix here, probably nobody is going to develop proper workaround allowing LLVM to use threads for 32-bit MinGW.</li>
+<li>I'm unable to fix it further, building Rust with Clang is the only solution I can propose.</li>
+<li>Libstdc++ uses winpthreads (so inherits winpthreads bugs) for threading code, easiest solution here is using Clang + libc++ (it uses Win32 Thread API instead of winpthreads).</li>
+<li>Besides upgrading Binutils/switching to LLD on CI, Rust would have to bump requirement for oldest supported Binutils or require using LLD. I think this is unlikely to happen for now.</li>
+<li>There is a <a href="https://github.com/TheRyuu/FFmpeg/commit/91b668acd6decec0a6f8d20bf56e2644f96adcb9">workaround</a> for older Binutils, alternatively require newer Binutils or LLD.  I think requiring newer Binutils or LLD is unlikely to happen for now.</li>
+</ol>
+<p>Since <a href="https://github.com/niXman/mingw-builds">mingw-builds</a> project that Rust previously used no longer provides prebuilt binaries fixing any of these issues involves building own MinGW toolchain things complicate a bit. I can prepare shell scripts (that can be ran on both Linux and Windows) or Docker script to build toolchain that fits all the need and provide the binaries but wanted to get some feedback first (this will require t-infra agreement as well).</p>
+
+
+
+<a name="208848223"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/208848223" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pachi <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#208848223">(Sep 02 2020 at 16:05)</a>:</h4>
+<p><span class="user-mention" data-user-id="119581">@mati865</span> Thanks a lot for working on rust and MinGW, it's a blast being able to cross compile code from Linux targeting win32!</p>
+
+
+
+<a name="208862062"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/208862062" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#208862062">(Sep 02 2020 at 17:51)</a>:</h4>
+<p>(Some information for people who don't already know: mingw-w64 is a newer fork of mingw that focuses on 64-bit, but it still supports building 32-bit toolchains.)</p>
+
+
+
+<a name="208862087"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/208862087" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#208862087">(Sep 02 2020 at 17:51)</a>:</h4>
+<p>(Many people currently use mingw-w64 to target both 32-bit and 64-bit Windows.)</p>
+
+
+
+<a name="209183482"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/209183482" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#209183482">(Sep 05 2020 at 15:36)</a>:</h4>
+<p>This is probably more a T-infra issue now.<br>
+T-compiler is unlikely to be helpful for moving this forward.</p>
+
+
+
+<a name="209183687"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/209183687" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#209183687">(Sep 05 2020 at 15:40)</a>:</h4>
+<p>Question: does it make sense to try migrating CI to the last version provided by mingw-builds? (That's gcc 7.2.0 as opposed to current gcc 6.3.0.)<br>
+It shouldn't require any new work from infra people, but can still help with some of the issues.</p>
+
+
+
+<a name="209183899"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/209183899" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#209183899">(Sep 05 2020 at 15:46)</a>:</h4>
+<p>I don't think t-infra can sign off on a change like this, but we can certainly help by uploading binaries or whatever else is needed.</p>
+
+
+
+<a name="209183958"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/209183958" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#209183958">(Sep 05 2020 at 15:48)</a>:</h4>
+<p>I myself don't know the implications of upgrading etc but am not generally opposed</p>
+
+
+
+<a name="209220370"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/209220370" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mati865 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#209220370">(Sep 06 2020 at 11:05)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="123856">Vadim Petrochenkov</span> <a href="#narrow/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI/near/209183687">said</a>:</p>
+<blockquote>
+<p>Question: does it make sense to try migrating CI to the last version provided by mingw-builds? (That's gcc 7.2.0 as opposed to current gcc 6.3.0.)<br>
+It shouldn't require any new work from infra people, but can still help with some of the issues.</p>
+</blockquote>
+<p>That doesn't help at all I think. Latest build (GCC 8.1) was running OOM when building LLVM: <a href="https://github.com/rust-lang/rust/pull/51989">https://github.com/rust-lang/rust/pull/51989</a></p>
+
+
+
+<a name="209224689"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/209224689" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mati865 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#209224689">(Sep 06 2020 at 13:02)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116122">simulacrum</span> <a href="#narrow/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI/near/209183958">said</a>:</p>
+<blockquote>
+<p>I myself don't know the implications of upgrading etc but am not generally opposed</p>
+</blockquote>
+<p>Overall implications for the user should be minimal since we would be still using the same MSVCRT from the system as before.<br>
+The downside would be higher MinGW requirement when building Rust compiler (LLVM already requires latest stable mingw-w64 like I mentioned in 1.) but it should not affect using Rust by the users (though old versions would be not tested).</p>
+
+
+
+<a name="209225458"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/209225458" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#209225458">(Sep 06 2020 at 13:24)</a>:</h4>
+<p>If users are not affected, and we expect people developing rustc to be able to readily obtain the new version (i.e. there is no reason to not do that) I'm on board with updating our requirements</p>
+
+
+
+<a name="213783822"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/Upgrading%20MinGW%20on%20the%20CI/near/213783822" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mati865 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/Upgrading.20MinGW.20on.20the.20CI.html#213783822">(Oct 19 2020 at 13:22)</a>:</h4>
+<p>FWIW using LLD with MinGW is sort on <a href="https://github.com/retep998/windump-rs/pull/1">https://github.com/retep998/windump-rs/pull/1</a> beside some other things.<br>
+Right now it works but if anything pulls winapi libraries, the build will break.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

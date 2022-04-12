@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>So in versions of SDL2 <em>prior</em> to 2.0.14 (the upcoming version), there's the following things all at once:</p>\n<ul>\n<li>A global static buffer of 1024 bytes used to store error messages from the API. On error, the API writes to the buffer and the function returns an int which indicates \"go check the error buffer for more info\".</li>\n<li>A general warning that the API isn't thread safe and should only be used from the main thread.</li>\n<li>Except for the sound system which is explicitly intended to be multi-threaded.</li>\n<li>The sound system can still generate error strings from the other thread it lives in.</li>\n</ul>\n<p>Careful readers will note that we have all the makings of a potential data race!</p>\n<p>However, I can't change SDL2 itself, it's already installed too many places. While they are finally fixing it in the next release, sometimes people don't update immediately.</p>\n<p>So what I'd like to know is: what exactly what is the <em>likely</em> practical effect in this situation if a data race does occur? Yes, I know it's UB and you can't predict precisely and so on, but I'd like to know anyway.</p>\n<p>It seems like, and this could be naive, the byte buffer always has <em>some</em> bytes in it. Regardless of the precise bytes, there are bytes <em>at all</em>. So if you copy the error buffer into a <code>Vec&lt;u8&gt;</code>, then you'll get <em>something</em>, even if it's not the intended message, right?</p>\n<p>Because if so, if a garbage message is the worst that can really happen, then that does feel like an acceptable level of UB risk, as heretical as that may seem. At least until people move to next version of SDL2.</p>",
+        "id": 209578782,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1599692341
+    },
+    {
+        "content": "<p>If it's already compiled, then you can verify that the compiler hasn't done any funny business with the UB and then you only have to worry about hardware behavior in the presence of data races, rather than language UB</p>",
+        "id": 209579194,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599692641
+    },
+    {
+        "content": "<p>In the case of x86, you get some pretty good guarantees, that amount to what you say - you will get garbage at worst</p>",
+        "id": 209579276,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599692679
+    },
+    {
+        "content": "<p>Language UB becomes more important if you want to compile the code several times with different versions of the compiler or different target architectures. In that case you should probably stay appraised of any changes that could potentially exploit this, but if it's a global problem then the optimizer is unlikely to have any interesting effect until it grows some general AI. (Someone please correct me if this is not the case.)</p>",
+        "id": 209579618,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599692979
+    },
+    {
+        "content": "<p>In short, you are programming to compiler-as-written rather than the language spec</p>",
+        "id": 209579639,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599692998
+    },
+    {
+        "content": "<blockquote>\n<p>It seems like, and this could be naive, the byte buffer always has some bytes in it. Regardless of the precise bytes, there are bytes at all. So if you copy the error buffer into a Vec&lt;u8&gt;, then you'll get something, even if it's not the intended message, right?</p>\n</blockquote>\n<p>You will get a poison value, which behaves weird. For example if you compare it twice to <code>0</code> you can get different results. If you match on it you could have zero or multiple match arms that get executed, etc. This happens because the compiler may assume that the loaded memory doesn't change and as such can for example directly load from it again rather than spilling the value to the stack when there is register pressure.</p>",
+        "id": 209608622,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1599726377
+    },
+    {
+        "content": "<p>That's still at the compiler level though, right? That's an LLVM thing, not an x86/ARM thing</p>",
+        "id": 209609642,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599727058
+    },
+    {
+        "content": "<p>Yes</p>",
+        "id": 209609673,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1599727078
+    },
+    {
+        "content": "<p>so as long as your code is sufficiently \"real\" as to defeat the optimizer, the hardware isn't licensed to take advantage of the UB</p>",
+        "id": 209609767,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599727128
+    },
+    {
+        "content": "<p>Even when using a fixed compiler, you can't guarantee that certain optimizations are not performed. Especially with LTO any change to code of any crate can affect optimization of any other piece of code.</p>",
+        "id": 209609800,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1599727157
+    },
+    {
+        "content": "<p>Are there any actual LLVM optimizations that could allow it to deduce that the value is poison and not just something unknown?</p>",
+        "id": 209609994,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599727294
+    },
+    {
+        "content": "<p>No, but that is not necessary. LLVM optimizes based on the assumption that is not poison, so it can change</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">ERROR</span>: <span class=\"kt\">u32</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">maybe_handle_error</span><span class=\"p\">(</span><span class=\"n\">ok</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"n\">err</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">())</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">ERROR</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">ok</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">err</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>to</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">ERROR</span>: <span class=\"kt\">u32</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">maybe_handle_error</span><span class=\"p\">(</span><span class=\"n\">ok</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"n\">err</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">())</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">ERROR</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">ok</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">ERROR</span><span class=\"w\"> </span><span class=\"o\">!=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">err</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>which would call <code>ok</code> <strong>and</strong> <code>err</code> if <code>ERROR</code> changes from 0 to something else. Or it could change</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">ERROR</span>: <span class=\"kt\">u32</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">(</span><span class=\"n\">f</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"n\">err</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">())</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">ERROR</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"> </span><span class=\"o\">!=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">err</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">f</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">error</span><span class=\"w\"> </span><span class=\"o\">!=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">err</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>to</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">ERROR</span>: <span class=\"kt\">u32</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">(</span><span class=\"n\">f</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">(),</span><span class=\"w\"> </span><span class=\"n\">err</span>: <span class=\"nc\">impl</span><span class=\"w\"> </span><span class=\"nb\">FnOnce</span><span class=\"p\">())</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">ERROR</span><span class=\"w\"> </span><span class=\"o\">!=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">err</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">f</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">ERROR</span><span class=\"w\"> </span><span class=\"o\">!=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">err</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>if for example <code>f</code> was inlined and <code>f</code> is big enough to necessitate <code>error</code> being spilled. The changed example could call <code>err()</code> once while before it was always zero or two times.</p>",
+        "id": 209610622,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1599727732
+    },
+    {
+        "content": "<p>Do you think it is possible / reasonable to write code that is resistant to this kind of code manipulation when a particular value is suspected to be poison?</p>",
+        "id": 209610989,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1599727967
+    },
+    {
+        "content": "<p>Using atomic or volatile loads/stores may trick LLVM enough. If SDL participates in LTO, LLVM may still be able to see that there are non-atomic accesses, but SDL likely doesn't participate in LTO.</p>",
+        "id": 209611199,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1599728144
+    },
+    {
+        "content": "<p>A volatile is definitely going to mess with LLVM's head, it can't really optimize around them. <a href=\"https://github.com/rust-lang/rust/issues/74476\">https://github.com/rust-lang/rust/issues/74476</a> ( since the entire point of volatile is a marker for PhantomData&lt;The Entire World&gt;. )</p>",
+        "id": 209624265,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1599736707
+    },
+    {
+        "content": "<p>Upon closer inspection it seems that SDL2 has been using the thread-local storage error buffer for longer than I thought at first, so this particular worry can be put behind us.</p>\n<p>(But feel free to muse on the possibilities I suppose.)</p>",
+        "id": 209634139,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1599742580
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Just.20how.20bad.20is.20a.20data.20race.20*really*.3F/near/209610989\">said</a>:</p>\n<blockquote>\n<p>Do you think it is possible / reasonable to write code that is resistant to this kind of code manipulation when a particular value is suspected to be poison?</p>\n</blockquote>\n<p>possible, maybe. reasonable, no. at that point you are basically working against the compiler instead of with it.</p>",
+        "id": 209756803,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1599815455
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"281757\">Jubilee</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Just.20how.20bad.20is.20a.20data.20race.20*really*.3F/near/209624265\">said</a>:</p>\n<blockquote>\n<p>A volatile is definitely going to mess with LLVM's head, it can't really optimize around them. <a href=\"https://github.com/rust-lang/rust/issues/74476\">https://github.com/rust-lang/rust/issues/74476</a> ( since the entire point of volatile is a marker for PhantomData&lt;The Entire World&gt;. )</p>\n</blockquote>\n<p>unfortunately, LLVM doesn't guarantee that though -- while I think LLVM could just document \"volatile reads never yield <code>poison</code> or <code>undef</code>\" without any cost (from what I know, they are already complying with that stricter spec), they don't want to do that. :/</p>",
+        "id": 209756831,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1599815495
+    },
+    {
+        "content": "<p>see <a href=\"https://bugs.llvm.org/show_bug.cgi?id=42435\">https://bugs.llvm.org/show_bug.cgi?id=42435</a></p>",
+        "id": 209756844,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1599815507
+    },
+    {
+        "content": "<p>maybe there are better ways to persuade them of this than the bugtracker, not sure; I gave up on this for now and just live with this LLVM idiosyncrasy (it's not the only one^^)</p>",
+        "id": 209756917,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1599815556
+    },
+    {
+        "content": "<p>I should have said \"does not\" rather than \"cannot\", yeah.</p>",
+        "id": 209780964,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1599831194
+    }
+]

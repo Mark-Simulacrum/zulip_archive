@@ -1,0 +1,326 @@
+[
+    {
+        "content": "<p>Could we improve the lowering of pattern matches when there are string literal match arms so that they work like a trie lookup? E.g.,</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">(</span><span class=\"n\">text</span>: <span class=\"kp\">&amp;</span><span class=\"kt\">str</span><span class=\"p\">)</span><span class=\"w\"> </span>-&gt; <span class=\"kt\">u8</span> <span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"s\">\"barn\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"s\">\"hammock\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"s\">\"hello\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>currently lowers into a decision tree that looks like this (I used Haskell-like syntax because I think it makes the control-flow easier to read):</p>\n<div class=\"codehilite\" data-code-language=\"Haskell\"><pre><span></span><code><span class=\"kr\">if</span> <span class=\"n\">text</span> <span class=\"o\">==</span> <span class=\"s\">\"barn\"</span>\n  <span class=\"kr\">then</span> <span class=\"mi\">0</span>\n  <span class=\"kr\">else</span>\n    <span class=\"kr\">if</span> <span class=\"n\">text</span> <span class=\"o\">==</span> <span class=\"s\">\"hammock\"</span>\n      <span class=\"kr\">then</span> <span class=\"mi\">1</span>\n      <span class=\"kr\">else</span>\n        <span class=\"kr\">if</span> <span class=\"n\">text</span> <span class=\"o\">==</span> <span class=\"s\">\"hello\"</span>\n          <span class=\"kr\">then</span> <span class=\"mi\">2</span>\n          <span class=\"kr\">else</span> <span class=\"mi\">3</span>\n</code></pre></div>\n<p>If <code>text</code> is <code>\"barn\"</code>, then this code will be fairly fast. However, if <code>text</code> is <code>\"hello\"</code>, it will require several comparisons, and, if the text is not one of the explicitly-handled cases (i.e., it matches only the wildcard), it would take more comparisons, especially as the number of arms increases.</p>\n<p>I'm wondering if using a trie lookup approach would be more efficient. I.e., we switch over the different bytes of the string, and then do further checks to winnow down to the matching arm. We could first switch over the length of the whole string in order to not lose the advantage of doing a quick length check in <code>str</code>'s <code>PartialEq</code> impl.</p>\n<p>There are a few drawbacks I see to using a trie lookup approach:</p>\n<ol>\n<li>Increased complexity in the match lowering code</li>\n<li>Generated code size may increase since there will probably be more branches overall, even if the number of branches that will be executed for a particular value is small</li>\n</ol>",
+        "id": 233590829,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1617847250
+    },
+    {
+        "content": "<p>I'm imagining the generated code for this example would look like this with the new approach:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mi\">4</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"s\">\"barn\"</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mi\">7</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"s\">\"hammock\"</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mi\">5</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"s\">\"hello\"</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>This adds an extra comparison for the <code>\"barn\"</code> case, but all the other arms should have fewer or cheaper comparisons, and LLVM can probably optimize the <code>\"barn\"</code> case so it doesn't check the length in the <code>==</code> since the length is already known from the <code>switchInt</code>.</p>",
+        "id": 233591141,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1617847503
+    },
+    {
+        "content": "<p>If a new branch were added to the match, <code>\"goodbye\" =&gt; 10</code>, then the generated code would look along the lines of this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"p\">.</span><span class=\"n\">len</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mi\">4</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"s\">\"barn\"</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mi\">7</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"p\">.</span><span class=\"n\">as_bytes</span><span class=\"p\">()[</span><span class=\"mi\">0</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"sc\">b'g'</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"p\">.</span><span class=\"n\">as_bytes</span><span class=\"p\">()[</span><span class=\"mi\">1</span><span class=\"o\">..</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"s\">b\"oodbye\"</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">10</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"sc\">b'h'</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"p\">.</span><span class=\"n\">as_bytes</span><span class=\"p\">()[</span><span class=\"mi\">1</span><span class=\"o\">..</span><span class=\"p\">]</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"s\">b\"ammock\"</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"mi\">5</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">text</span><span class=\"w\"> </span><span class=\"o\">==</span><span class=\"w\"> </span><span class=\"s\">\"hello\"</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"> </span><span class=\"k\">else</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 233591452,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1617847711
+    },
+    {
+        "content": "<p>An MVP could be to just add the length switch, without the trie lookup itself.</p>",
+        "id": 233591493,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1617847753
+    },
+    {
+        "content": "<p>note that the compiler guarentees that it checks each match arm in order, which is observable if you have <code>x if f(x) =&gt; ...</code></p>",
+        "id": 233591876,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1617848119
+    },
+    {
+        "content": "<p>In fact, it looks we already use the approach I suggested for <code>&amp;[u8]</code> pattern matches.</p>",
+        "id": 233591880,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1617848122
+    },
+    {
+        "content": "<p>so this optimization is only possible without match guards I think (or at least for match guards using anything other than StructuralPartialEq)</p>",
+        "id": 233591899,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1617848153
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"232545\">Joshua Nelson</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/better.20string.20pattern.20matching/near/233591876\">said</a>:</p>\n<blockquote>\n<p>note that the compiler guarentees that it checks each match arm in order, which is observable if you have <code>x if f(x) =&gt; ...</code></p>\n</blockquote>\n<p>Well, it only guarantees that <em>if the order would matter</em>.</p>",
+        "id": 233591907,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1617848158
+    },
+    {
+        "content": "<p>So matching with string literal patterns (and no guard) would be fine :)</p>",
+        "id": 233591970,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1617848178
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"307537\">Camelid</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/better.20string.20pattern.20matching/near/233591880\">said</a>:</p>\n<blockquote>\n<p>In fact, it looks we already use the approach I suggested for <code>&amp;[u8]</code> pattern matches.</p>\n</blockquote>\n<p>So perhaps we could just lower <code>str</code> pattern matches as if they were <code>&amp;[u8]</code> pattern matches? I don't think there's any semantic difference there.</p>",
+        "id": 233591994,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1617848212
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"307537\">Camelid</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/better.20string.20pattern.20matching/near/233591994\">said</a>:</p>\n<blockquote>\n<p>So perhaps we could just lower <code>str</code> pattern matches as if they were <code>&amp;[u8]</code> pattern matches? I don't think there's any semantic difference there.</p>\n</blockquote>\n<p>Looks like it's currently lowered to <code>str::eq</code> calls (<a href=\"https://rust.godbolt.org/z/hssxT136v\">https://rust.godbolt.org/z/hssxT136v</a>), so lowering to whatever slices do seems like it'd be worth experimenting with.</p>",
+        "id": 233597282,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1617853551
+    },
+    {
+        "content": "<p>It's an interesting idea! Before anyone started implementing it, I would recommend we do some analysis to understand the tradeoffs of this approach. How does the additional code impact compiler throughput? What is the impact on runtime performance? Is there a minimum number of branches required before we see an improvement? Is there a maximum? How does a fall through branch change these characteristics? etc. </p>\n<p>Given how long <code>match</code> has been around in ML, I wonder if there is prior research we can draw on?</p>",
+        "id": 233656996,
+        "sender_full_name": "Wesley Wiser",
+        "timestamp": 1617890477
+    },
+    {
+        "content": "<p>Yeah, I might do some research to see how languages like OCaml, Haskell, etc. handle string pattern matches.</p>",
+        "id": 233744445,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1617923365
+    },
+    {
+        "content": "<p>I started looking into how OCaml handles string pattern matching. I put this code:</p>\n<div class=\"codehilite\" data-code-language=\"OCaml\"><pre><span></span><code><span class=\"k\">let</span> <span class=\"n\">foo</span> <span class=\"o\">(</span><span class=\"n\">text</span> <span class=\"o\">:</span> <span class=\"kt\">string</span><span class=\"o\">)</span> <span class=\"o\">:</span> <span class=\"kt\">int</span> <span class=\"o\">=</span>\n    <span class=\"k\">match</span> <span class=\"n\">text</span> <span class=\"k\">with</span>\n    <span class=\"o\">|</span> <span class=\"s2\">\"barn\"</span> <span class=\"o\">-&gt;</span> <span class=\"mi\">0</span>\n    <span class=\"o\">|</span> <span class=\"s2\">\"hammock\"</span> <span class=\"o\">-&gt;</span> <span class=\"mi\">1</span>\n    <span class=\"o\">|</span> <span class=\"s2\">\"goodbye\"</span> <span class=\"o\">-&gt;</span> <span class=\"mi\">10</span>\n    <span class=\"o\">|</span> <span class=\"s2\">\"hello\"</span> <span class=\"o\">-&gt;</span> <span class=\"mi\">2</span>\n    <span class=\"o\">|</span> <span class=\"o\">_</span> <span class=\"o\">-&gt;</span> <span class=\"mi\">3</span>\n</code></pre></div>\n<p><a href=\"https://godbolt.org/z/8T4G7458Y\">into Godbolt</a> (with <code>-O3</code>) and looked at the generated Assembly. For the most part, it seems to use the equivalent of <code>str::eq()</code> (<code>cmp</code>ing 64-bit ints that represent the bytes of the string), but there's a particular section that seems to have special behavior:</p>\n<div class=\"codehilite\" data-code-language=\"GAS\"><pre><span></span><code>        <span class=\"nf\">movq</span>    <span class=\"mi\">-8</span><span class=\"p\">(</span><span class=\"nv\">%rax</span><span class=\"p\">),</span> <span class=\"nv\">%rbx</span>\n        <span class=\"nf\">shrq</span>    <span class=\"no\">$10</span><span class=\"p\">,</span> <span class=\"nv\">%rbx</span>\n        <span class=\"nf\">cmpq</span>    <span class=\"no\">$2</span><span class=\"p\">,</span> <span class=\"nv\">%rbx</span>\n        <span class=\"nf\">jge</span>     <span class=\"no\">.L100</span>\n</code></pre></div>\n<p>(<code>.L100</code> represents the wildcard case.) I don't know that much about the memory layout of OCaml strings, so I don't understand what's going on. I did find <a href=\"https://dev.realworldocaml.org/runtime-memory-layout.html#scrollNav-6\">this article</a>, but I still feel confused. At the beginning of the function, <code>%rax</code> seems to hold a pointer to the bytes of the string.</p>\n<p>Does anyone understand more what's happening in that section of code? Also, does anyone know how to get the OCaml compiler to dump some kind of higher-level IR that would be easier to examine?</p>\n<p>Thanks!</p>",
+        "id": 234084226,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618183249
+    },
+    {
+        "content": "<p>I think I'll look at Haskell next.</p>",
+        "id": 234084234,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618183257
+    },
+    {
+        "content": "<p>It looks like Haskell string matches work the same way as Rust's. This code (<a href=\"https://godbolt.org/z/TzWe6h7MW\">Godbolt with <code>-O3 -ddump-simpl</code></a>):</p>\n<div class=\"codehilite\" data-code-language=\"Haskell\"><pre><span></span><code><span class=\"nf\">foo</span> <span class=\"ow\">::</span> <span class=\"kt\">String</span> <span class=\"ow\">-&gt;</span> <span class=\"kt\">Int</span>\n<span class=\"nf\">foo</span> <span class=\"n\">text</span> <span class=\"ow\">=</span>\n    <span class=\"kr\">case</span> <span class=\"n\">text</span> <span class=\"kr\">of</span>\n      <span class=\"s\">\"barn\"</span> <span class=\"ow\">-&gt;</span> <span class=\"mi\">0</span>\n      <span class=\"s\">\"hammock\"</span> <span class=\"ow\">-&gt;</span> <span class=\"mi\">1</span>\n      <span class=\"s\">\"goodbye\"</span> <span class=\"ow\">-&gt;</span> <span class=\"mi\">10</span>\n      <span class=\"s\">\"hello\"</span> <span class=\"ow\">-&gt;</span> <span class=\"mi\">2</span>\n      <span class=\"kr\">_</span> <span class=\"ow\">-&gt;</span> <span class=\"mi\">3</span>\n</code></pre></div>\n<p>gets turned into this Core code (GHC's main IR):</p>\n<div class=\"codehilite\" data-code-language=\"Haskell\"><pre><span></span><code><span class=\"kt\">Example</span><span class=\"o\">.$</span><span class=\"n\">wfoo</span>\n  <span class=\"ow\">=</span> <span class=\"nf\">\\</span> <span class=\"p\">(</span><span class=\"n\">w_s11r</span> <span class=\"ow\">::</span> <span class=\"kt\">String</span><span class=\"p\">)</span> <span class=\"ow\">-&gt;</span>\n      <span class=\"n\">src</span><span class=\"o\">&lt;&lt;</span><span class=\"n\">source</span><span class=\"o\">&gt;:</span><span class=\"p\">(</span><span class=\"mi\">4</span><span class=\"p\">,</span><span class=\"mi\">1</span><span class=\"p\">)</span><span class=\"o\">-</span><span class=\"p\">(</span><span class=\"mi\">10</span><span class=\"p\">,</span><span class=\"mi\">12</span><span class=\"p\">)</span><span class=\"o\">&gt;</span>\n      <span class=\"kr\">case</span> <span class=\"kt\">GHC</span><span class=\"o\">.</span><span class=\"kt\">Base</span><span class=\"o\">.</span><span class=\"n\">eqString</span> <span class=\"n\">w_s11r</span> <span class=\"kt\">Example</span><span class=\"o\">.</span><span class=\"n\">foo7</span> <span class=\"kr\">of</span> <span class=\"p\">{</span>\n        <span class=\"kt\">False</span> <span class=\"ow\">-&gt;</span>\n          <span class=\"n\">src</span><span class=\"o\">&lt;&lt;</span><span class=\"n\">source</span><span class=\"o\">&gt;:</span><span class=\"mi\">5</span><span class=\"kt\">:</span><span class=\"mi\">10</span><span class=\"o\">-</span><span class=\"mi\">13</span><span class=\"o\">&gt;</span>\n          <span class=\"kr\">case</span> <span class=\"kt\">GHC</span><span class=\"o\">.</span><span class=\"kt\">Base</span><span class=\"o\">.</span><span class=\"n\">eqString</span> <span class=\"n\">w_s11r</span> <span class=\"kt\">Example</span><span class=\"o\">.</span><span class=\"n\">foo5</span> <span class=\"kr\">of</span> <span class=\"p\">{</span>\n            <span class=\"kt\">False</span> <span class=\"ow\">-&gt;</span>\n              <span class=\"n\">src</span><span class=\"o\">&lt;&lt;</span><span class=\"n\">source</span><span class=\"o\">&gt;:</span><span class=\"mi\">5</span><span class=\"kt\">:</span><span class=\"mi\">10</span><span class=\"o\">-</span><span class=\"mi\">13</span><span class=\"o\">&gt;</span>\n              <span class=\"kr\">case</span> <span class=\"kt\">GHC</span><span class=\"o\">.</span><span class=\"kt\">Base</span><span class=\"o\">.</span><span class=\"n\">eqString</span> <span class=\"n\">w_s11r</span> <span class=\"kt\">Example</span><span class=\"o\">.</span><span class=\"n\">foo3</span> <span class=\"kr\">of</span> <span class=\"p\">{</span>\n                <span class=\"kt\">False</span> <span class=\"ow\">-&gt;</span>\n                  <span class=\"n\">src</span><span class=\"o\">&lt;&lt;</span><span class=\"n\">source</span><span class=\"o\">&gt;:</span><span class=\"mi\">5</span><span class=\"kt\">:</span><span class=\"mi\">10</span><span class=\"o\">-</span><span class=\"mi\">13</span><span class=\"o\">&gt;</span>\n                  <span class=\"kr\">case</span> <span class=\"kt\">GHC</span><span class=\"o\">.</span><span class=\"kt\">Base</span><span class=\"o\">.</span><span class=\"n\">eqString</span> <span class=\"n\">w_s11r</span> <span class=\"kt\">Example</span><span class=\"o\">.</span><span class=\"n\">foo1</span> <span class=\"kr\">of</span> <span class=\"p\">{</span>\n                    <span class=\"kt\">False</span> <span class=\"ow\">-&gt;</span> <span class=\"n\">src</span><span class=\"o\">&lt;&lt;</span><span class=\"n\">source</span><span class=\"o\">&gt;:</span><span class=\"mi\">10</span><span class=\"kt\">:</span><span class=\"mi\">12</span><span class=\"o\">&gt;</span> <span class=\"mi\">3</span><span class=\"o\">#</span><span class=\"p\">;</span>\n                    <span class=\"kt\">True</span> <span class=\"ow\">-&gt;</span> <span class=\"n\">src</span><span class=\"o\">&lt;&lt;</span><span class=\"n\">source</span><span class=\"o\">&gt;:</span><span class=\"mi\">9</span><span class=\"kt\">:</span><span class=\"mi\">18</span><span class=\"o\">&gt;</span> <span class=\"mi\">2</span><span class=\"o\">#</span>\n                  <span class=\"p\">};</span>\n                <span class=\"kt\">True</span> <span class=\"ow\">-&gt;</span> <span class=\"n\">src</span><span class=\"o\">&lt;&lt;</span><span class=\"n\">source</span><span class=\"o\">&gt;:</span><span class=\"mi\">7</span><span class=\"kt\">:</span><span class=\"mi\">20</span><span class=\"o\">&gt;</span> <span class=\"mi\">1</span><span class=\"o\">#</span>\n              <span class=\"p\">};</span>\n            <span class=\"kt\">True</span> <span class=\"ow\">-&gt;</span> <span class=\"n\">src</span><span class=\"o\">&lt;&lt;</span><span class=\"n\">source</span><span class=\"o\">&gt;:</span><span class=\"mi\">8</span><span class=\"kt\">:</span><span class=\"mi\">20</span><span class=\"o\">-</span><span class=\"mi\">21</span><span class=\"o\">&gt;</span> <span class=\"mi\">10</span><span class=\"o\">#</span>\n          <span class=\"p\">};</span>\n        <span class=\"kt\">True</span> <span class=\"ow\">-&gt;</span> <span class=\"n\">src</span><span class=\"o\">&lt;&lt;</span><span class=\"n\">source</span><span class=\"o\">&gt;:</span><span class=\"mi\">6</span><span class=\"kt\">:</span><span class=\"mi\">17</span><span class=\"o\">&gt;</span> <span class=\"mi\">0</span><span class=\"o\">#</span>\n      <span class=\"p\">}</span>\n</code></pre></div>\n<p>and I see several calls to <code>base_GHC.Base_eqString_info</code> in the Assembly output.</p>",
+        "id": 234087305,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618186458
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"307537\">Camelid</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/better.20string.20pattern.20matching/near/233591493\">said</a>:</p>\n<blockquote>\n<p>An MVP could be to just add the length switch, without the trie lookup itself.</p>\n</blockquote>\n<p>Actually, it looks like LLVM is smart enough that it does that automatically:</p>\n<div class=\"codehilite\" data-code-language=\"LLVM\"><pre><span></span><code><span class=\"nl\">start:</span>\n  <span class=\"k\">switch</span> <span class=\"kt\">i64</span> <span class=\"nv\">%text.1</span><span class=\"p\">,</span> <span class=\"kt\">label</span> <span class=\"nv\">%\"_ZN4core3str6traits54_$LT$impl$u20$core..cmp..PartialEq$u20$for$u20$str$GT$2eq17hcc75364276331233E.exit15.thread\"</span> <span class=\"p\">[</span>\n    <span class=\"kt\">i64</span> <span class=\"m\">4</span><span class=\"p\">,</span> <span class=\"kt\">label</span> <span class=\"nv\">%\"_ZN4core3str6traits54_$LT$impl$u20$core..cmp..PartialEq$u20$for$u20$str$GT$2eq17hcc75364276331233E.exit\"</span>\n    <span class=\"kt\">i64</span> <span class=\"m\">7</span><span class=\"p\">,</span> <span class=\"kt\">label</span> <span class=\"nv\">%\"_ZN4core3str6traits54_$LT$impl$u20$core..cmp..PartialEq$u20$for$u20$str$GT$2eq17hcc75364276331233E.exit5\"</span>\n    <span class=\"kt\">i64</span> <span class=\"m\">5</span><span class=\"p\">,</span> <span class=\"kt\">label</span> <span class=\"nv\">%\"_ZN4core3str6traits54_$LT$impl$u20$core..cmp..PartialEq$u20$for$u20$str$GT$2eq17hcc75364276331233E.exit15\"</span>\n  <span class=\"p\">]</span>\n</code></pre></div>",
+        "id": 234088637,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618187912
+    },
+    {
+        "content": "<p>There may be cases where it can't do that, but when in doubt it's probably safe to assume that LLVM will be smart :)</p>",
+        "id": 234088657,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618187959
+    },
+    {
+        "content": "<p>So I think I'll focus on trying to lower string pattern matches as slice pattern matches.</p>",
+        "id": 234088734,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618188026
+    },
+    {
+        "content": "<p>By the way, the summary of my brief look at OCaml and Haskell is that they lower string pattern matches in a similar way to Rust.</p>",
+        "id": 234088757,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618188066
+    },
+    {
+        "content": "<p>I just noticed <a href=\"https://github.com/rust-lang/rust/blob/master/compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs#L395-L397\">this comment</a>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">                </span><span class=\"c1\">// `&amp;str` is represented as `ConstValue::Slice`, let's keep using this</span>\n<span class=\"w\">                </span><span class=\"c1\">// optimization for now.</span>\n<span class=\"w\">                </span><span class=\"n\">ty</span>::<span class=\"n\">Str</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"n\">PatKind</span>::<span class=\"n\">Constant</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">value</span>: <span class=\"nc\">cv</span><span class=\"w\"> </span><span class=\"p\">},</span><span class=\"w\"></span>\n</code></pre></div>\n<p>(It was added by <span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> in <a href=\"https://github.com/rust-lang/rust/commit/b2532a87306fafd097241a80f92f68b10df0cba4\">b2532a87306fafd097241a80f92f68b10df0cba4</a>.) It doesn't seem like that comment is correct?</p>",
+        "id": 234089563,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189011
+    },
+    {
+        "content": "<p>Also, the docs for <code>Constructor::Str</code> say</p>\n<blockquote>\n<p>Strings are not quite the same as <code>&amp;[u8]</code> so we treat them separately.</p>\n</blockquote>\n<p>What's different about them?</p>",
+        "id": 234089675,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189187
+    },
+    {
+        "content": "<p>(Although I think that might only be used for exhaustiveness checking.)</p>",
+        "id": 234089790,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189257
+    },
+    {
+        "content": "<p>I once upon a time manually generated trie matching code. It explodes the compile times exponentially. There are also cases where PHF table would produce better runtime performance. Finally i don't think guards are necessarily a blocker for these kinds of optimisations. E.g. the generated code can figure out which branch is the only one that could be possibly taken (without the fallback) and run all the guards in turn within it's body.</p>",
+        "id": 234090015,
+        "sender_full_name": "nagisa",
+        "timestamp": 1618189479
+    },
+    {
+        "content": "<blockquote>\n<p>I once upon a time manually generated true matching code. It explodes the compile times exponentially.</p>\n</blockquote>\n<p>Hmm, what do you mean by \"true matching code\"?</p>",
+        "id": 234090139,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189610
+    },
+    {
+        "content": "<p>(trie is good when branches share common prefixes, PHF is good when the string being matched is short, sequential match/jump table are pretty good if all stringa being matched have different lengths.)</p>",
+        "id": 234090142,
+        "sender_full_name": "nagisa",
+        "timestamp": 1618189618
+    },
+    {
+        "content": "<p>Like a trie lookup?</p>",
+        "id": 234090145,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189620
+    },
+    {
+        "content": "<p>I meant trie. Phone keyboards.</p>",
+        "id": 234090163,
+        "sender_full_name": "nagisa",
+        "timestamp": 1618189631
+    },
+    {
+        "content": "<p>What is best for few branches, like 1 or 2 strings?</p>",
+        "id": 234090233,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618189707
+    },
+    {
+        "content": "<p>I would guess just an if-else chain.</p>",
+        "id": 234090269,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189724
+    },
+    {
+        "content": "<p>My guess is that sequential if-else would be best for most cases</p>",
+        "id": 234090273,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618189733
+    },
+    {
+        "content": "<p>the fancy techniques beyond length -&gt; sequential strcmp sound unlikely to matter below 5 or 6 strings</p>",
+        "id": 234090307,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618189780
+    },
+    {
+        "content": "<p>I think programs such as rustdoc would benefit from fancier string matching; e.g., <a href=\"https://github.com/rust-lang/rust/blob/3f8added7003120582953d4f3f43991fb3bb2798/src/librustdoc/clean/cfg.rs#L469-L521\">this code</a>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">                    </span><span class=\"p\">(</span><span class=\"n\">sym</span>::<span class=\"n\">target_os</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">os</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"o\">&amp;*</span><span class=\"n\">os</span><span class=\"p\">.</span><span class=\"n\">as_str</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"android\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Android\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"dragonfly\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"DragonFly BSD\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"emscripten\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Emscripten\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"freebsd\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"FreeBSD\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"fuchsia\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Fuchsia\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"haiku\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Haiku\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"hermit\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"HermitCore\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"illumos\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"illumos\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"ios\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"iOS\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"l4re\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"L4Re\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"linux\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Linux\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"macos\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"macOS\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"netbsd\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"NetBSD\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"openbsd\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"OpenBSD\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"redox\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Redox\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"solaris\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Solaris\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"wasi\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"WASI\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"windows\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Windows\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">(</span><span class=\"n\">sym</span>::<span class=\"n\">target_arch</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">arch</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"o\">&amp;*</span><span class=\"n\">arch</span><span class=\"p\">.</span><span class=\"n\">as_str</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"aarch64\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"AArch64\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"arm\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"ARM\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"asmjs\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"JavaScript\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"mips\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"MIPS\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"mips64\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"MIPS-64\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"msp430\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"MSP430\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"powerpc\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"PowerPC\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"powerpc64\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"PowerPC-64\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"s390x\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"s390x\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"sparc64\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"SPARC64\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"wasm32\"</span><span class=\"w\"> </span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"s\">\"wasm64\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"WebAssembly\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"x86\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"x86\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"x86_64\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"x86-64\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">(</span><span class=\"n\">sym</span>::<span class=\"n\">target_vendor</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">vendor</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"o\">&amp;*</span><span class=\"n\">vendor</span><span class=\"p\">.</span><span class=\"n\">as_str</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"apple\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Apple\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"pc\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"PC\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"sun\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Sun\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"fortanix\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Fortanix\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">(</span><span class=\"n\">sym</span>::<span class=\"n\">target_env</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">(</span><span class=\"n\">env</span><span class=\"p\">))</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"k\">match</span><span class=\"w\"> </span><span class=\"o\">&amp;*</span><span class=\"n\">env</span><span class=\"p\">.</span><span class=\"n\">as_str</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"gnu\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"GNU\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"msvc\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"MSVC\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"musl\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"musl\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"newlib\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"Newlib\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"uclibc\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"uClibc\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"s\">\"sgx\"</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"SGX\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">_</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"s\">\"\"</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">},</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 234090408,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189866
+    },
+    {
+        "content": "<p>On second thought, why don't we use symbols there?</p>",
+        "id": 234090426,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189890
+    },
+    {
+        "content": "<p>That's weird...</p>",
+        "id": 234090427,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189894
+    },
+    {
+        "content": "<p>But there are other cases, like intra-doc link disambiguator parsing where there are more than a few branches.</p>",
+        "id": 234090440,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618189913
+    },
+    {
+        "content": "<p>It could depend on strings used as the patterns and the string that's being matched. But yeah ultimately for a successful match the entire matched string needs to be inspected somehow</p>",
+        "id": 234090441,
+        "sender_full_name": "nagisa",
+        "timestamp": 1618189914
+    },
+    {
+        "content": "<p>And strcmp is the most straightforward way to do such an inspection.</p>",
+        "id": 234090508,
+        "sender_full_name": "nagisa",
+        "timestamp": 1618189955
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"307537\">Camelid</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/better.20string.20pattern.20matching/near/234090426\">said</a>:</p>\n<blockquote>\n<p>On second thought, why don't we use symbols there?</p>\n</blockquote>\n<p>Going to see if I can fix that now!</p>",
+        "id": 234090674,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618190129
+    },
+    {
+        "content": "<p>Because json target definitions can set these to arbitrary strings.</p>",
+        "id": 234090999,
+        "sender_full_name": "nagisa",
+        "timestamp": 1618190473
+    },
+    {
+        "content": "<p>Oh well :)</p>",
+        "id": 234091190,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618190701
+    },
+    {
+        "content": "<p>Aren't symbols in the compiler arbitrary (interned) strings?</p>",
+        "id": 234091379,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618190935
+    },
+    {
+        "content": "<p>Also, it could still be an enum with a bunch of common OSs and then a <code>Custom(String)</code> variant for everything else</p>",
+        "id": 234091452,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1618191010
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/better.20string.20pattern.20matching/near/234091452\">said</a>:</p>\n<blockquote>\n<p>Also, it could still be an enum with a bunch of common OSs and then a <code>Custom(String)</code> variant for everything else</p>\n</blockquote>\n<p>True, though this code is probably not that hot, so it may not be worth optimizing.</p>",
+        "id": 234091596,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618191176
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"307537\">Camelid</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/better.20string.20pattern.20matching/near/234089563\">said</a>:</p>\n<blockquote>\n<p>I just noticed <a href=\"https://github.com/rust-lang/rust/blob/master/compiler/rustc_mir_build/src/thir/pattern/const_to_pat.rs#L395-L397\">this comment</a>:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">                </span><span class=\"c1\">// `&amp;str` is represented as `ConstValue::Slice`, let's keep using this</span>\n<span class=\"w\">                </span><span class=\"c1\">// optimization for now.</span>\n<span class=\"w\">                </span><span class=\"n\">ty</span>::<span class=\"n\">Str</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"n\">PatKind</span>::<span class=\"n\">Constant</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">value</span>: <span class=\"nc\">cv</span><span class=\"w\"> </span><span class=\"p\">},</span><span class=\"w\"></span>\n</code></pre></div>\n<p>(It was added by <span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> in <a href=\"https://github.com/rust-lang/rust/commit/b2532a87306fafd097241a80f92f68b10df0cba4\">b2532a87306fafd097241a80f92f68b10df0cba4</a>.) It doesn't seem like that comment is correct?</p>\n</blockquote>\n<p>Ah, I think it means that the <code>value</code> is a <code>ConstValue::Slice</code>. Though I still don't quite understand what it's trying to say :/</p>",
+        "id": 234091965,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618191559
+    },
+    {
+        "content": "<p>How can I transmute from <code>&amp;str</code> to <code>&amp;[u8]</code> in MIR? Do I use <code>Value::Cast</code>?</p>",
+        "id": 234092851,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618192444
+    },
+    {
+        "content": "<p>Actually the code I'm working on can't add statements.</p>",
+        "id": 234092866,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618192462
+    },
+    {
+        "content": "<p>Basically, I want to get the raw bytes of a str const so I can make a slice pattern out of them.</p>",
+        "id": 234092878,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618192498
+    },
+    {
+        "content": "<p>Unfortunately, the borrow-checker is panicking with my hacky \"solution\":</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">                </span><span class=\"n\">ty</span>::<span class=\"n\">Str</span><span class=\"w\"> </span><span class=\"o\">=&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">old</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">behind_reference</span><span class=\"p\">.</span><span class=\"n\">replace</span><span class=\"p\">(</span><span class=\"kc\">true</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"c1\">// FIXME: this is a total hack</span>\n<span class=\"w\">                    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">cv</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">tcx</span><span class=\"p\">.</span><span class=\"n\">mk_const</span><span class=\"p\">(</span><span class=\"n\">ty</span>::<span class=\"n\">Const</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">ty</span>: <span class=\"nc\">tcx</span><span class=\"p\">.</span><span class=\"n\">mk_ty</span><span class=\"p\">(</span><span class=\"n\">ty</span>::<span class=\"n\">Ref</span><span class=\"p\">(</span><span class=\"n\">ref_region</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">tcx</span><span class=\"p\">.</span><span class=\"n\">mk_slice</span><span class=\"p\">(</span><span class=\"n\">tcx</span><span class=\"p\">.</span><span class=\"n\">types</span><span class=\"p\">.</span><span class=\"kt\">u8</span><span class=\"p\">),</span><span class=\"o\">*</span><span class=\"n\">ref_mutbl</span><span class=\"p\">)),</span><span class=\"w\"> </span><span class=\"n\">val</span>: <span class=\"nc\">cv</span><span class=\"p\">.</span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"p\">});</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">array</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">tcx</span><span class=\"p\">.</span><span class=\"n\">deref_const</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">param_env</span><span class=\"p\">.</span><span class=\"n\">and</span><span class=\"p\">(</span><span class=\"n\">cv</span><span class=\"p\">));</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">val</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">PatKind</span>::<span class=\"n\">Deref</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"n\">subpattern</span>: <span class=\"nc\">Pat</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                            </span><span class=\"n\">kind</span>: <span class=\"nb\">Box</span>::<span class=\"n\">new</span><span class=\"p\">(</span><span class=\"n\">PatKind</span>::<span class=\"n\">Slice</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">                                </span><span class=\"n\">prefix</span>: <span class=\"nc\">tcx</span><span class=\"w\"></span>\n<span class=\"w\">                                    </span><span class=\"p\">.</span><span class=\"n\">destructure_const</span><span class=\"p\">(</span><span class=\"n\">param_env</span><span class=\"p\">.</span><span class=\"n\">and</span><span class=\"p\">(</span><span class=\"n\">array</span><span class=\"p\">))</span><span class=\"w\"></span>\n<span class=\"w\">                                    </span><span class=\"p\">.</span><span class=\"n\">fields</span><span class=\"w\"></span>\n<span class=\"w\">                                    </span><span class=\"p\">.</span><span class=\"n\">iter</span><span class=\"p\">()</span><span class=\"w\"></span>\n<span class=\"w\">                                    </span><span class=\"p\">.</span><span class=\"n\">map</span><span class=\"p\">(</span><span class=\"o\">|</span><span class=\"n\">val</span><span class=\"o\">|</span><span class=\"w\"> </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">recur</span><span class=\"p\">(</span><span class=\"n\">val</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kc\">false</span><span class=\"p\">))</span><span class=\"w\"></span>\n<span class=\"w\">                                    </span><span class=\"p\">.</span><span class=\"n\">collect</span>::<span class=\"o\">&lt;</span><span class=\"nb\">Result</span><span class=\"o\">&lt;</span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"o\">&gt;&gt;</span><span class=\"p\">()</span><span class=\"o\">?</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                                </span><span class=\"n\">slice</span>: <span class=\"nb\">None</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                                </span><span class=\"n\">suffix</span>: <span class=\"nc\">vec</span><span class=\"o\">!</span><span class=\"p\">[],</span><span class=\"w\"></span>\n<span class=\"w\">                            </span><span class=\"p\">}),</span><span class=\"w\"></span>\n<span class=\"w\">                            </span><span class=\"n\">span</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">                            </span><span class=\"n\">ty</span>: <span class=\"nc\">tcx</span><span class=\"p\">.</span><span class=\"n\">mk_slice</span><span class=\"p\">(</span><span class=\"n\">tcx</span><span class=\"p\">.</span><span class=\"n\">types</span><span class=\"p\">.</span><span class=\"kt\">u8</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">                        </span><span class=\"p\">},</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">behind_reference</span><span class=\"p\">.</span><span class=\"n\">set</span><span class=\"p\">(</span><span class=\"n\">old</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">                    </span><span class=\"n\">val</span><span class=\"w\"></span>\n<span class=\"w\">                </span><span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<div class=\"codehilite\"><pre><span></span><code>error: internal compiler error: broken MIR in DefId(0:11221 ~ core[dab8]::str::traits::{impl#12}::from_str) ((*_1)[0 of 4]): index of non-array str\n   --&gt; library/core/src/str/traits.rs:586:13\n    |\n586 |             &quot;true&quot; =&gt; Ok(true),\n    |             ^^^^^^\n    |\n    = note: delayed at compiler/rustc_mir/src/borrow_check/type_check/mod.rs:252:27\n\nerror: internal compiler error: TyKind::Error constructed but no error reported\n  |\n  = note: delayed at compiler/rustc_mir/src/borrow_check/type_check/mod.rs:721:20\n</code></pre></div>",
+        "id": 234094888,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1618194582
+    },
+    {
+        "content": "<p>Personally I don't think any part of the rustdoc frontend is worth worrying about other than get_blanket_impls</p>",
+        "id": 234096225,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1618195992
+    },
+    {
+        "content": "<p>Changing the backend to do less allocations could be useful though</p>",
+        "id": 234096233,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1618196008
+    },
+    {
+        "content": "<p>ok but <span class=\"user-mention\" data-user-id=\"125294\">@Aaron Hill</span> I mean that unironically <span aria-label=\"joy\" class=\"emoji emoji-1f602\" role=\"img\" title=\"joy\">:joy:</span> <a href=\"#narrow/stream/266220-rustdoc/topic/calculate.20the.20doc.20coverage.20without.20generating.20HTMLs/near/234120144\">https://rust-lang.zulipchat.com/#narrow/stream/266220-rustdoc/topic/calculate.20the.20doc.20coverage.20without.20generating.20HTMLs/near/234120144</a></p>",
+        "id": 234244911,
+        "sender_full_name": "Joshua Nelson",
+        "timestamp": 1618269637
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"307537\">Camelid</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/better.20string.20pattern.20matching/near/234084226\">said</a>:</p>\n<blockquote>\n<div class=\"codehilite\" data-code-language=\"GAS\"><pre><span></span><code>        <span class=\"nf\">movq</span>    <span class=\"mi\">-8</span><span class=\"p\">(</span><span class=\"nv\">%rax</span><span class=\"p\">),</span> <span class=\"nv\">%rbx</span>\n        <span class=\"nf\">shrq</span>    <span class=\"no\">$10</span><span class=\"p\">,</span> <span class=\"nv\">%rbx</span>\n        <span class=\"nf\">cmpq</span>    <span class=\"no\">$2</span><span class=\"p\">,</span> <span class=\"nv\">%rbx</span>\n        <span class=\"nf\">jge</span>     <span class=\"no\">.L100</span>\n</code></pre></div>\n<p>Does anyone understand more what's happening in that section of code? Also, does anyone know how to get the OCaml compiler to dump some kind of higher-level IR that would be easier to examine?</p>\n</blockquote>\n<p>It's just checking if the length of the string is greater than 2 machine words (ie. 8 bytes, since this is 64-bit). Each OCaml object has a header before the actual data (which the <code>-8(%rax)</code> loads), and the length of the object starts at the 10th bit in the header, so that's why it shifts the extra bits off. (the shift could actually be optimized away by doing a <code>cmp</code> directly against  2 * 2^10)</p>",
+        "id": 236639490,
+        "sender_full_name": "Jaen",
+        "timestamp": 1619686073
+    },
+    {
+        "content": "<p>Ah, thanks!</p>",
+        "id": 236741057,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1619728603
+    }
+]

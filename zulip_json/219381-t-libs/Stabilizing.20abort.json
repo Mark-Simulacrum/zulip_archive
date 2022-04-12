@@ -1,0 +1,716 @@
+[
+    {
+        "content": "<p>What's the current blockers for stabilizing <code>core::intrinsics::abort</code> under a stable safe function?</p>\n<p>(I seem to remember <span class=\"user-mention\" data-user-id=\"239881\">@Josh Triplett</span>  saying something about LLVM not having trap instructions for all the backend, but maybe I'm misremembering)</p>",
+        "id": 267078814,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1641485514
+    },
+    {
+        "content": "<p>Assuming that intrinsic works on all our targets, I don't see any reason we couldn't stabilize it.</p>",
+        "id": 267105027,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1641498319
+    },
+    {
+        "content": "<p>I think we want to confirm that the stabilized version inlines down to a single trap instruction; we should make sure it doesn't become a function call instead.</p>",
+        "id": 267105186,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1641498398
+    },
+    {
+        "content": "<p>why is a trap instruction a requirement? I could see this possibly being a compiler-builtin call on some targets, just like libm lowering and such.</p>",
+        "id": 267106927,
+        "sender_full_name": "cuviper",
+        "timestamp": 1641499313
+    },
+    {
+        "content": "<p>it's currently a call to <code>@llvm.trap</code>:<br>\n<a href=\"https://llvm.org/docs/LangRef.html#llvm-trap-intrinsic\">https://llvm.org/docs/LangRef.html#llvm-trap-intrinsic</a></p>\n<blockquote>\n<p>This intrinsic is lowered to the target dependent trap instruction. If the target does not have a trap instruction, this intrinsic will be lowered to a call of the <code>abort()</code> function.</p>\n</blockquote>",
+        "id": 267108048,
+        "sender_full_name": "cuviper",
+        "timestamp": 1641499866
+    },
+    {
+        "content": "<p>cg_gcc unconditionally calls <code>abort()</code></p>",
+        "id": 267108432,
+        "sender_full_name": "cuviper",
+        "timestamp": 1641500093
+    },
+    {
+        "content": "<p>abort() isn't available on targets without libc.</p>",
+        "id": 267110888,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1641501392
+    },
+    {
+        "content": "<p>it doesn't <em>have</em> to be from <code>libc</code> -- same situation as stuff like <code>memcpy</code>, no?</p>",
+        "id": 267111613,
+        "sender_full_name": "cuviper",
+        "timestamp": 1641501752
+    },
+    {
+        "content": "<p>memcpy is provided by compiler-builtins and can be implemented without os support. abort has to have os support on architectures without trap instruction.</p>",
+        "id": 267117427,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1641504596
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"133247\">bjorn3</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/267117427\">said</a>:</p>\n<blockquote>\n<p>memcpy is provided by compiler-builtins and can be implemented without os support. abort has to have os support on architectures without trap instruction.</p>\n</blockquote>\n<p>Or architecture support via SIGILLs</p>",
+        "id": 267118101,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1641504997
+    },
+    {
+        "content": "<p>I mean, technically any kind of illegal opcode handler needs <em>some</em> form of OS support...</p>",
+        "id": 267118114,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1641505009
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"138448\">cuviper</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/267106927\">said</a>:</p>\n<blockquote>\n<p>why is a trap instruction a requirement? I could see this possibly being a compiler-builtin call on some targets, just like libm lowering and such.</p>\n</blockquote>\n<p>I don't think a trap instruction is a requirement; rather, if the target <em>does</em> have a trap instruction, I'd want to avoid the case where <code>core::something::abort</code> compiles to a non-inline call to a function that <em>contains</em> a trap instruction, rather than an inline trap instruction.</p>",
+        "id": 267119050,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1641505599
+    },
+    {
+        "content": "<p>Why does it matter whether it's inline?</p>",
+        "id": 267119261,
+        "sender_full_name": "cuviper",
+        "timestamp": 1641505697
+    },
+    {
+        "content": "<p>A single inline instruction is much smaller than an out-of-line function call, and some programs want to be able to sprinkle aborts <em>everywhere</em>. As an example, the Linux kernel can compile <code>BUG</code> invocations to a single trap instruction, and there are enough of those that the size matters for size optimization.</p>",
+        "id": 267120736,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1641506415
+    },
+    {
+        "content": "<p>Also, it's a little easier to debug if the trap instruction is inline.</p>",
+        "id": 267120799,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1641506435
+    },
+    {
+        "content": "<p>(For instance, sometimes you might want to stick a trap instruction somewhere and nop it out at runtime in a debugger.)</p>",
+        "id": 267120843,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1641506458
+    },
+    {
+        "content": "<p>If this intrinsic compiles to anything <em>more</em> than a trap instruction, then users who want it to become a single trap instruction will instead find it necessary to use (say) <code>asm!(\"int 3\");</code> rather than the intrinsic, and thus invent their own such <code>#[inline(always)]</code> function with a pile of <code>cfg</code>.</p>",
+        "id": 267120943,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1641506499
+    },
+    {
+        "content": "<p>Single trap instruction does not necessarily mean minimally-represented such instruction, though. To play devil's advocate, the <code>int 3</code> could become <code>cd03</code>, and now we'd still have people hard-coding <code>asm!(\".byte 0xcc\")</code> to guarantee the one-byte instruction <span aria-label=\"big smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"big smile\">:big_smile:</span> </p>\n<p>So I guess the requirement could become something along the lines of: the implementation should strive for \"minimal bytecode\" on each platform.</p>",
+        "id": 267121980,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1641507109
+    },
+    {
+        "content": "<p>Fair, though I would expect any decent assembler to generate the shortest representation of any given instruction unless it had a good reason to do otherwise.</p>",
+        "id": 267122895,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1641507479
+    },
+    {
+        "content": "<p>How would you handle this on a freestanding target such as w65, which has no defined interrupts resulting from code execution (other than <code>brk</code>, which may be used otherwise by the software and cannot be freely used in the general case, or <code>cop</code>, which is mostly for co-processor calls), absent external tools. <br>\nThe only other option (other than implementing it as <code>s/abort/unreachable/</code>) would be <code>STP</code> to halt execution entirely (although I believe that some instruction sets may not even have something like this), which cannot be handled at all.</p>",
+        "id": 267123205,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1641507638
+    },
+    {
+        "content": "<p>Obviously, you could require an <code>abort</code> function be providedm but then the same burden is shifted there, and the choice made there may be similarily undesirable.</p>",
+        "id": 267123546,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1641507861
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"239881\">Josh Triplett</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/267120843\">said</a>:</p>\n<blockquote>\n<p>(For instance, sometimes you might want to stick a trap instruction somewhere and nop it out at runtime in a debugger.)</p>\n</blockquote>\n<p>that sometimes won't work, because optimizations will remove all instructions after the trap because the compiler sees they are unreachable. replacing the trap with a nop would lead to the program doing something completely different than was in the original source following <code>abort</code></p>",
+        "id": 267123555,
+        "sender_full_name": "Jacob Lifshay",
+        "timestamp": 1641507869
+    },
+    {
+        "content": "<p><code>core::intrinsics::abort()</code> is the most common case that I use <code>#![feature(core_intrinsics)]</code>, it would be good to stabilize.</p>\n<blockquote>\n<p>The only other option (other than implementing it as s/abort/unreachable/) would be STP</p>\n</blockquote>\n<p>What's the issue here? To me it seems reasonable to me for a baremetal target to implement aborting in a way that cannot be handled (including halting the processor, or even turning off the machine if that's literally the only option).</p>\n<p>That is: IMO it would be wrong for it to go the other way, and try to guarantee that the operation <em>can</em> be handled by somewhere, although generally it will probably invoke some interrupt in practice, where the OS (or whatever is acting like it) would handle it somehow.</p>\n<blockquote>\n<p>although I believe that some instruction sets may not even have something like this</p>\n</blockquote>\n<p>Keep in mind that the language already requires aborts happen somehow (double panics, for example) — someone porting rust to <code>#[cfg(target_arch = \"the-cpu-which-cannot-be-stopped\")]</code> will already have to deal with this in some manner.</p>\n<p>That is, unless I'm mistaken, you can already force an abort on such targets — <code>intrinsics::abort</code> allows code would allow code that doesn't want to use the double panic trick for whatever reason (example: signal handlers, code that has detected memory corruption (sounds bad to risk calling the panic handler), ...) to abort directly.</p>\n<p>As a very last resort, I guess it would be reasonable for this be an infinite loop on a target that has literally no other options. At least as long as that target is single threaded (I imagine any target with threads has to have some option here).</p>",
+        "id": 267126431,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1641509641
+    },
+    {
+        "content": "<p>FWIW all the current targets seemed to implement this somehow last time I checked (often something very clever, like jumping to a misaligned instruction)</p>",
+        "id": 267126710,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1641509842
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"209168\">Thom Chiovoloni</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/267126431\">said</a>:</p>\n<blockquote>\n<p>Keep in mind that the language already requires aborts happen somehow (double panics, for example) — someone porting rust to <code>#[cfg(target_arch = \"the-cpu-which-cannot-be-stopped\")]</code> will already have to deal with this in some manner.</p>\n</blockquote>\n<p>Double panics, unwind into <code>extern \"C\"</code>, and other aborts related to panic depend on the provided panic hook actually unwinding. IIRC, only <code>panic=\"immediate-abort\"</code> actually forces an abort without consulting the panic hook.</p>",
+        "id": 267128329,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1641510834
+    },
+    {
+        "content": "<p>Panic hooks only exist with std. Do you mean panic handlers?</p>",
+        "id": 267268892,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1641608644
+    },
+    {
+        "content": "<p><code>abort</code> is being used when <code>Arc</code>/<code>Rc</code> ref count overflow, so all targets supporting liballoc needs to support aborting. (And I don't think we have any targets <em>not</em> supporting liballoc)</p>",
+        "id": 267269176,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1641609120
+    },
+    {
+        "content": "<p>There certainly exist no_std targets that can't abort to anywhere but that can allocate via a global allocator.</p>",
+        "id": 267280341,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1641624554
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224471\">Lokathor</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/267280341\">said</a>:</p>\n<blockquote>\n<p>There certainly exist no_std targets that can't abort to anywhere but that can allocate via a global allocator.</p>\n</blockquote>\n<p>Any existing ones? if so how does the Arc/Rc work there? (<a href=\"https://doc.rust-lang.org/src/alloc/rc.rs.html#2450\">https://doc.rust-lang.org/src/alloc/rc.rs.html#2450</a>)</p>",
+        "id": 267433379,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1641818566
+    },
+    {
+        "content": "<p>Most likely because an <code>abort</code> symbol is provided when LLVM lowers the intrinsic to an <code>abort</code> call.</p>",
+        "id": 267453725,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1641828897
+    },
+    {
+        "content": "<p>I wonder if we can add a weak <code>abort</code> function to compiler builtins that just calls <code>core::intrinsic::abort()</code></p>",
+        "id": 267506710,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1641851840
+    },
+    {
+        "content": "<p>So if the target has a trap instruction, it will just contain that; for a target with properly defined <code>abort</code> that gets used because this one is weak; if the target doesn't have trap instruction or an <code>abort</code> function then it becomes an infinite recursion.</p>",
+        "id": 267506906,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1641851925
+    },
+    {
+        "content": "<p>Weak functions are not universally supported AFAIK.</p>",
+        "id": 267513100,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1641855023
+    },
+    {
+        "content": "<p>compiler-builtins use <code>#[cfg_attr(not(all(target_os = \"windows\", target_env = \"gnu\")), linkage = \"weak\")]</code> for memcpy/memset etc, so I suppose we could just continue to use that.</p>",
+        "id": 267523267,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1641862298
+    },
+    {
+        "content": "<p>Is it actually just mingw that doesn't support weak linkage? Any reason why (that's still using COFF like msvc does, IIRC)?</p>",
+        "id": 267529396,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1641868080
+    },
+    {
+        "content": "<p>Only ELF properly supports weak linkage. It's present only in a very limited form in Mach-O and COFF.</p>",
+        "id": 267530733,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1641869751
+    },
+    {
+        "content": "<p>Personally I'm be in favor of expanding the set of functions we require in compiler-builtins by providing them as weak functions.</p>",
+        "id": 267530785,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1641869802
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"249222\">Elichai Turkel</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/267433379\">said</a>:</p>\n<blockquote>\n<p>Any existing ones? if so how does the Arc/Rc work there? (<a href=\"https://doc.rust-lang.org/src/alloc/rc.rs.html#2450\">https://doc.rust-lang.org/src/alloc/rc.rs.html#2450</a>)</p>\n</blockquote>\n<p>I think this is a good point. If <code>intrinsics::abort</code> is the right choice for <code>Rc</code> then it’s also probably the right choice for some non-standard-library crates (in some specific situations). <code>Rc</code> is not that special</p>",
+        "id": 267656258,
+        "sender_full_name": "Simon Sapin",
+        "timestamp": 1641940414
+    },
+    {
+        "content": "<blockquote>\n<p>It's present only in a very limited form in Mach-O </p>\n</blockquote>\n<p>I mean, sort of. Mach-O supports weak_import/extern_weak, and uses it for essentially every system-provided symbol. The reason \"sort of\" is just that it doesn't have exactly the same semantics (without more work), although its semantics seem like they'd be usable semantics (it's for externally provided symbol which come through as null if not linked in). Yeah, that's not the exact same, as it doesn't allow directly defaulting the pointer, but is close enough for this.</p>",
+        "id": 267656980,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1641940814
+    },
+    {
+        "content": "<p>Is there anything I can do here that might help push this forward?<br>\n(gather some information on <code>abort</code> uses in stdlib, look into llvm to check which targets <em>dont</em> support the abort intrinsic?)</p>\n<p>FYI even libcore uses <code>abort</code>(only called in debug) <a href=\"https://github.com/rust-lang/rust/blob/master/library/core/src/ptr/mod.rs#L1053\">https://github.com/rust-lang/rust/blob/master/library/core/src/ptr/mod.rs#L1053</a></p>",
+        "id": 269171406,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1643057731
+    },
+    {
+        "content": "<p>One question is which module should we expose <code>abort</code> in? Also I feel like the name <code>trap</code> may be more appropriate: you would normally expect <code>abort</code> to actually abort the process with a <code>SIGABRT</code>.</p>",
+        "id": 269179755,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643062083
+    },
+    {
+        "content": "<p>How about <code>core::panic::abort()</code>?</p>",
+        "id": 269182647,
+        "sender_full_name": "cuviper",
+        "timestamp": 1643063796
+    },
+    {
+        "content": "<p>Hrm. Putting it under <code>panic</code> seems slightly misleading, since it doesn't actually panic, it does something entirely different (trapping).</p>",
+        "id": 269211222,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1643088179
+    },
+    {
+        "content": "<p>And in particular people might think it's related to panic=abort.</p>",
+        "id": 269211226,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1643088186
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"143274\">@Amanieu</span> Calling it \"trap\" seems like a great idea to me.</p>",
+        "id": 269211245,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1643088202
+    },
+    {
+        "content": "<p><code>core::panic::abort</code> should go through the panic handler (with <a href=\"https://doc.rust-lang.org/nightly/core/panic/struct.PanicInfo.html#method.can_unwind\"><code>can_unwind</code></a> = false) so that the panic_handler implementation can select the best way to abort the process.</p>",
+        "id": 269217547,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643095142
+    },
+    {
+        "content": "<p>The specific semantics that we want here are different: it's the shortest instruction sequence that causes execution to stop.</p>",
+        "id": 269217653,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643095246
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"249222\">@Elichai Turkel</span> Actually since you brought this up, are you more interested in a <code>trap</code> feature like the current <code>intrinsics::abort</code> or rather in something that goes through the panic handler like I described?</p>",
+        "id": 269218519,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643096002
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"143274\">Amanieu</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269218519\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"249222\">Elichai Turkel</span> Actually since you brought this up, are you more interested in a <code>trap</code> feature like the current <code>intrinsics::abort</code> or rather in something that goes through the panic handler like I described?</p>\n</blockquote>\n<p>My use case is a no_std library that does rust-&gt;C-&gt;rust and I need to abort in the inner rust.<br>\nIf using the panic machinery allows to do this safely then that feels \"better\" (and might make  it easier to stabilize because new architectures need to provide panic handlers anyway) but the trap one works just as well for my use case :)</p>",
+        "id": 269219699,
+        "sender_full_name": "Elichai Turkel",
+        "timestamp": 1643097040
+    },
+    {
+        "content": "<p>Many of the times when I've needed intrinsics::abort(), it's been because allocation (and more broadly running arbitrary code) would be unacceptable (either for signal safety reasons, because it's in a handler for detected memory corruption, etc). Going through the panic handler would be unacceptable here.</p>\n<p>That's not to say there's no use case for that (although that usecase is somewhat already handled by forcing a double-panic, which both aborts and calls panic handlers IIRC), but I just wanted to voice my support for having something like the current <code>intrinsics::abort()</code>.</p>",
+        "id": 269232106,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1643104214
+    },
+    {
+        "content": "<p>I think there's 2 different use cases here which deserve separate solutions:</p>",
+        "id": 269242655,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643109757
+    },
+    {
+        "content": "<p>1) I want to panic but I don't want to unwind. The solution is to introduce a <code>#[nounwind]</code> attribute on functions to prevent any panics from escaping them. This is already implemented in the compiler with <code>#[rustc_allocator_nounwind]</code>. <code>extern \"C\"</code> already does this when used with <code>#![feature(c_unwind)]</code>.</p>",
+        "id": 269242748,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643109824
+    },
+    {
+        "content": "<p>2) I want to abort execution immediately because my program is in a broken state. The solution is to introduce <code>core::mem::trap</code> which works the same way as the current <code>core::intrinsics::abort</code>. This generates a trapping instruction on targets that support it, and calls <code>abort</code> otherwise. You are responsible for providing an <code>abort</code> function on platforms that require one.</p>",
+        "id": 269242915,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643109900
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"143274\">Amanieu</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269217547\">said</a>:</p>\n<blockquote>\n<p><code>core::panic::abort</code> should go through the panic handler (with <a href=\"https://doc.rust-lang.org/nightly/core/panic/struct.PanicInfo.html#method.can_unwind\"><code>can_unwind</code></a> = false) so that the panic_handler implementation can select the best way to abort the process.</p>\n</blockquote>\n<p>related: <a href=\"https://github.com/rust-lang/project-error-handling/issues/34\">https://github.com/rust-lang/project-error-handling/issues/34</a></p>",
+        "id": 269297503,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643133776
+    },
+    {
+        "content": "<p>I too would like to see a <code>core::mem::trap</code> because it's a bummer that the standard library can have a lighter-weight debug assertion than the rest of the ecosystem (we can _technically_ use intrinsics, but there's a spooky warning sign on them).</p>",
+        "id": 269347329,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1643157415
+    },
+    {
+        "content": "<p>I think that's a somewhat unavoidable step of the standard library development process</p>",
+        "id": 269347365,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643157457
+    },
+    {
+        "content": "<p>Well it's avoided by just providing <code>core::mem::trap</code>.</p>",
+        "id": 269433385,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1643212392
+    },
+    {
+        "content": "<p>FWIW I think <code>abort</code> is a better name than <code>trap</code> which is very jargon-y. This seems like a generally useful function, not just for those who know about CPU exception handling</p>",
+        "id": 269461688,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1643222964
+    },
+    {
+        "content": "<p>Also, what is the relation to the operation that happens when you <code>panic!</code> when <code>panic=abort</code> is set? If it is the same abort, then I would suggest keeping a consistent name, and conversely if it is a different operation then it should have a different name.</p>",
+        "id": 269462796,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1643223403
+    },
+    {
+        "content": "<p>I think of <code>core::mem::trap</code> as \"oh shit I corrupted my memory, abort <em>now</em>\". <code>panic!</code> is quite an involved process since it calls panic hooks, takes locks, prints to stderr, etc.</p>",
+        "id": 269463327,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643223614
+    },
+    {
+        "content": "<p>based on that description, would it be correct to say that <code>core::mem::trap</code> is an unsafe function (because we're just doing e.g. <code>ud2</code> and who knows what will happen after that) while <code>core::panic::abort</code> is not (because it goes through a controlled shutdown)?</p>",
+        "id": 269466190,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1643224656
+    },
+    {
+        "content": "<p>I think <code>trap</code> is safe the same way our aborts on stack overflow are safe, despite not always being particularly graceful.</p>",
+        "id": 269466455,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1643224755
+    },
+    {
+        "content": "<p><code>core::intrinsics::abort</code> is currently a safe function. I don't see what we'd gain by making an unsafe version that does the same thing</p>",
+        "id": 269466505,
+        "sender_full_name": "Ben Kimock (Saethlin)",
+        "timestamp": 1643224779
+    },
+    {
+        "content": "<p>And thus it's registering the interrupt handlers that could resume after an invalid instruction that would be <code>unsafe</code>.</p>",
+        "id": 269466531,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1643224792
+    },
+    {
+        "content": "<p><code>core::arch::crash()</code></p>",
+        "id": 269466550,
+        "sender_full_name": "Mara",
+        "timestamp": 1643224800
+    },
+    {
+        "content": "<p><code>halt_and_catch_fire()</code></p>",
+        "id": 269468711,
+        "sender_full_name": "cuviper",
+        "timestamp": 1643225660
+    },
+    {
+        "content": "<p>(joking aside, i honestly think <code>crash</code> is a much clearer and more common term for this kind of thing)</p>",
+        "id": 269468930,
+        "sender_full_name": "Mara",
+        "timestamp": 1643225754
+    },
+    {
+        "content": "<p>I definitely prefer crash over trap</p>",
+        "id": 269469059,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643225794
+    },
+    {
+        "content": "<p>which speaking personally is somewhat triggering as terms go, even if the usage here is different from the slur usage</p>",
+        "id": 269469149,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643225840
+    },
+    {
+        "content": "<p>I was definitely joking, but an HCF-like instruction might be required to <em>implement</em> this in some contexts, like bare metal with no \"process\" to  crash</p>",
+        "id": 269469504,
+        "sender_full_name": "cuviper",
+        "timestamp": 1643225997
+    },
+    {
+        "content": "<p><code>loop {}</code> should be fine on single-thread machines, no?</p>",
+        "id": 269470593,
+        "sender_full_name": "The 8472",
+        "timestamp": 1643226452
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"330154\">@The 8472</span> Only if we have no better alternative. Hanging isn't as good as rebooting; you can often recover from a reboot, but not a hang.</p>",
+        "id": 269471157,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1643226677
+    },
+    {
+        "content": "<p>(though if there's a watchdog they're equivalent)</p>",
+        "id": 269471178,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1643226688
+    },
+    {
+        "content": "<p>I don't mind <code>crash</code>.</p>",
+        "id": 269472936,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643227373
+    },
+    {
+        "content": "<p>For platforms that don't have a trapping instruction, we should just let LLVM emit a call to <code>abort</code> and document it. Leave it to users to handle this however they want.</p>",
+        "id": 269473104,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643227445
+    },
+    {
+        "content": "<p>Is it correct to say that <code>core::mem::crash</code>/<code>trap</code>/w/e is \"shutdown right now\" vs. <code>core::panic::abort</code> which is \"Terminate the same way that panicking would\"?</p>",
+        "id": 269474033,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1643227868
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"257758\">Connor Horman</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269474033\">said</a>:</p>\n<blockquote>\n<p>Is it correct to say that <code>core::mem::crash</code>/<code>trap</code>/w/e is \"shutdown right now\" vs. <code>core::panic::abort</code> which is \"Terminate the same way that panicking would\"?</p>\n</blockquote>\n<p>That sounds accurate though I'd probably describe it slightly differently. Instead I'd say that <code>core::panic::abort</code> is a panic that does not unwind, <code>core::panic::panic</code> is a panic that may unwind, and <code>core::mem::crash</code> is not a panic. The panic variants are used to represent and report unrecoverable errors, <code>core::mem::crash</code> is used to immediately crash the program, though it doesn't intrinsicly mean it's due to an error (though practically its hard to imagine when else you'd use it).</p>",
+        "id": 269474457,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643228074
+    },
+    {
+        "content": "<p>Does <code>core::mem::crash</code> take an exit code / does it have any control over the exit code? Or are these always going to look like abnormal termination externally</p>",
+        "id": 269477035,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1643228965
+    },
+    {
+        "content": "<p>no, if you want an exit code, use <code>std::process::exit</code></p>",
+        "id": 269477500,
+        "sender_full_name": "cuviper",
+        "timestamp": 1643229137
+    },
+    {
+        "content": "<p>it feels like a bit of a menagerie, between panic (which is sometimes an abort), exit, and now crash :P</p>",
+        "id": 269480130,
+        "sender_full_name": "bstrie",
+        "timestamp": 1643230266
+    },
+    {
+        "content": "<p>by <code>core::panic::abort</code>, are people talking about the existing <code>std::process::abort</code>, or is this yet another new function?</p>",
+        "id": 269480833,
+        "sender_full_name": "bstrie",
+        "timestamp": 1643230570
+    },
+    {
+        "content": "<p>if nothing else it would be nice to see all this terminology become consistent and untuitive</p>",
+        "id": 269480936,
+        "sender_full_name": "bstrie",
+        "timestamp": 1643230627
+    },
+    {
+        "content": "<p>I don't think we need <code>core::panic::abort</code>. All of the use cases for that can be covered by <code>panic!</code> + <code>#[nounwind]</code> on the function containing the panic.</p>",
+        "id": 269482003,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643231117
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"143274\">Amanieu</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269482003\">said</a>:</p>\n<blockquote>\n<p>I don't think we need <code>core::panic::abort</code>. All of the use cases for that can be covered by <code>panic!</code> + <code>#[nounwind]</code> on the function containing the panic.</p>\n</blockquote>\n<p>that seems fine but if we're going with that recommendation we should probably add an example documenting it so ppl don't keep asking for an aborting panic</p>",
+        "id": 269482139,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643231172
+    },
+    {
+        "content": "<p>though I do wonder if you might have a function where you want some of the panics to unwind and some to abort, but I guess you can just add an inner function in that case</p>",
+        "id": 269482177,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643231191
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"256342\">bstrie</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269480833\">said</a>:</p>\n<blockquote>\n<p>by <code>core::panic::abort</code>, are people talking about the existing <code>std::process::abort</code>, or is this yet another new function?</p>\n</blockquote>\n<p>also dang, didn't realize we had this. What would be the difference between this and <code>core::mem::crash</code>?</p>",
+        "id": 269482615,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643231390
+    },
+    {
+        "content": "<p>I've wanted a panic! that doesn't print the default panic message, just exits the process with some exit code, but still unwinds to e.g. close/delete temporary files and run other Drop impls, FWIW.</p>",
+        "id": 269482686,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1643231406
+    },
+    {
+        "content": "<p>It can be a pain to pipe that up with results or similar back to <code>main</code>.</p>",
+        "id": 269482730,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1643231423
+    },
+    {
+        "content": "<p>i still want to separate the concepts of panics and unwinding</p>",
+        "id": 269482758,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643231436
+    },
+    {
+        "content": "<p><code>std::process::abort</code> calls libc and therefore can't be in core.</p>",
+        "id": 269482781,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643231446
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116122\">@simulacrum</span> <code>resume_unwind</code>?</p>",
+        "id": 269482835,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643231469
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"143274\">Amanieu</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269482835\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"116122\">simulacrum</span> <code>resume_unwind</code>?</p>\n</blockquote>\n<p>i hate the idea of recommending people use resume_unwind to begin unwinding when you weren't already unwinding</p>",
+        "id": 269482895,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643231494
+    },
+    {
+        "content": "<p>seems so counterintuitive</p>",
+        "id": 269482911,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643231500
+    },
+    {
+        "content": "<p>yeah, I mean, it may \"work\" I guess, providing it a <code>Box&lt;()&gt;</code> or similar feels so odd though.</p>",
+        "id": 269482941,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1643231517
+    },
+    {
+        "content": "<p>yea, I don't personally feel satisfied with that as our answer to that problem</p>",
+        "id": 269483002,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643231540
+    },
+    {
+        "content": "<p>I feel like mark's usecase would want a <code>std::thread::unwind</code> that doesn't take a payload</p>",
+        "id": 269483144,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643231618
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"143274\">Amanieu</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269482781\">said</a>:</p>\n<blockquote>\n<p><code>std::process::abort</code> calls libc and therefore can't be in core.</p>\n</blockquote>\n<p>Not if you don't try hard enough <span aria-label=\"sunglasses\" class=\"emoji emoji-1f60e\" role=\"img\" title=\"sunglasses\">:sunglasses:</span></p>",
+        "id": 269491933,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1643235720
+    },
+    {
+        "content": "<p>I like the idea of <code>thread::unwind()</code>, although I'd make it take an optional payload; even if there is overlap with <code>resume_unwind</code>'s <em>current</em> implementation, I could envision a future where resuming could require there for a panic to have already occurred.</p>",
+        "id": 269497702,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643239038
+    },
+    {
+        "content": "<p>Btw, does a no-op panic handler hook not achieve something similar right now (modulo toctou)? (I'm on mobile so hard to test, sry <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span>)</p>",
+        "id": 269497707,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643239042
+    },
+    {
+        "content": "<p>What would catch_unwind on <code>thread::unwind</code> without a payload return?</p>",
+        "id": 269499912,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1643240395
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"232018\">@Daniel Henry-Mantilla</span> I'm curious, what would you want to use the payload for?</p>",
+        "id": 269500034,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643240468
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133247\">@bjorn3</span> I imagine some dummy payload with a zst private type you cant downcast to</p>",
+        "id": 269500137,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643240528
+    },
+    {
+        "content": "<p>You could already do that yourself.</p>",
+        "id": 269500287,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1643240634
+    },
+    {
+        "content": "<p>Yea, I'm just talking about a conceptual separation, since I'd like unwinding to be treated as an implementation detail of panics rather than a synonym.</p>",
+        "id": 269500944,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643241168
+    },
+    {
+        "content": "<p>What would <code>thread::unwind</code> do in <code>panic=\"abort\"</code> crates?</p>",
+        "id": 269501031,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1643241232
+    },
+    {
+        "content": "<p>I have no idea, I imagine either it would still unwind or if panic=abort really means ban unwinding then we might want to deprecate that and replace it with an equivalent flag like --no-unwinding</p>",
+        "id": 269501301,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643241379
+    },
+    {
+        "content": "<p>A big point of <code>panic=abort</code> is better codegen, which pretty much needs to mean no unwinding.</p>",
+        "id": 269501375,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1643241436
+    },
+    {
+        "content": "<p>Also regarding the earlier question about catching thread::unwinds, alternatively I can imagine having panic::catch_unwind only catch panics and have a new thread::catch_unwind that catches both forms of unwinding but doesn't expose the payload in either case.</p>",
+        "id": 269501496,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643241496
+    },
+    {
+        "content": "<p>Vaguely related, I'm gonna draft up a model of error handling for rust so we can iteratively work towards a consensus on how all of these APIs should fit together and what our goals are</p>",
+        "id": 269503350,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643242539
+    },
+    {
+        "content": "<p>Since I know a lot of ppl think about panics differently from how I do and I wanna know if i just need to document my model better or if I should give up on it</p>",
+        "id": 269503449,
+        "sender_full_name": "Jane Lusby [she/her]",
+        "timestamp": 1643242596
+    },
+    {
+        "content": "<p>panic=abort also avoids needing personality routines period.</p>",
+        "id": 269509453,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1643243651
+    },
+    {
+        "content": "<p>(Except with C-unwind which is <em>fun</em>)</p>",
+        "id": 269509474,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1643243663
+    },
+    {
+        "content": "<p>Getting back to the original question, can we stabilize abort? I think the extent of discussion here indicates that there is still design work to be done, so no. Given all these different ways to end a thread/process (I've lost track just reading this thread) I think the topic would benefit from a short write up with a nice table of the different ways to end, their relationships, and any holes in Rust's offerings. I feel like that would clear things up a lot (at least for me :-) )</p>",
+        "id": 269542842,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1643274478
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"257758\">Connor Horman</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269509474\">said</a>:</p>\n<blockquote>\n<p>(Except with C-unwind which is <em>fun</em>)</p>\n</blockquote>\n<p>And ARM EHABI which requires a personality routine for backtraces.</p>",
+        "id": 269547424,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643277058
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"220273\">Jane Lusby [she/her]</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269500034\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"232018\">Daniel Henry-Mantilla</span> I'm curious, what would you want to use the payload for?</p>\n</blockquote>\n<p>I'm ashamed to only be able to provide an example that polyfills <code>Result</code>s, when using a provided API that doesn't let the user fail (<em>e.g.</em>, visitor APIs). Here is an example:</p>\n<ul>\n<li><a href=\"https://github.com/danielhenrymantilla/with_locals.rs/blob/master/src/proc_macros/helpers/macros.rs#L7-L10\">Definition</a> of <code>throw!</code></li>\n<li><a href=\"https://github.com/danielhenrymantilla/with_locals.rs/blob/7bcda3beb8018eeeafa68fefac6803bd190a370e/src/proc_macros/handle_let_bindings.rs#L154-L156\">Usage</a>.</li>\n<li><a href=\"https://github.com/danielhenrymantilla/with_locals.rs/blob/7bcda3beb8018eeeafa68fefac6803bd190a370e/src/proc_macros/handle_let_bindings.rs#L30-L39\">Catch-site / \"landing pad\"</a></li>\n</ul>\n<p>Now, it turns out that I didn't do things \"that uglily\", and that despite the usage of unwinding to \"bail early\" out of the visiting API, I still used a field inside the visitor to hold the error payload, if any. But another natural implementation would have been to send the error payload through the unwinding mechanism, and to pattern-match against an attempt to downcast such payload: so that's the use case of <code>thread::unwind(Some(…))</code> I have in mind <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 269564773,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643286404
+    },
+    {
+        "content": "<p>Meta: should we move the comments relative to unwinding to a new <em>thread</em> (heh)? As <span class=\"user-mention\" data-user-id=\"256841\">@Nick Cameron</span> pointed out, it's become hard to keep track of the <code>abort</code> discussion with this one about unwinding happening concurrently, but the one about unwinding is also an interesting topic!</p>",
+        "id": 269564779,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1643286405
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"232018\">Daniel Henry-Mantilla</span> <a href=\"#narrow/stream/219381-t-libs/topic/Stabilizing.20abort/near/269497702\">said</a>:</p>\n<blockquote>\n<p>I like the idea of <code>thread::unwind()</code>, although I'd make it take an optional payload; even if there is overlap with <code>resume_unwind</code>'s <em>current</em> implementation, I could envision a future where resuming could require there for a panic to have already occurred.</p>\n</blockquote>\n<p>I don't think so given how unwinding works. If you call <code>resume_unwind</code> then you must have <code>catch_unwind</code> already and from unwinder POV the unwinding has completed. The API also precludes us from adding any extra info (it's just <code>Box&lt;dyn Any + Send&gt;</code> rather than a new type around it).</p>",
+        "id": 269856673,
+        "sender_full_name": "Gary Guo",
+        "timestamp": 1643454225
+    },
+    {
+        "content": "<p>The documentation for <code>resume_unwind</code> says:</p>\n<blockquote>\n<p>Triggers a panic without invoking the panic hook.</p>\n</blockquote>\n<p>You can use it with a fresh <code>Box&lt;dyn Any + Send&gt;</code>, it doesn't have to be one returned by <code>catch_unwind</code>.</p>",
+        "id": 269860043,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1643457772
+    },
+    {
+        "content": "<p>In compiletest I switched a <code>panic!()</code> into a <code>resume_unwind</code> on test failure as a backtrace or panic message is completely useless.</p>",
+        "id": 269864393,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1643463022
+    }
+]

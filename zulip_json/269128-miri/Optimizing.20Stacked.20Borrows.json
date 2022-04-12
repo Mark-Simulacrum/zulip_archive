@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>// We *disable* instead of removing `Unique` to avoid &quot;connecting&quot; two neighbouring blocks of SRWs.\n</code></pre></div>\n<p>Is there anywhere that elaborates on this comment? All I can find is that an SRW is a Windows reader/writer lock, which doesn't seem like the right thing to be commenting on deep in the implementation of stacked borrows.</p>\n<p>I'm asking _here_ because the sheer size of borrow stacks are a performance obstacle and this comment seems to suggest I can't remove anything from them, or I can, but only if I'm removing a disabled Item which is adjacent to another disabled one... right?</p>",
+        "id": 264240721,
+        "sender_full_name": "(Saethlin) Ben Kimock",
+        "timestamp": 1639009387
+    },
+    {
+        "content": "<p>I'm not intimately familiar with the code, but from what I was able to grasp from how SB works, is that removing Unique from the stack as an optimization would be a breaking change.</p>\n<p>Imagine this Rust code:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"kt\">usize</span> <span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">core</span>::<span class=\"n\">mem</span>::<span class=\"n\">addr_of_mut</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">a</span><span class=\"p\">);</span><span class=\"w\"> </span><span class=\"c1\">// pushes a SharedReadWrite onto SB's stack</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">c</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">b</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"c1\">// copies `b`</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">d</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">c</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"> </span><span class=\"c1\">// pushes a Unique onto SB's stack</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">e</span>: <span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">usize</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">d</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"c1\">// this is okay, this is a reborrow of the Unique:</span>\n<span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">e</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"c1\">// this is undefined behavior, detected through the Unique on the stack</span>\n<span class=\"c1\">// that separates the blocks of SharedReadWrite permissions:</span>\n<span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">b</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"fm\">println!</span><span class=\"p\">(</span><span class=\"s\">\"{}\"</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">d</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>\n<p>If you'd remove that Unique, then Miri won't be able to detect the UB above.</p>",
+        "id": 264288717,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1639050075
+    },
+    {
+        "content": "<p>This page has some handy background information btw: <a href=\"https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md\">https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/stacked-borrows.md</a></p>",
+        "id": 264304087,
+        "sender_full_name": "Pointerbender",
+        "timestamp": 1639058148
+    },
+    {
+        "content": "<p>I'm thinking of removing Disabled borrows, not those currently granting Unique permission. But you're right, I should read more about how SB works.</p>\n<p>My question is mostly me flailing about, trying to come up with a way to implement this: <a href=\"https://github.com/rust-lang/miri/issues/1367#issuecomment-619557947\">https://github.com/rust-lang/miri/issues/1367#issuecomment-619557947</a></p>",
+        "id": 264322502,
+        "sender_full_name": "(Saethlin) Ben Kimock",
+        "timestamp": 1639065853
+    },
+    {
+        "content": "<p>The reason SB is currently super-linear is that borrow stacks grow without bound even on simple loops without state. So even with my prototype optimizations, the cloning of stacks still turns execution super-linear</p>",
+        "id": 264322927,
+        "sender_full_name": "(Saethlin) Ben Kimock",
+        "timestamp": 1639065989
+    },
+    {
+        "content": "<p>SRW = SharedReadWrite, in this context</p>",
+        "id": 264393715,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1639100899
+    },
+    {
+        "content": "<p>are you sure the <code>Disabled</code> items are even playing a notable role in that slowdown? I think the slowdown usually comes from huge amounts of SharedReadOnly (or SharedReadWrite) when many shared references to the same thing are being created and never invalidated. but that is pure guesswork.</p>",
+        "id": 264393801,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1639100989
+    },
+    {
+        "content": "<p>I added some instrumentation and yeah, there are precious few Disabled items in the borrow stack. If I continue to have energy for this (which would be great) I'll look into removing unused elements over the next days</p>",
+        "id": 264397481,
+        "sender_full_name": "(Saethlin) Ben Kimock",
+        "timestamp": 1639105151
+    },
+    {
+        "content": "<p>if there are only few of them then why would removing them make a big difference? I am a bit confused, maybe I misunderstood :)</p>",
+        "id": 264537945,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1639192860
+    },
+    {
+        "content": "<p>I <em>think</em> <span class=\"user-mention silent\" data-user-id=\"120827\">(Saethlin) Ben Kimock</span> is saying they will look into removing other (e.g., SRW) unused tags in the stack, since trying to remove Disabled tags isn't worth it given their infrequent occurrence.</p>",
+        "id": 264538158,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1639193259
+    },
+    {
+        "content": "<p>ah okay :)<br>\nin that case the hard question is how to define 'unused'</p>",
+        "id": 264538281,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1639193418
+    },
+    {
+        "content": "<p>Yes, you both understand my intention correctly.</p>\n<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> Do you happen to know what was run under miri to tune the RangeMap block merging code in the iter_mut method? I'm just looking at a workload where the optimal approach is to never merge blocks.</p>",
+        "id": 264580266,
+        "sender_full_name": "(Saethlin) Ben Kimock",
+        "timestamp": 1639251447
+    },
+    {
+        "content": "<p>I used the ones at <a href=\"https://github.com/rust-lang/miri/tree/master/bench-cargo-miri\">https://github.com/rust-lang/miri/tree/master/bench-cargo-miri</a>. but I have no idea if they are any good. I am a total beginner when it comes to benchmarking / optimization.^^</p>",
+        "id": 264581503,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1639252916
+    }
+]

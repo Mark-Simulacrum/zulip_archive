@@ -1,0 +1,176 @@
+[
+    {
+        "content": "<p>I'm looking for an efficient pattern to handle streaming data. I'd like the writer to never block, the data to be streamed into a temporary file, and any reader to be able to catch up and then block on new data without busylooping.</p>",
+        "id": 215265304,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604269149
+    },
+    {
+        "content": "<p>There's no simple way for a reader to just block on new data appearing in a temporary file.</p>",
+        "id": 215265321,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604269190
+    },
+    {
+        "content": "<p>(And inotify/fanotify seems like massive overkill here, though if I have to go that route I can.)</p>",
+        "id": 215265330,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604269202
+    },
+    {
+        "content": "<p>I also want to avoid having the reader just sleep and then re-check.</p>",
+        "id": 215265407,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604269321
+    },
+    {
+        "content": "<p>The writer is obtaining data from the network, and writing it to a temporary file. There's some additional work to be done when the data is complete and the network connection is closed. Zero or more readers want to be able to follow the data as it's obtained, but want to be able to efficiently block until there's more data to read.</p>",
+        "id": 215266377,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604270736
+    },
+    {
+        "content": "<p>Can you use <del>a shared memory map containing the length and</del> a cross-process semaphore / condition variable for notifications?</p>",
+        "id": 215285037,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604301129
+    },
+    {
+        "content": "<p>The writer appends to file, <del>updates length in the shm,</del> then pings the readers. Actually, you don't even need the shm part, the readers can wait, keep reading until the end, then go back to sleep</p>",
+        "id": 215285095,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604301234
+    },
+    {
+        "content": "<p>This is within the same process (at least for now).</p>",
+        "id": 215348141,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604336866
+    },
+    {
+        "content": "<p>But I don't want to buffer in memory, the data may be large.</p>",
+        "id": 215348166,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604336880
+    },
+    {
+        "content": "<p>I think the approach above works even better in-process (since IPC cvars are harder to come around). And there's no buffering needed.</p>",
+        "id": 215348305,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604336930
+    },
+    {
+        "content": "<p>A condition variable like that did occur to me, but it would require care to avoid racing, and also afaict Rust's condition variables <em>require</em> using a mutex.</p>",
+        "id": 215348417,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604336981
+    },
+    {
+        "content": "<p>Hence trying to find an existing structure rather than building one, though I can do that if there isn't one.</p>",
+        "id": 215348556,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604337026
+    },
+    {
+        "content": "<p>Most need one, you have to acquire a mutex, then sleeping on them will release it</p>",
+        "id": 215348620,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604337060
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"203546\">@Laurențiu Nicola</span> What did you have in mind to handle the \"wait/read/sleep\" pattern safely?</p>",
+        "id": 215348627,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604337064
+    },
+    {
+        "content": "<p>Well, the writer does:</p>\n<ul>\n<li>wait for data from network</li>\n<li>write to file</li>\n<li>signal cvar</li>\n<li>go to step one</li>\n</ul>\n<p>The readers open the file  (one handle per reader, this needs to happen before the loop), then they:</p>\n<ul>\n<li>sleep on the cvar</li>\n<li>read from the file</li>\n<li>process data</li>\n<li>read again, until there's nothing more to read</li>\n<li>go to step one</li>\n</ul>",
+        "id": 215348688,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604337091
+    },
+    {
+        "content": "<p>(If it helps, there is only one writer here.)</p>",
+        "id": 215348913,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604337166
+    },
+    {
+        "content": "<p>There's some inefficiency (each reader will read the same data from disk), but in practice it should be cached</p>",
+        "id": 215349263,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604337318
+    },
+    {
+        "content": "<p>That pattern would introduce a race condition. The reader reads from the file, processes the data, runs out of data to read, then the condition variable is signaled before the reader goes to sleep, then the reader goes to sleep and never gets woken up.</p>",
+        "id": 215349297,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604337329
+    },
+    {
+        "content": "<p>(Not worried about repeatedly reading the same data from disk. In practice there will commonly be either zero or one readers.)</p>",
+        "id": 215349506,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604337395
+    },
+    {
+        "content": "<p>Ouch, right. My feeling is that it can work, though. The problem is that you're not holding the cvar lock while reading (which isn't desirable), so you could check if more data was written before sleeping on the cvar.</p>",
+        "id": 215350049,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604337630
+    },
+    {
+        "content": "<p>Say the writer publishes a version number (number of <code>write()</code> calls), and the readers check it before sleeping.. but it's still a bit awkward</p>",
+        "id": 215350157,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604337683
+    },
+    {
+        "content": "<p>Still needs an atomic-check-and-sleep primitive.</p>",
+        "id": 215350225,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604337718
+    },
+    {
+        "content": "<p>It's atomic, because you acquire the mutex, do the version check, then sleep</p>",
+        "id": 215350356,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604337768
+    },
+    {
+        "content": "<p>The writer has to acquire the mutex, increase the version, then signal the cvar</p>",
+        "id": 215350395,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604337786
+    },
+    {
+        "content": "<p>The writer shouldn't have to acquire a mutex and wait on readers though.</p>",
+        "id": 215350398,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604337789
+    },
+    {
+        "content": "<p>Yeah, that's not great. At least they're short-lived locks</p>",
+        "id": 215350439,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604337814
+    },
+    {
+        "content": "<p>What's annoying is that I know Linux futexes support the exact operation that I want...</p>",
+        "id": 215350463,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604337829
+    },
+    {
+        "content": "<p>Ah, I've never looked into those</p>",
+        "id": 215350534,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1604337853
+    },
+    {
+        "content": "<p>They're the underlying mechanism used to implement any kind of sleeping lock on Linux.</p>",
+        "id": 215350581,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1604337875
+    }
+]

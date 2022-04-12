@@ -1,0 +1,1022 @@
+<html>
+<head><meta charset="utf-8"><title>perf.rlo cache busting · t-cargo · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/index.html">t-cargo</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html">perf.rlo cache busting</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="202748550"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202748550" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202748550">(Jul 02 2020 at 21:51)</a>:</h4>
+<p>perf.rlo runs a bunch of benchmarks, and wants to minimize the time it takes for a benchmark to run. Currently per benchmark we invoke cargo a bunch of times, with various modifications to the underlying state.</p>
+<p>To reduce the amount of time things take, we try to cache dependencies and incremental state. However, to ensure that Cargo runs rustc for the leaf crate that we're interested in, we want to bust it's cache somehow.</p>
+<p>Currently what we do on perf is this, preserving mtimes on copy (<code>cp -p</code>):</p>
+<ul>
+<li>first, build the crate in directory A with profile check</li>
+<li>copy A into prepare-$profile (e.g., check/opt/debug/doc)</li>
+<li>run a build again in directory prepare-$profile</li>
+<li>for each iteration (usually 3-4):<br>
+    * copy prepare-$profile into prepare-$profile-$iteration<br>
+    * build in prepare-$profile-$iteration several times, with various rustc settings (e.g., incremental on/off)</li>
+</ul>
+<p>Currently to ensure that rustc is invoked for the leaf crate we do <code>find leaf-crate-root -type f | xargs touch</code>. This is pretty suboptimal of course.</p>
+<p>It's also the case that I suspect we're busting caches on dependencies more than we need to be -- in particular, with some of our crates that have path dependencies, I believe Cargo is currently busting caches when we turn incremental on/off via CARGO_INCREMENTAL.</p>
+<p>I'm interested in seeing if perhaps there's room for a (unstable) Cargo subcommand or some hack atop cargo that we could employ to avoid some of the suboptimal bits with the cache busting -- really, all we need is a way to ensure that the leaf crate's rustc runs. Also, if there's any more general feedback I would love to hear that too (e.g., maybe our copying is the wrong approach and we should be doing some other form of caching).</p>
+
+
+
+<a name="202748602"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202748602" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202748602">(Jul 02 2020 at 21:52)</a>:</h4>
+<p>Let me know if I can clarify anything!</p>
+
+
+
+<a name="202748618"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202748618" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202748618">(Jul 02 2020 at 21:52)</a>:</h4>
+<p>the code in question is here <a href="https://github.com/rust-lang/rustc-perf/blob/7d819df893670a0e55f0d49f31e55c89b0de4d68/collector/src/bin/rustc-perf-collector/execute.rs#L969">https://github.com/rust-lang/rustc-perf/blob/7d819df893670a0e55f0d49f31e55c89b0de4d68/collector/src/bin/rustc-perf-collector/execute.rs#L969</a></p>
+
+
+
+<a name="202755191"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202755191" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202755191">(Jul 02 2020 at 23:27)</a>:</h4>
+<p>cc <span class="user-mention" data-user-id="120518">@Eric Huss</span> from <a href="https://github.com/rust-lang/cargo/pull/8210">https://github.com/rust-lang/cargo/pull/8210</a></p>
+
+
+
+<a name="202766676"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202766676" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202766676">(Jul 03 2020 at 03:58)</a>:</h4>
+<p>How come cargo doesn't run the build today? Is it because you're doing the same thing multiple times to measure or is there state cargo isn't seeing that should trigger.the rebuild?</p>
+
+
+
+<a name="202796379"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202796379" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202796379">(Jul 03 2020 at 12:04)</a>:</h4>
+<p>yeah, so for some of our runs we're interested in basically "perfect cache" builds, e.g., we'd run <code>cargo build</code> twice without changing anything to check how good "perfect incremental" is</p>
+
+
+
+<a name="202796516"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202796516" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202796516">(Jul 03 2020 at 12:05)</a>:</h4>
+<p>and more broadly since there's no --no-deps and we want to have a "base" directory with a full set of build-dependencies to avoid e.g. bindgen re-generation as much as possible, when switching from building that up to the normal build we need to convince cargo that things have changed</p>
+
+
+
+<a name="202796623"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202796623" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202796623">(Jul 03 2020 at 12:06)</a>:</h4>
+<p>Of course, today, I think there's some bugs in the cargo movement support -- we're getting cache busting in path dependencies that are part of what we're copying, though I don't know exactly why yet.</p>
+
+
+
+<a name="202796844"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202796844" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202796844">(Jul 03 2020 at 12:09)</a>:</h4>
+<p>I guess one option might be for us to manually edit the <a href="http://build.rs">build.rs</a> of the final build to have a rerun-if-env-changed key on something we control</p>
+
+
+
+<a name="202808402"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202808402" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202808402">(Jul 03 2020 at 14:20)</a>:</h4>
+<p>That may actually be the best solution if you can manage it, even implementing something unstable in cargo is likely gonna be nontrivial</p>
+
+
+
+<a name="202808593"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202808593" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202808593">(Jul 03 2020 at 14:22)</a>:</h4>
+<p>Yea, incremental is included in the fingerprint. I guess it probably doesn't need to be. <a href="https://github.com/rust-lang/cargo/blob/fede83ccf973457de319ba6fa0e36ead454d2e20/src/cargo/core/compiler/fingerprint.rs#L1296">Here</a> is where the profile is hashed, it would need to unpack it and selectively choose what to hash. Alternatively it might be possible just to remove <a href="https://github.com/rust-lang/cargo/blob/fede83ccf973457de319ba6fa0e36ead454d2e20/src/cargo/core/profiles.rs#L743">incremental from the hash</a>, but I'm uncertain if that would cause problems with deduplication (I think not).</p>
+<p>As for the cache busting, is there a particular problem with just updating the mtime of the source to trigger a rebuild? That seems like a legitimate way to force a rebuild. It could be more targeted, such as just touching the top-level source files (like <code>lib.rs</code>), which can be done by querying <code>cargo metadata</code>. I'm not sure if that would be too much trouble.</p>
+
+
+
+<a name="202808769"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202808769" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202808769">(Jul 03 2020 at 14:24)</a>:</h4>
+<p>hm querying cargo metadata seems plausible</p>
+
+
+
+<a name="202808822"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202808822" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202808822">(Jul 03 2020 at 14:25)</a>:</h4>
+<p>is there a way to hide path dependencies from cargo's "local crates" info? in particular, for e.g. servo it'd be great to not treat most things as path dependencies even though they are.</p>
+
+
+
+<a name="202808990"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202808990" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202808990">(Jul 03 2020 at 14:27)</a>:</h4>
+<p>No, unfortunately the <a href="https://github.com/rust-lang/cargo/blob/fede83ccf973457de319ba6fa0e36ead454d2e20/src/cargo/core/compiler/unit.rs#L73-L79">is_local</a> check is pretty crude.</p>
+
+
+
+<a name="202809064"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202809064" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202809064">(Jul 03 2020 at 14:27)</a>:</h4>
+<p>hm I guess in theory perf.rlo could manage incremental itself -- I think that's the primary thing using is_local today?</p>
+
+
+
+<a name="202809116"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202809116" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202809116">(Jul 03 2020 at 14:28)</a>:</h4>
+<p>(we already wrap rustc)</p>
+
+
+
+<a name="202809357"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202809357" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202809357">(Jul 03 2020 at 14:30)</a>:</h4>
+<p>Warnings is one of the big ones, too (lint capping).</p>
+
+
+
+<a name="202809369"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202809369" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202809369">(Jul 03 2020 at 14:30)</a>:</h4>
+<p>but moving it to the wrapper should work</p>
+
+
+
+<a name="202809431"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/202809431" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#202809431">(Jul 03 2020 at 14:31)</a>:</h4>
+<p>I think rustc doesn't do anything intelligent on lint capping anyway (like not running lints) so I'm not too worried about that</p>
+
+
+
+<a name="204222781"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204222781" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204222781">(Jul 17 2020 at 15:49)</a>:</h4>
+<p>hm so following up on this, I've been trying to debug why I'm seeing a bunch of "unit dependency information changed", like this:</p>
+<div class="codehilite"><pre><span></span><code>[2020-07-17T15:23:12Z INFO  cargo::core::compiler::fingerprint] fingerprint error for net_traits v0.0.1 (/tmp/.tmpMxRFN9/components/net_traits)/Check { test: false }/TargetInner { tested: false, doctest: false, ..: lib_target(&quot;net_traits&quot;, [&quot;lib&quot;], &quot;/tmp/.tmpMxRFN9/components/net_traits/lib.rs&quot;, Edition2018) }
+[2020-07-17T15:23:12Z INFO  cargo::core::compiler::fingerprint]     err: unit dependency information changed
+
+    Caused by:
+        new (msg/16392295685726340264) != old (msg/6956341995905659233)
+</code></pre></div>
+
+
+<p>I wrote out the new/old fingerprints, and the new one is pretty full of information, but the old one just has the memoized hash. Can I hack the code somehow to store real fingerprints so I can diff them, or so? Is there some other way to debug this?</p>
+<div class="codehilite"><pre><span></span><code>Fingerprint {
+    rustc: 0,
+    features: &quot;&quot;,
+    target: 0,
+    profile: 0,
+    path: 0,
+    deps: [],
+    local: Mutex {
+        data: [],
+    },
+    memoized_hash: Mutex {
+        data: Some(
+            6956341995905659233,
+        ),
+    },
+    rustflags: [],
+    metadata: 0,
+    config: 0,
+    fs_status: Stale,
+    outputs: [],
+}
+</code></pre></div>
+
+
+
+<a name="204223049"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223049" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223049">(Jul 17 2020 at 15:51)</a>:</h4>
+<p>In theory you should be getting more error messages</p>
+
+
+
+<a name="204223066"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223066" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223066">(Jul 17 2020 at 15:51)</a>:</h4>
+<p>so you can follow an audit trail of fingerprint errors to the root</p>
+
+
+
+<a name="204223100"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223100" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223100">(Jul 17 2020 at 15:51)</a>:</h4>
+<p>on-disk we don't serialize the full tree for each unit, it's just the memoized_hash used to say "something about the deps changed"</p>
+
+
+
+<a name="204223109"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223109" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223109">(Jul 17 2020 at 15:51)</a>:</h4>
+<p>hm, do I need more than just =info for that?</p>
+
+
+
+<a name="204223125"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223125" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223125">(Jul 17 2020 at 15:51)</a>:</h4>
+<p>what are the full logs you've got?</p>
+
+
+
+<a name="204223207"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223207" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223207">(Jul 17 2020 at 15:52)</a>:</h4>
+<p>there should be more log messages where one of them doesn't say dep info changed</p>
+
+
+
+<a name="204223269"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223269" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223269">(Jul 17 2020 at 15:52)</a>:</h4>
+<p><a href="https://gist.github.com/Mark-Simulacrum/591a68b93e1b7cffc307dbaa32ad3abf">https://gist.github.com/Mark-Simulacrum/591a68b93e1b7cffc307dbaa32ad3abf</a></p>
+
+
+
+<a name="204223302"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223302" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223302">(Jul 17 2020 at 15:52)</a>:</h4>
+<p>this is with CARGO_LOG=cargo::core::compiler::fingerprint=info</p>
+
+
+
+<a name="204223318"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223318" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223318">(Jul 17 2020 at 15:52)</a>:</h4>
+<p>I can do a =trace log if that'd be helpful</p>
+
+
+
+<a name="204223344"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223344" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223344">(Jul 17 2020 at 15:53)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>[2020-07-17T15:23:13Z INFO  cargo::core::compiler::fingerprint] fingerprint error for script v0.0.1 (/tmp/.tmpMxRFN9/components/script)/RunCustomBuild/TargetInner { ..: custom_build_target(&quot;build-script-build&quot;, &quot;/tmp/.tmpMxRFN9/components/script/build.rs&quot;, Edition2018) }
+[2020-07-17T15:23:13Z INFO  cargo::core::compiler::fingerprint]     err: precalculated components have changed: 1594999354.125298304s (/tmp/.tmpMxRFN9/components/script/lib.rs) != 1594999025.185692572s (/tmp/.tmpj35OHT/components/script/lib.rs)
+</code></pre></div>
+
+
+
+<a name="204223360"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223360" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223360">(Jul 17 2020 at 15:53)</a>:</h4>
+<p>hm</p>
+
+
+
+<a name="204223362"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223362" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223362">(Jul 17 2020 at 15:53)</a>:</h4>
+<p>yeah so that's intentional</p>
+
+
+
+<a name="204223420"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223420" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223420">(Jul 17 2020 at 15:53)</a>:</h4>
+<p>but I don't see why <em>dependencies</em> of script would get rebuilt because of that</p>
+
+
+
+<a name="204223451"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223451" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223451">(Jul 17 2020 at 15:53)</a>:</h4>
+<p>yeah you're right</p>
+
+
+
+<a name="204223459"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223459" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223459">(Jul 17 2020 at 15:53)</a>:</h4>
+<p>this is indeed funky</p>
+
+
+
+<a name="204223525"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223525" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223525">(Jul 17 2020 at 15:54)</a>:</h4>
+<p>if you follow the dependency chain  it bottoms out as:</p>
+
+
+
+<a name="204223528"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223528" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223528">(Jul 17 2020 at 15:54)</a>:</h4>
+<p>I am also copying everything into a new directory, but AFAIK cargo is supposed to be fine with that</p>
+
+
+
+<a name="204223536"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223536" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223536">(Jul 17 2020 at 15:54)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>[2020-07-17T15:22:41Z INFO  cargo::core::compiler::fingerprint] fingerprint error for selectors v0.22.0 (/tmp/.tmpMxRFN9/components/selectors)/Check { test: false }/TargetInner { ..: lib_target(&quot;selectors&quot;, [&quot;lib&quot;], &quot;/tmp/.tmpMxRFN9/components/selectors/lib.rs&quot;, Edition2015) }
+[2020-07-17T15:22:41Z INFO  cargo::core::compiler::fingerprint]     err: unit dependency information changed
+
+    Caused by:
+        new (build_script_build/2955994899008821520) != old (build_script_build/9123845407037937931)
+</code></pre></div>
+
+
+
+<a name="204223548"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223548" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223548">(Jul 17 2020 at 15:54)</a>:</h4>
+<p>oh</p>
+
+
+
+<a name="204223570"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223570" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223570">(Jul 17 2020 at 15:54)</a>:</h4>
+<p>hm</p>
+
+
+
+<a name="204223587"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223587" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223587">(Jul 17 2020 at 15:54)</a>:</h4>
+<p>no I think that may cause issues</p>
+
+
+
+<a name="204223711"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223711" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223711">(Jul 17 2020 at 15:55)</a>:</h4>
+<p>hm, I recall seeing (and patching support in) for paths to be workspace-relative in fingerprints during some of the binary depdep work</p>
+
+
+
+<a name="204223756"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223756" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223756">(Jul 17 2020 at 15:55)</a>:</h4>
+<p>regardless, I would expect to bottom out in "file changed" vs. "dependency changed"</p>
+
+
+
+<a name="204223896"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223896" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223896">(Jul 17 2020 at 15:56)</a>:</h4>
+<p>yeah I mean you're not wrong</p>
+
+
+
+<a name="204223991"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204223991" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204223991">(Jul 17 2020 at 15:57)</a>:</h4>
+<p>I'm happy to edit cargo btw to give more logging, just not really sure how to approach the problem</p>
+
+
+
+<a name="204224057"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224057" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224057">(Jul 17 2020 at 15:57)</a>:</h4>
+<p>do you have the build directories lying around?</p>
+
+
+
+<a name="204224071"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224071" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224071">(Jul 17 2020 at 15:57)</a>:</h4>
+<p>sure yeah</p>
+
+
+
+<a name="204224085"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224085" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224085">(Jul 17 2020 at 15:57)</a>:</h4>
+<p>also do you have the source for the <code>selectors</code> crate?</p>
+
+
+
+<a name="204224096"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224096" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224096">(Jul 17 2020 at 15:57)</a>:</h4>
+<p>can you gist the output of the build script of <code>selectors</code>?</p>
+
+
+
+<a name="204224155"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224155" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224155">(Jul 17 2020 at 15:58)</a>:</h4>
+<p>hm that'd be in the target dir, right?</p>
+
+
+
+<a name="204224217"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224217" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224217">(Jul 17 2020 at 15:58)</a>:</h4>
+<p>yeah</p>
+
+
+
+<a name="204224230"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224230" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224230">(Jul 17 2020 at 15:58)</a>:</h4>
+<p><code>target/debug/build/selectors-**/build-script-build</code></p>
+
+
+
+<a name="204224233"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224233" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224233">(Jul 17 2020 at 15:58)</a>:</h4>
+<p>or something like that</p>
+
+
+
+<a name="204224310"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224310" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224310">(Jul 17 2020 at 15:59)</a>:</h4>
+<p>hm okay so ./target/debug/build/selectors-c5d03b756b7db185/build-script-build is the compiled binary</p>
+
+
+
+<a name="204224337"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224337" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224337">(Jul 17 2020 at 15:59)</a>:</h4>
+<p>oh do I need it from before I guess?</p>
+
+
+
+<a name="204224393"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224393" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224393">(Jul 17 2020 at 16:00)</a>:</h4>
+<p>nah it's maybe in a different dir</p>
+
+
+
+<a name="204224449"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224449" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224449">(Jul 17 2020 at 16:00)</a>:</h4>
+<p>with the <code>selectors-*</code> prefix</p>
+
+
+
+<a name="204224467"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224467" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224467">(Jul 17 2020 at 16:00)</a>:</h4>
+<p>aha</p>
+
+
+
+<a name="204224521"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224521" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224521">(Jul 17 2020 at 16:00)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>mark@raptor:/tmp/.tmpVx2Jdp$ tail -n10 ./target/debug/build/selectors-c9618c6146797435/*
+==&gt; ./target/debug/build/selectors-c9618c6146797435/invoked.timestamp &lt;==
+This file has an mtime of when this was started.
+==&gt; ./target/debug/build/selectors-c9618c6146797435/out &lt;==
+tail: error reading &#39;./target/debug/build/selectors-c9618c6146797435/out&#39;: Is a directory
+
+==&gt; ./target/debug/build/selectors-c9618c6146797435/output &lt;==
+
+==&gt; ./target/debug/build/selectors-c9618c6146797435/root-output &lt;==
+/tmp/.tmpVx2Jdp/target/debug/build/selectors-c9618c6146797435/out
+==&gt; ./target/debug/build/selectors-c9618c6146797435/stderr &lt;==
+</code></pre></div>
+
+
+
+<a name="204224538"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224538" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224538">(Jul 17 2020 at 16:01)</a>:</h4>
+<p>oooooooooooooooh</p>
+
+
+
+<a name="204224565"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224565" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224565">(Jul 17 2020 at 16:01)</a>:</h4>
+<p>ok I think I see what's goign on</p>
+
+
+
+<a name="204224584"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224584" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224584">(Jul 17 2020 at 16:01)</a>:</h4>
+<p>so that build script doesn't say when to rerun it</p>
+
+
+
+<a name="204224596"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224596" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224596">(Jul 17 2020 at 16:01)</a>:</h4>
+<p>so we fall back to cargo's conservative logic</p>
+
+
+
+<a name="204224644"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224644" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224644">(Jul 17 2020 at 16:01)</a>:</h4>
+<p><a href="https://github.com/rust-lang/cargo/blob/0a9f2efd7f0cdbc70c948792a87a4740672f0a43/src/cargo/sources/path.rs#L523-L526">https://github.com/rust-lang/cargo/blob/0a9f2efd7f0cdbc70c948792a87a4740672f0a43/src/cargo/sources/path.rs#L523-L526</a></p>
+
+
+
+<a name="204224653"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224653" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224653">(Jul 17 2020 at 16:01)</a>:</h4>
+<p>and there's your absolute path</p>
+
+
+
+<a name="204224655"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224655" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224655">(Jul 17 2020 at 16:01)</a>:</h4>
+<p>okay, so I should be "safe" to add e.g. rerun-if-changed=build.rs or so?</p>
+
+
+
+<a name="204224677"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224677" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224677">(Jul 17 2020 at 16:02)</a>:</h4>
+<p>I think that would probably fix it</p>
+
+
+
+<a name="204224729"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224729" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224729">(Jul 17 2020 at 16:02)</a>:</h4>
+<p>this is also a legitimate bug in cargo</p>
+
+
+
+<a name="204224740"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224740" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224740">(Jul 17 2020 at 16:02)</a>:</h4>
+<p>or I suppose we could patch cargo to not do this -- a workspace-relative path feels sufficient</p>
+
+
+
+<a name="204224885"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224885" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224885">(Jul 17 2020 at 16:03)</a>:</h4>
+<p>this should actually be an easy-ish patch to cargo</p>
+
+
+
+<a name="204224891"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224891" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224891">(Jul 17 2020 at 16:03)</a>:</h4>
+<p>can you test out a cargo build easily?</p>
+
+
+
+<a name="204224894"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204224894" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204224894">(Jul 17 2020 at 16:03)</a>:</h4>
+<p>yeah</p>
+
+
+
+<a name="204225143"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204225143" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204225143">(Jul 17 2020 at 16:05)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>diff --git a/src/cargo/sources/path.rs b/src/cargo/sources/path.rs
+index cf406e8dd..77c164671 100644
+--- a/src/cargo/sources/path.rs
++++ b/src/cargo/sources/path.rs
+@@ -522,6 +522,7 @@ impl&lt;&#39;cfg&gt; Source for PathSource&lt;&#39;cfg&gt; {
+
+     fn fingerprint(&amp;self, pkg: &amp;Package) -&gt; CargoResult&lt;String&gt; {
+         let (max, max_path) = self.last_modified_file(pkg)?;
++        let max_path = max_path.strip_prefix(&amp;self.path).unwrap_or(&amp;max_path);
+         Ok(format!(&quot;{} ({})&quot;, max, max_path.display()))
+     }
+ ```
+</code></pre></div>
+
+
+
+<a name="204225167"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204225167" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204225167">(Jul 17 2020 at 16:05)</a>:</h4>
+<p>see if that fixes your issue?</p>
+
+
+
+<a name="204225189"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204225189" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204225189">(Jul 17 2020 at 16:05)</a>:</h4>
+<p>if so I can pretty easily whip up a test and add send a pr</p>
+
+
+
+<a name="204225250"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204225250" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204225250">(Jul 17 2020 at 16:05)</a>:</h4>
+<p>recompiling -- it'll be around ~6 minutes to test since I'm check-compiling script-servo :)</p>
+
+
+
+<a name="204225342"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204225342" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204225342">(Jul 17 2020 at 16:06)</a>:</h4>
+<p>oh lawd what ever will I do for 6 minutes</p>
+
+
+
+<a name="204226186"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226186" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226186">(Jul 17 2020 at 16:13)</a>:</h4>
+<p>hm it doesn't seem to have helped</p>
+
+
+
+<a name="204226231"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226231" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226231">(Jul 17 2020 at 16:13)</a>:</h4>
+<p>I think same log? <a href="https://gist.github.com/Mark-Simulacrum/0ac4da8f665f6b09f7d3ab674d0f4ec6">https://gist.github.com/Mark-Simulacrum/0ac4da8f665f6b09f7d3ab674d0f4ec6</a></p>
+
+
+
+<a name="204226351"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226351" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226351">(Jul 17 2020 at 16:14)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>[2020-07-17T16:12:31Z INFO  cargo::core::compiler::fingerprint] fingerprint error for selectors v0.22.0 (/tmp/.tmpwsVPOV/components/selectors)/RunCustomBuild/TargetInner { ..: custom_build_target(&quot;build-script-build&quot;, &quot;/tmp/.tmpwsVPOV/components/selectors/build.rs&quot;, Edition2015) }
+[2020-07-17T16:12:31Z INFO  cargo::core::compiler::fingerprint]     err: precalculated components have changed: 1595001961.290553030s (/tmp/.tmpwsVPOV/components/selectors/build.rs) != 1595001961.290553030s (/tmp/.tmphLdsLE/components/selectors/build.rs)
+</code></pre></div>
+
+
+
+<a name="204226370"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226370" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226370">(Jul 17 2020 at 16:14)</a>:</h4>
+<p>okay so now it's at least complaining about the right thing, so to speak</p>
+
+
+
+<a name="204226467"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226467" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226467">(Jul 17 2020 at 16:15)</a>:</h4>
+<p><span class="user-mention" data-user-id="116015">@Alex Crichton</span> ^</p>
+
+
+
+<a name="204226473"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226473" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226473">(Jul 17 2020 at 16:15)</a>:</h4>
+<p>but the two times there look .. identical?</p>
+
+
+
+<a name="204226510"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226510" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226510">(Jul 17 2020 at 16:15)</a>:</h4>
+<p>so I guess it's still not a strip'd path</p>
+
+
+
+<a name="204226526"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226526" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226526">(Jul 17 2020 at 16:16)</a>:</h4>
+<p>hm... sounds like progress though</p>
+
+
+
+<a name="204226621"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226621" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226621">(Jul 17 2020 at 16:16)</a>:</h4>
+<p>er...</p>
+
+
+
+<a name="204226648"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226648" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226648">(Jul 17 2020 at 16:16)</a>:</h4>
+<p>how did you get a different error?</p>
+
+
+
+<a name="204226670"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226670" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226670">(Jul 17 2020 at 16:16)</a>:</h4>
+<p>did the before/after cargo only differ by that patch?</p>
+
+
+
+<a name="204226744"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226744" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226744">(Jul 17 2020 at 16:17)</a>:</h4>
+<p>hm I mean essentially, yeah -- there was some patches around writing out the unit dependency info into files, but nothing that affected logic</p>
+
+
+
+<a name="204226869"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226869" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226869">(Jul 17 2020 at 16:18)</a>:</h4>
+<p>oh wait</p>
+
+
+
+<a name="204226920"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226920" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226920">(Jul 17 2020 at 16:18)</a>:</h4>
+<p>I think I may have misspoken eralier</p>
+
+
+
+<a name="204226936"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226936" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226936">(Jul 17 2020 at 16:18)</a>:</h4>
+<p>I misdiagnosed those original logs</p>
+
+
+
+<a name="204226955"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226955" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226955">(Jul 17 2020 at 16:18)</a>:</h4>
+<p>or not...</p>
+
+
+
+<a name="204226969"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226969" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226969">(Jul 17 2020 at 16:18)</a>:</h4>
+<p>can you add debug printlns to that <code>strip_prefix</code> location?</p>
+
+
+
+<a name="204226975"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204226975" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204226975">(Jul 17 2020 at 16:19)</a>:</h4>
+<p>about <code>self.path</code> and <code>max_path</code>?</p>
+
+
+
+<a name="204227075"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204227075" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204227075">(Jul 17 2020 at 16:20)</a>:</h4>
+<p>doing so</p>
+
+
+
+<a name="204227247"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204227247" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204227247">(Jul 17 2020 at 16:21)</a>:</h4>
+<p>is it possible that's not the right function? it doesn't seem to have run at all on a std build</p>
+
+
+
+<a name="204227355"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204227355" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204227355">(Jul 17 2020 at 16:22)</a>:</h4>
+<p>"std build"?</p>
+
+
+
+<a name="204227385"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204227385" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204227385">(Jul 17 2020 at 16:22)</a>:</h4>
+<p>oh, that was with an old cargo, never mind</p>
+
+
+
+<a name="204227428"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204227428" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204227428">(Jul 17 2020 at 16:22)</a>:</h4>
+<p>(perf builds std locally before building crates, but it does it with a different cargo I think)</p>
+
+
+
+<a name="204228395"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228395" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228395">(Jul 17 2020 at 16:31)</a>:</h4>
+<p>on the initial build:</p>
+<div class="codehilite"><pre><span></span><code>[2020-07-17T16:27:18Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpbTIGlP/components/selectors/build.rs&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] max_path_stripped=&quot;/tmp/.tmpbTIGlP/components/selectors/build.rs&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpbTIGlP/components/selectors/Cargo.toml&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpbTIGlP/components/atoms/Cargo.toml&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] max_path_stripped=&quot;&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpbTIGlP/components/atoms/Cargo.toml&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpbTIGlP/components/style/values/specified/length.rs&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] max_path_stripped=&quot;/tmp/.tmpbTIGlP/components/style/values/specified/length.rs&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpbTIGlP/components/style/Cargo.toml&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpbTIGlP/components/script/lib.rs&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] max_path_stripped=&quot;/tmp/.tmpbTIGlP/components/script/lib.rs&quot;
+[2020-07-17T16:27:18Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpbTIGlP/components/script/Cargo.toml&quot;
+</code></pre></div>
+
+
+
+<a name="204228419"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228419" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228419">(Jul 17 2020 at 16:31)</a>:</h4>
+<p>from:</p>
+<div class="codehilite"><pre><span></span><code>        log::info!(&quot;max_path={:?}&quot;, max_path);
+        let max_path = max_path.strip_prefix(&amp;self.path).unwrap_or(&amp;max_path);
+        log::info!(&quot;max_path_stripped={:?}&quot;, max_path);
+        log::info!(&quot;self.path={:?}&quot;, self.path);
+</code></pre></div>
+
+
+
+<a name="204228492"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228492" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228492">(Jul 17 2020 at 16:32)</a>:</h4>
+<p>so I guess we need self.path.parent()?</p>
+
+
+
+<a name="204228507"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228507" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228507">(Jul 17 2020 at 16:32)</a>:</h4>
+<p><span class="user-mention" data-user-id="116015">@Alex Crichton</span> ^</p>
+
+
+
+<a name="204228587"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228587" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228587">(Jul 17 2020 at 16:33)</a>:</h4>
+<p>whoops yep</p>
+
+
+
+<a name="204228590"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228590" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228590">(Jul 17 2020 at 16:33)</a>:</h4>
+<p>that'd do it</p>
+
+
+
+<a name="204228606"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228606" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228606">(Jul 17 2020 at 16:33)</a>:</h4>
+<p>i was wondering if it was manifest path or root path</p>
+
+
+
+<a name="204228620"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228620" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228620">(Jul 17 2020 at 16:33)</a>:</h4>
+<p>self.manifest_path also exists...</p>
+
+
+
+<a name="204228633"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228633" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228633">(Jul 17 2020 at 16:33)</a>:</h4>
+<p>oh, no, that's on pkg</p>
+
+
+
+<a name="204228790"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204228790" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204228790">(Jul 17 2020 at 16:35)</a>:</h4>
+<p>hm the docs on PathSource::new seem wrong then <a href="https://github.com/rust-lang/cargo/blob/8aa332deaadf1a54646d8d7f9a4ac6dc422b2218/src/cargo/sources/path.rs#L25">https://github.com/rust-lang/cargo/blob/8aa332deaadf1a54646d8d7f9a4ac6dc422b2218/src/cargo/sources/path.rs#L25</a></p>
+
+
+
+<a name="204229238"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229238" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229238">(Jul 17 2020 at 16:38)</a>:</h4>
+<p>oh hm so it seems it is inconsistently called, e.g., <a href="https://github.com/rust-lang/cargo/blob/8aa332deaadf1a54646d8d7f9a4ac6dc422b2218/src/cargo/core/workspace.rs#L877">https://github.com/rust-lang/cargo/blob/8aa332deaadf1a54646d8d7f9a4ac6dc422b2218/src/cargo/core/workspace.rs#L877</a> calls it with the manifest but <a href="https://github.com/rust-lang/cargo/blob/8aa332deaadf1a54646d8d7f9a4ac6dc422b2218/src/cargo/ops/cargo_package.rs#L76">https://github.com/rust-lang/cargo/blob/8aa332deaadf1a54646d8d7f9a4ac6dc422b2218/src/cargo/ops/cargo_package.rs#L76</a> calls it with the root</p>
+
+
+
+<a name="204229296"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229296" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229296">(Jul 17 2020 at 16:39)</a>:</h4>
+<p>which makes this parent() call a bit questionable</p>
+
+
+
+<a name="204229300"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229300" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229300">(Jul 17 2020 at 16:39)</a>:</h4>
+<p>oh dear :(</p>
+
+
+
+<a name="204229316"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229316" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229316">(Jul 17 2020 at 16:39)</a>:</h4>
+<p>eh I can clean that up</p>
+
+
+
+<a name="204229319"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229319" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229319">(Jul 17 2020 at 16:39)</a>:</h4>
+<p>let's see if it fixes your issue</p>
+
+
+
+<a name="204229399"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229399" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229399">(Jul 17 2020 at 16:40)</a>:</h4>
+<p>on the initial build:</p>
+<div class="codehilite"><pre><span></span><code>[2020-07-17T16:36:10Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpwir7jE/components/selectors/build.rs&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] max_path_stripped=&quot;build.rs&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpwir7jE/components/selectors/Cargo.toml&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpwir7jE/components/atoms/Cargo.toml&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] max_path_stripped=&quot;Cargo.toml&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpwir7jE/components/atoms/Cargo.toml&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpwir7jE/components/style/values/specified/length.rs&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] max_path_stripped=&quot;values/specified/length.rs&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpwir7jE/components/style/Cargo.toml&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpwir7jE/components/script/lib.rs&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] max_path_stripped=&quot;lib.rs&quot;
+[2020-07-17T16:36:10Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpwir7jE/components/script/Cargo.toml&quot;
+</code></pre></div>
+
+
+
+<a name="204229610"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229610" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229610">(Jul 17 2020 at 16:42)</a>:</h4>
+<p>okay, seems to have solved it:</p>
+<div class="codehilite"><pre><span></span><code>[2020-07-17T16:42:03Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpe7bQxK/components/selectors/build.rs&quot;
+[2020-07-17T16:42:03Z INFO  cargo::sources::path] max_path_stripped=&quot;build.rs&quot;
+[2020-07-17T16:42:03Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpe7bQxK/components/selectors/Cargo.toml&quot;
+[2020-07-17T16:42:03Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpe7bQxK/components/atoms/Cargo.toml&quot;
+[2020-07-17T16:42:03Z INFO  cargo::sources::path] max_path_stripped=&quot;Cargo.toml&quot;
+[2020-07-17T16:42:03Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpe7bQxK/components/atoms/Cargo.toml&quot;
+[2020-07-17T16:42:03Z INFO  cargo::sources::path] max_path=&quot;/tmp/.tmpe7bQxK/components/script/lib.rs&quot;
+[2020-07-17T16:42:03Z INFO  cargo::sources::path] max_path_stripped=&quot;lib.rs&quot;
+[2020-07-17T16:42:03Z INFO  cargo::sources::path] self.path=&quot;/tmp/.tmpe7bQxK/components/script/Cargo.toml&quot;
+[2020-07-17T16:42:03Z INFO  cargo::core::compiler::fingerprint] stale: changed &quot;/tmp/.tmpe7bQxK/components/script/lib.rs&quot;
+[2020-07-17T16:42:03Z INFO  cargo::core::compiler::fingerprint]           (vs) &quot;/tmp/.tmpe7bQxK/target/debug/.fingerprint/script-99c189ea56c537ff/dep-lib-script&quot;
+[2020-07-17T16:42:03Z INFO  cargo::core::compiler::fingerprint]                FileTime { seconds: 1595004028, nanos: 31996101 } != FileTime { seconds: 1595004122, nanos: 231493844 }
+[2020-07-17T16:42:03Z INFO  cargo::core::compiler::fingerprint] fingerprint error for script v0.0.1 (/tmp/.tmpe7bQxK/components/script)/Check { test: false }/TargetInner { ..: lib_target(&quot;script&quot;, [&quot;lib&quot;], &quot;/tmp/.tmpe7bQxK/components/script/lib.rs&quot;, Edition2018) }
+[2020-07-17T16:42:03Z INFO  cargo::core::compiler::fingerprint]     err: unit dependency information changed
+
+    Caused by:
+        new (build_script_build/24a87e263ce38d83) != old (build_script_build/dd415e1debf62154)
+[2020-07-17T16:42:03Z INFO  cargo::core::compiler::fingerprint] fingerprint error for script v0.0.1 (/tmp/.tmpe7bQxK/components/script)/RunCustomBuild/TargetInner { ..: custom_build_target(&quot;build-script-build&quot;, &quot;/tmp/.tmpe7bQxK/components/script/build.rs&quot;, Edition2018) }
+[2020-07-17T16:42:03Z INFO  cargo::core::compiler::fingerprint]     err: precalculated components have changed: 1595004122.231493844s (lib.rs) != 1595003770.509345033s (lib.rs)
+   Compiling script v0.0.1 (/tmp/.tmpe7bQxK/components/script)
+</code></pre></div>
+
+
+
+<a name="204229665"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229665" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229665">(Jul 17 2020 at 16:43)</a>:</h4>
+<p>yay!</p>
+
+
+
+<a name="204229669"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229669" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229669">(Jul 17 2020 at 16:43)</a>:</h4>
+<p>you're still rebuilding though?</p>
+
+
+
+<a name="204229680"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229680" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229680">(Jul 17 2020 at 16:43)</a>:</h4>
+<p>oh I guess it's just <code>script</code> which is fine</p>
+
+
+
+<a name="204229688"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229688" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229688">(Jul 17 2020 at 16:43)</a>:</h4>
+<p>well script is the last thing</p>
+
+
+
+<a name="204229695"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229695" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229695">(Jul 17 2020 at 16:43)</a>:</h4>
+<p>(and it just finished)</p>
+
+
+
+<a name="204229712"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229712" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229712">(Jul 17 2020 at 16:43)</a>:</h4>
+<p>and it seems like that continues to work on the next build as well (we build several times)</p>
+
+
+
+<a name="204229765"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229765" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229765">(Jul 17 2020 at 16:44)</a>:</h4>
+<p>which is, you know, expected but good to check</p>
+
+
+
+<a name="204229770"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229770" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229770">(Jul 17 2020 at 16:44)</a>:</h4>
+<p>nice</p>
+
+
+
+<a name="204229778"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229778" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229778">(Jul 17 2020 at 16:44)</a>:</h4>
+<p>ok I'll make a PR out of this</p>
+
+
+
+<a name="204229880"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204229880" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204229880">(Jul 17 2020 at 16:45)</a>:</h4>
+<p>thanks!</p>
+
+
+
+<a name="204230568"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204230568" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204230568">(Jul 17 2020 at 16:52)</a>:</h4>
+<p><span class="user-mention" data-user-id="116122">@simulacrum</span> so you had to do <code>.parent()</code> right?</p>
+
+
+
+<a name="204230577"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204230577" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204230577">(Jul 17 2020 at 16:52)</a>:</h4>
+<p>otherwise it didn't work?</p>
+
+
+
+<a name="204230589"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204230589" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204230589">(Jul 17 2020 at 16:52)</a>:</h4>
+<p>I can't get a test to fail if I don't call <code>parent()</code></p>
+
+
+
+<a name="204230592"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204230592" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204230592">(Jul 17 2020 at 16:52)</a>:</h4>
+<p>yeah</p>
+
+
+
+<a name="204230594"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204230594" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204230594">(Jul 17 2020 at 16:52)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>diff --git a/src/cargo/sources/path.rs b/src/cargo/sources/path.rs
+index cf406e8dd..f6ddcf16d 100644
+--- a/src/cargo/sources/path.rs
++++ b/src/cargo/sources/path.rs
+@@ -522,6 +522,12 @@ impl&lt;&#39;cfg&gt; Source for PathSource&lt;&#39;cfg&gt; {
+
+     fn fingerprint(&amp;self, pkg: &amp;Package) -&gt; CargoResult&lt;String&gt; {
+         let (max, max_path) = self.last_modified_file(pkg)?;
++        log::info!(&quot;max_path={:?}&quot;, max_path);
++        let max_path = max_path.strip_prefix(
++            self.path.parent().expect(&quot;manifests have parents&quot;)
++        ).unwrap_or(&amp;max_path);
++        log::info!(&quot;max_path_stripped={:?}&quot;, max_path);
++        log::info!(&quot;self.path={:?}&quot;, self.path);
+         Ok(format!(&quot;{} ({})&quot;, max, max_path.display()))
+     }
+</code></pre></div>
+
+
+
+<a name="204230604"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204230604" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204230604">(Jul 17 2020 at 16:52)</a>:</h4>
+<p>maybe needs to be a workspace dep?</p>
+
+
+
+<a name="204230611"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204230611" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204230611">(Jul 17 2020 at 16:53)</a>:</h4>
+<p>yeah added workspace stuff</p>
+
+
+
+<a name="204230626"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204230626" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204230626">(Jul 17 2020 at 16:53)</a>:</h4>
+<p>I'm also using cargo build -p $(cargo pkgid)</p>
+
+
+
+<a name="204230852"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204230852" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204230852">(Jul 17 2020 at 16:55)</a>:</h4>
+<p>and there's the cp -pri as well</p>
+
+
+
+<a name="204231358"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204231358" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204231358">(Jul 17 2020 at 16:59)</a>:</h4>
+<p><span class="user-mention" data-user-id="116015">@Alex Crichton</span> and the rerun-if-changed won't work without this patch, right?</p>
+
+
+
+<a name="204231372"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204231372" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204231372">(Jul 17 2020 at 16:59)</a>:</h4>
+<p>or can I do that in the meantime?</p>
+
+
+
+<a name="204231373"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204231373" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204231373">(Jul 17 2020 at 16:59)</a>:</h4>
+<p>I think rerun-if-changed should work today</p>
+
+
+
+<a name="204231544"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204231544" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204231544">(Jul 17 2020 at 17:00)</a>:</h4>
+<p>bahaha</p>
+
+
+
+<a name="204231563"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204231563" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204231563">(Jul 17 2020 at 17:01)</a>:</h4>
+<p><code>last_modified_file</code> is <code>Cargo.toml</code></p>
+
+
+
+<a name="204231574"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204231574" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204231574">(Jul 17 2020 at 17:01)</a>:</h4>
+<p>that's why my tests aren't failing...</p>
+
+
+
+<a name="204231699"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204231699" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204231699">(Jul 17 2020 at 17:02)</a>:</h4>
+<p>okay yeah rerun-if-changed works fine today</p>
+
+
+
+<a name="204232415"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/246057-t-cargo/topic/perf.rlo%20cache%20busting/near/204232415" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/246057-t-cargo/topic/perf.2Erlo.20cache.20busting.html#204232415">(Jul 17 2020 at 17:08)</a>:</h4>
+<p><a href="https://github.com/rust-lang/cargo/pull/8497">https://github.com/rust-lang/cargo/pull/8497</a></p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

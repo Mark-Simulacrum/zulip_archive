@@ -1,0 +1,256 @@
+<html>
+<head><meta charset="utf-8"><title>offset_from in-bounds constraint? · t-lang · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/index.html">t-lang</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html">offset_from in-bounds constraint?</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="265914345"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/265914345" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#265914345">(Dec 23 2021 at 13:02)</a>:</h4>
+<p>Our <a href="https://doc.rust-lang.org/nightly/std/primitive.pointer.html#method.offset_from">offset_from</a> on pointers has the requirement that</p>
+<blockquote>
+<p>Both the starting and other pointer must be either in bounds or one byte past the end of the same allocated object.</p>
+</blockquote>
+<p>However, this unfortunately forbids code like this:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">start_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">end_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">start_ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">).</span><span class="n">wrapping_add</span><span class="p">(</span><span class="n">length</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">(</span><span class="n">end_ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">).</span><span class="n">offset_from</span><span class="p">(</span><span class="n">start_ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">const</span><span class="w"> </span><span class="kt">u8</span><span class="p">);</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>end_ptr and start_ptr point "to the same allocation" (in the sense that their provenance is for the same allocation), but end_ptr is not in-bounds of that allocation.<br>
+There is not really any good reason to forbid such code AFAIK -- the codegen implementation is certainly fine with this, and Miri actually forgets to check the in-bounds part of the condition...</p>
+<p>Also, this is actually a problem for code such as iterators that want to support ZST -- they usually use out-of-bounds ptrs like the above to represent the current state of the iterator, and so they cannot use offset_from to compute the size. "normal" code just casts to integer and does the subtraction there, but that is not an option for <code>const fn</code>. (that came up in <a href="https://github.com/slightlyoutofphase/staticvec/issues/48">this issue</a>.)</p>
+<p>So... I think it would make sense to remove the "in-bounds" part of the condition. both pointers still need to "point to the same allocation" in the sense that they have the same provenance, but out-of-bounds ptrs computed with wrapping_offset should be fine IMO.<br>
+Any thoughts?</p>
+
+
+
+<a name="265930448"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/265930448" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#265930448">(Dec 23 2021 at 16:16)</a>:</h4>
+<p>Are there any actual cases where in bounds or one byte past in documentation doesn't really just mean "same provenance"?</p>
+
+
+
+<a name="265930944"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/265930944" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#265930944">(Dec 23 2021 at 16:22)</a>:</h4>
+<p>slicing?</p>
+
+
+
+<a name="265931068"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/265931068" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#265931068">(Dec 23 2021 at 16:24)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="123586">nagisa</span> <a href="#narrow/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F/near/265930448">said</a>:</p>
+<blockquote>
+<p>Are there any actual cases where in bounds or one byte past in documentation doesn't really just mean "same provenance"?</p>
+</blockquote>
+<p>yes, <code>offset</code> (as opposed to <code>wrapping_offset</code>)</p>
+
+
+
+<a name="265964594"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/265964594" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#265964594">(Dec 24 2021 at 00:04)</a>:</h4>
+<p>...huh, how does runtime computation of an iterator position in a ZST array with greater than u16::MAX items work on a "usize is u16" platform?</p>
+
+
+
+<a name="265970420"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/265970420" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#265970420">(Dec 24 2021 at 02:06)</a>:</h4>
+<p>On a usize is u16 platform an array can't have more than u16::MAX elements? And it's not an issue yet because slice iterators aren't const and therefore can use pointer to integer casts.</p>
+
+
+
+<a name="265994478"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/265994478" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#265994478">(Dec 24 2021 at 11:00)</a>:</h4>
+<p>yeah, ZST arrays are limited to <code>usize::MAX</code> elements (on all platforms)</p>
+
+
+
+<a name="266033759"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266033759" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266033759">(Dec 25 2021 at 00:56)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="330154">The 8472</span> <a href="#narrow/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F/near/265970420">said</a>:</p>
+<blockquote>
+<p>On a usize is u16 platform an array can't have more than u16::MAX elements? And it's not an issue yet because slice iterators aren't const and therefore can use pointer to integer casts.</p>
+</blockquote>
+<p>oh right.</p>
+
+
+
+<a name="266056749"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266056749" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266056749">(Dec 25 2021 at 12:08)</a>:</h4>
+<p>So, I remember that there is no <code>wrapping_offset_from</code>, since the <code>wrapping_offset</code> operation is already a big footgun, and so it was deemed that having the callers go through the integer realm shenanigans was maybe more honest not to warrant the wrapping_offset_from operation.</p>
+<p>But if the integer shenanigans can't be used in a <code>const</code> context, then that reasoning does not apply anymore. I'd thus advocate for the addition of a <code>wrapping_offset_from</code> operation, rather than loosening <code>offset_from</code>, just for the sake of consistency / symmetry with with the <em>adding</em> variants</p>
+
+
+
+<a name="266059119"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266059119" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266059119">(Dec 25 2021 at 13:18)</a>:</h4>
+<p>OTOH, wrapping_offset_from and offset_from would generate the same code under all our current backends.<br>
+also unlike the <code>add</code> methods they would both be unsafe.</p>
+
+
+
+<a name="266059151"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266059151" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266059151">(Dec 25 2021 at 13:20)</a>:</h4>
+<p>the footgun argument IMO does not apply equally -- what makes wrapping_offset tricky is understanding what you can do with the resulting pointer, but this method here just returns an integer</p>
+
+
+
+<a name="266059192"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266059192" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266059192">(Dec 25 2021 at 13:21)</a>:</h4>
+<blockquote>
+<p>So, I remember that there is no wrapping_offset_from, since the wrapping_offset operation is already a big footgun, and so it was deemed that having the callers go through the integer realm shenanigans was maybe more honest not to warrant the wrapping_offset_from operation.</p>
+</blockquote>
+<p>I tried to reconstruct the history of this but found no such discussion.  the doc comment seemed to just require "in-bounds of the same allocation" from the beginning without much consideration of alternatives. back then this was still implemented in pure Rust via integer casts; it became an intrinsic later to add <code>const</code> support.</p>
+
+
+
+<a name="266072263"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266072263" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266072263">(Dec 25 2021 at 19:30)</a>:</h4>
+<p>Would this cause any problems with getelementpointer inbounds in LLVM?</p>
+
+
+
+<a name="266107288"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266107288" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266107288">(Dec 26 2021 at 12:20)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F/near/266059119">said</a>:</p>
+<blockquote>
+<p>also unlike the <code>add</code> methods they would both be unsafe.</p>
+</blockquote>
+<p>Oh, that's a good point, which breaks my "sake of consistency" argument. I withdraw my advocating for a <code>wrapping_offset_from</code> <em>for your intended use case</em>, since it can't be made non-<code>unsafe</code>.</p>
+<blockquote>
+<p>reconstruct the history</p>
+</blockquote>
+<p>Thanks to a post from <span class="user-mention" data-user-id="125270">@scottmcm</span> on URLO (<a href="https://users.rust-lang.org/t/what-is-the-difference-between-ptr-offset-and-ptr-wrapping-offset/68083/6?u=yandros">link</a>), I had stumbled upon <em>deprecate <code>wrapping_offset_from</code></em>, which you obviously know since you authored it <span aria-label="big smile" class="emoji emoji-1f604" role="img" title="big smile">:big_smile:</span>: <a href="https://github.com/rust-lang/rust/pull/73580">https://github.com/rust-lang/rust/pull/73580</a></p>
+<ul>
+<li>It links to <a href="https://github.com/rust-lang/rust/issues/41079#issuecomment-433140733">https://github.com/rust-lang/rust/issues/41079#issuecomment-433140733</a> (cc <span class="user-mention" data-user-id="143274">@Amanieu</span>)</li>
+</ul>
+
+
+
+<a name="266186186"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266186186" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266186186">(Dec 27 2021 at 16:43)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125294">Aaron Hill</span> <a href="#narrow/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F/near/266072263">said</a>:</p>
+<blockquote>
+<p>Would this cause any problems with getelementpointer inbounds in LLVM?</p>
+</blockquote>
+<p>no, this is not using GEP.<br>
+LLVM might get a <code>psub</code> operation some day to do pointer subtraction, and in the form that <a href="https://www.ralfj.de/research/twinsem/twinsem.pdf">we proposed</a> it would be the "wrapping" variant. I imagine if there is interest in an inbounds version of that we'd have <code>psub inbounds</code>, similar to GEP.</p>
+
+
+
+<a name="266186256"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266186256" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266186256">(Dec 27 2021 at 16:44)</a>:</h4>
+<p>yeah there used to be a safe <code>wrapping_offset_from</code> but it never got stabilized</p>
+
+
+
+<a name="266190682"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266190682" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266190682">(Dec 27 2021 at 17:41)</a>:</h4>
+<p>I'd note that lccc has a <code>sub</code> operation between pointers, that (necessarily, because constant evaluation can be aborted by it) has the same UB as C/++, and thus Rust's <code>.offset_from</code>. Without the inbounds constraint, it would need to be implemented via casts to integers.</p>
+
+
+
+<a name="266363360"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266363360" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266363360">(Dec 29 2021 at 17:32)</a>:</h4>
+<blockquote>
+<p>has the same UB as C/++</p>
+</blockquote>
+<p>C/C++ do not even allow creating out-of-bounds ptrs, so the question we are discussing here cannot arise there</p>
+
+
+
+<a name="266370470"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266370470" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266370470">(Dec 29 2021 at 19:06)</a>:</h4>
+<p>It does, actually. Dangling pointers are out-of-bounds.</p>
+
+
+
+<a name="266370509"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266370509" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266370509">(Dec 29 2021 at 19:06)</a>:</h4>
+<p>(and also, the two pointers can be mutually out-of-bounds of each other, which is UB for both pointer subtraction in C/++, and <code>offset_from</code>)</p>
+
+
+
+<a name="266373993"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266373993" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266373993">(Dec 29 2021 at 19:56)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="257758">Connor Horman</span> <a href="#narrow/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F/near/266370470">said</a>:</p>
+<blockquote>
+<p>It does, actually. Dangling pointers are out-of-bounds.</p>
+</blockquote>
+<p>and they are also indeterminate values ("lifetime end zapping"), so basically equivalent to uninit memory -- so that's not really helpful for this discussion either, I think? even comparing them for equality is UB (at least in C, I know less about C++)</p>
+
+
+
+<a name="266374015"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266374015" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266374015">(Dec 29 2021 at 19:57)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="257758">Connor Horman</span> <a href="#narrow/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F/near/266370509">said</a>:</p>
+<blockquote>
+<p>(and also, the two pointers can be mutually out-of-bounds of each other, which is UB for both pointer subtraction in C/++, and <code>offset_from</code>)</p>
+</blockquote>
+<p>yes and it would still be UB with my proposal. quoting from my OP here:</p>
+<blockquote>
+<p>both pointers still need to "point to the same allocation" in the sense that they have the same provenance</p>
+</blockquote>
+
+
+
+<a name="266374134"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266374134" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266374134">(Dec 29 2021 at 19:59)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F/near/266373993">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="257758">Connor Horman</span> <a href="#narrow/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F/near/266370470">said</a>:</p>
+<blockquote>
+<p>It does, actually. Dangling pointers are out-of-bounds.</p>
+</blockquote>
+<p>and they are also indeterminate values ("lifetime end zapping"), so basically equivalent to uninit memory -- so that's not really helpful for this discussion either, I think? even comparing them for equality is UB (at least in C, I know less about C++)</p>
+</blockquote>
+<p>Not exactly. Just indeterminate pointers. Still initialized values, but you can't do anything with them (other than destroy them).</p>
+
+
+
+<a name="266380422"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266380422" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266380422">(Dec 29 2021 at 21:30)</a>:</h4>
+<p>not sure how that is functionally different from an indeterminate value, but sure.^^<br>
+either way, the distinction between the current offset_from and the one I am proposing is not observable in C/C++.</p>
+
+
+
+<a name="266674968"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266674968" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266674968">(Jan 03 2022 at 11:13)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/issues/92512">https://github.com/rust-lang/rust/issues/92512</a> suggests that it stays UB to use oob pointers, but I don't see anything in the discussion here actually requiring this. Can someone explain why we need oob pointers to be UB?</p>
+
+
+
+<a name="266733609"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266733609" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266733609">(Jan 03 2022 at 20:33)</a>:</h4>
+<p>I was about to link to <a href="https://github.com/rust-lang/rust/issues/92512">https://github.com/rust-lang/rust/issues/92512</a> :)</p>
+
+
+
+<a name="266733669"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266733669" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266733669">(Jan 03 2022 at 20:34)</a>:</h4>
+<blockquote>
+<p>suggests that it stays UB to use oob pointers</p>
+</blockquote>
+<p>Not sure what you mean -- the issue says that <em>currently</em>, it is UB to use oob pointers.</p>
+
+
+
+<a name="266733705"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266733705" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266733705">(Jan 03 2022 at 20:34)</a>:</h4>
+<p>one way to fix the issue would be to allow oob pointers as long as they have the same provenance ("are derived from the same pointer")</p>
+
+
+
+<a name="266733757"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/offset_from%20in-bounds%20constraint%3F/near/266733757" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/offset_from.20in-bounds.20constraint.3F.html#266733757">(Jan 03 2022 at 20:35)</a>:</h4>
+<p>I dont know why the oob requirement is present; it existed already in the initial PR that added the method -- where the implementation used <code>as usize</code>. so from the start the implementation was a lot more permissive than the docs.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

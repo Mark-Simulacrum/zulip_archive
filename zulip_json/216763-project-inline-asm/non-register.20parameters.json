@@ -1,0 +1,140 @@
+[
+    {
+        "content": "<p>(Split out of previous thread, as its veering a long way off topic).  Consider the C</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">static</span> <span class=\"kr\">inline</span> <span class=\"kt\">void</span> <span class=\"nf\">write_flags</span><span class=\"p\">(</span><span class=\"kt\">unsigned</span> <span class=\"kt\">long</span> <span class=\"n\">flags</span><span class=\"p\">)</span>\n<span class=\"p\">{</span>\n    <span class=\"k\">asm</span> <span class=\"k\">volatile</span> <span class=\"p\">(</span><span class=\"s\">&quot;push %0; popf&quot;</span> <span class=\"o\">::</span> <span class=\"s\">&quot;rme&quot;</span> <span class=\"p\">(</span><span class=\"n\">flags</span><span class=\"p\">));</span>\n<span class=\"p\">}</span>\n</code></pre></div>\n\n\n<p>In this case, the push instruction can be encoded using a register, an immediate (but only in the i32 range), or a memory operand.  An immediate is already possible with the <code>const</code> notation, but I can't see a way of expressing \"register or immediate\".</p>\n<p>In general, LLVM is pretty good (in C at least) of avoiding register operands when possible.  It reduces register pressure in the surrounding code.</p>",
+        "id": 200411468,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591793624
+    },
+    {
+        "content": "<p>For memory operands in general, anything on the stack can be expressed with an rsp/rbp relative reference, which again reduces the register pressure required to use the asm block</p>",
+        "id": 200411805,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591793817
+    },
+    {
+        "content": "<p>and consider examples such as</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"k\">for</span> <span class=\"p\">(</span> <span class=\"n\">i</span> <span class=\"o\">=</span> <span class=\"mi\">0</span> <span class=\"p\">;</span> <span class=\"n\">i</span> <span class=\"o\">&lt;</span> <span class=\"n\">sz</span><span class=\"p\">;</span> <span class=\"n\">i</span> <span class=\"o\">+=</span> <span class=\"n\">cacheline_size</span> <span class=\"p\">)</span>\n    <span class=\"k\">asm</span> <span class=\"p\">(</span><span class=\"s\">&quot;clwb %0&quot;</span> <span class=\"o\">::</span> <span class=\"s\">&quot;m&quot;</span><span class=\"p\">(</span><span class=\"n\">ptr</span><span class=\"p\">[</span><span class=\"n\">i</span><span class=\"p\">]));</span>\n</code></pre></div>\n\n\n<p>which is optimised to <code>clwb (%rdi,%rax,1)</code> using the SIB form</p>",
+        "id": 200412159,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591793997
+    },
+    {
+        "content": "<p>I don't think in general it is interesting to say \"use this exact encoding form\".  If the programmer needs careful control over the encoding, they should write it in longhand so the results aren't ambiguous.  The common case is \"this can be in memory\", with the implication that the optimiser should pick the best option available.</p>",
+        "id": 200412660,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591794201
+    },
+    {
+        "content": "<p>This is actually much more complicated than it seems. Have a look at LLVM's <a href=\"https://llvm.org/docs/LangRef.html#supported-constraint-code-list\">constraint codes</a> and note how there are tons of different variants, e.g. \"I: An immediate integer between 0 and 31.\"</p>",
+        "id": 200456480,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591813514
+    },
+    {
+        "content": "<p>It's the same with memory addressing modes such as \"Q: A memory address operand with a base address and a 12-bit immediate unsigned displacement.\"</p>",
+        "id": 200456530,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591813545
+    },
+    {
+        "content": "<p>This is the main reason why memory constraints were excluded from the initial version of <code>asm!</code>, there's just too many different variants.</p>",
+        "id": 200456649,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591813593
+    },
+    {
+        "content": "<p>You've already got that problem with restricted integer ranges</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"n\">asm</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"s\">&quot;shrq ${nr}, {tmp:r}&quot;</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">     </span><span class=\"n\">tmp</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">out</span><span class=\"p\">(</span><span class=\"n\">reg</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"n\">_</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">     </span><span class=\"n\">nr</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"mi\">72</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">     </span><span class=\"n\">options</span><span class=\"p\">(</span><span class=\"n\">att_syntax</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>assembles fine, but doesn't do what you'd expect.  (I'm half surprised that LLVM doesn't complain about the ${nr} being outside of the legitimate range.)</p>",
+        "id": 200460289,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591815260
+    },
+    {
+        "content": "<p>Having thought about this some more, all immediate operands can be expressed as an integer typecast of 8/16/32/64 signed or unsigned, with the exception of an explicit SIB Scale, which must be in the range 0..3</p>",
+        "id": 200485139,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591827721
+    },
+    {
+        "content": "<p>the \"must be limited to 31/63\" constraints are for shifts such as the example above, but the encoding of the instruction is valid with a full 8 bits, hence the lack of complaint by LLVM until you change the number to be &gt;255</p>",
+        "id": 200485303,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591827805
+    },
+    {
+        "content": "<p>you can probably do everything necessary (optimisation wise) by supporting something such as <code>nr = in(reg, u8) foo</code> meaning \"either a register, or a byte immediate\".</p>",
+        "id": 200485512,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591827900
+    },
+    {
+        "content": "<p>That said, you probably want a general int constraint for the common case, where both signed 8 or 32 will do (or 16 with the data size prefix)</p>",
+        "id": 200485857,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591828094
+    },
+    {
+        "content": "<p>Have a look at the constraints on other architectures, not just x86. It can get very hairy.</p>",
+        "id": 200487404,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591829055
+    },
+    {
+        "content": "<p>j: An immediate integer between 0 and 65535 (valid for MOVW)<br>\nI: An immediate integer valid for a data-processing instruction.<br>\nJ: An immediate integer between -4095 and 4095.<br>\nK: An immediate integer whose bitwise inverse is valid for a data-processing instruction. (Can be used with template modifier “B” to print the inverted value).<br>\nL: An immediate integer whose negation is valid for a data-processing instruction. (Can be used with template modifier “n” to print the negated value).<br>\nM: A power of two or a integer between 0 and 32.</p>",
+        "id": 200487549,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591829160
+    },
+    {
+        "content": "<p>And that's just for ARM.</p>",
+        "id": 200487594,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591829167
+    },
+    {
+        "content": "<p>All of those problems already exist with the <code>const</code> keyword.  There is no protection from putting an inappropriate integer into the asm.<br>\nGiven this, is a single <code>in(reg, int)</code> with similarly no protections too hard to do?</p>",
+        "id": 200489235,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591830278
+    },
+    {
+        "content": "<p>Well the point of these restricted immediate classes is that you want to fall back to a regsiter if your immediate does not fit in that class.</p>",
+        "id": 200489465,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591830468
+    },
+    {
+        "content": "<p>There's actually a general RISC/CISC divide here.  Its not common to find instruction in RISC which can be encoded in multiple different ways like this, whereas it's the norm in x86.</p>",
+        "id": 200489517,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591830484
+    },
+    {
+        "content": "<p>Actually it's quite common, just look at the ADD instruction</p>",
+        "id": 200489542,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591830509
+    },
+    {
+        "content": "<p>You can do reg + reg or reg + immediate.</p>",
+        "id": 200489554,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591830518
+    },
+    {
+        "content": "<p>What you want in this case is \"try to encode the value as an immediate if it is a constant and fits the instruction's constraints, otherwise use a regsiter\"</p>",
+        "id": 200489582,
+        "sender_full_name": "Amanieu",
+        "timestamp": 1591830556
+    },
+    {
+        "content": "<p>hmm yes, and I suppose the only option is for the programmer to tell you want the real constraint is</p>",
+        "id": 200490087,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591830968
+    },
+    {
+        "content": "<p>not as if it's feasible to ask the backend</p>",
+        "id": 200490178,
+        "sender_full_name": "Andrew Cooper",
+        "timestamp": 1591831026
+    }
+]

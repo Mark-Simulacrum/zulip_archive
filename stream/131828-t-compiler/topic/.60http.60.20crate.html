@@ -1,0 +1,248 @@
+<html>
+<head><meta charset="utf-8"><title>`http` crate · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html">`http` crate</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="271209921"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271209921" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271209921">(Feb 08 2022 at 23:51)</a>:</h4>
+<p><span class="user-mention" data-user-id="118594">@Dylan MacKenzie (ecstatic-morse)</span> I'm looking at compile times of <code>http-0.2.6</code>. It's unusual, spending over 7% of its time doing <code>memcpy</code>. I have determined this is because in <code>iterate_to_fixpoint</code> for <code>MaybeUninitializedPlaces</code> analysis there is one huge function with over 14,000 basic blocks and a <code>Domain</code> bitset with a domain size of 44,564. Unsurprisingly, the bitset <a href="https://github.com/rust-lang/rust/blob/d3f300477b89e70dd42379ba53c0e8ff74e9c694/compiler/rustc_mir_dataflow/src/framework/engine.rs#L224">clone</a> done on the many iterations of the loop add up.</p>
+
+
+
+<a name="271210046"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271210046" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271210046">(Feb 08 2022 at 23:52)</a>:</h4>
+<p>It's good that this clone is already optimized <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>  But I'm wondering if there is scope for more</p>
+
+
+
+<a name="271210256"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271210256" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271210256">(Feb 08 2022 at 23:54)</a>:</h4>
+<p>I also appreciate that a function this extreme is a heavy lift in general</p>
+
+
+
+<a name="271211498"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271211498" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271211498">(Feb 09 2022 at 00:05)</a>:</h4>
+<p>Like, is there a domain-specific observation we can take advantage of, like if <code>state</code> doesn't change, or something</p>
+
+
+
+<a name="271211756"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271211756" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271211756">(Feb 09 2022 at 00:08)</a>:</h4>
+<p>Are the bitsets sparse? We use dense bitsets unconditionally in dataflow due to some API shortcomings that have <a href="https://github.com/rust-lang/rust/pull/88272#issuecomment-908549295">since been resolved</a>. The line you linked to initializes all the (dense) bitsets before the analysis even runs. This is what I would look into first.</p>
+<p>How are the results of that analysis used? Is it only inspected at a few points in the CFG? Are only a subset of the places checked? If it's the latter, we could add a filter to dataflow to only check "interesting" indices. If it's the former, we could experiment with computing it via graph reachability, as <code>borrowck</code> does for liveness. That has its own performance pitfalls of course.</p>
+
+
+
+<a name="271214864"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271214864" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271214864">(Feb 09 2022 at 00:39)</a>:</h4>
+<p>It's not sparse, alas. Maximum <code>count</code> is 29,727, there are a handful of occurrences with a <code>count</code> over 10,000, and dozens over 1,000</p>
+
+
+
+<a name="271215062"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271215062" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271215062">(Feb 09 2022 at 00:42)</a>:</h4>
+<p>And the vast majority have a count of over 8, which IIRC is the threshold for HybridBitSet to switch to a dense representation</p>
+
+
+
+<a name="271215485"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271215485" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271215485">(Feb 09 2022 at 00:44)</a>:</h4>
+<p>I have no idea about how the analysis results are used <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span>  This crate is definitely an outlier so I don't think we need to perform heroics if there aren't easy wins. The more I look at it, the more it seems like it's just a case of "it compiles slow because the function is really big"</p>
+
+
+
+<a name="271216044"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271216044" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271216044">(Feb 09 2022 at 00:50)</a>:</h4>
+<p>I'm not aware of any obvious micro-optimizations besides sparse bitsets and filtering uninteresting locals. I tried pretty hard to make everything as efficient as possible, though it's always possible that I've missed something. We compute <code>MaybeUninitialized</code> twice AFAIK for normal (non <code>const</code>) functions, once for drop elaboration and once for <code>borrowck</code>. There might be some way to cache the results in between, but the CFG changes pretty significantly between these two passes (in particular <code>FalseEdges</code> are removed), so I'm skeptical.</p>
+
+
+
+<a name="271216673"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271216673" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271216673">(Feb 09 2022 at 00:58)</a>:</h4>
+<p><code>borrowck</code> (really just checking for move errors) and drop elaboration shouldn't care about places that are <code>Copy</code>, although there might be some complications around things behind a shared reference. That would be an easily computable filter. Not sure how much it would help for <code>http</code>, and computing it plus remapping indices might waste time as well.</p>
+
+
+
+<a name="271216892"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271216892" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dylan MacKenzie (ecstatic-morse) <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271216892">(Feb 09 2022 at 01:01)</a>:</h4>
+<p>What's the name of the giant function in <code>http</code>?</p>
+
+
+
+<a name="271217512"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271217512" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271217512">(Feb 09 2022 at 01:09)</a>:</h4>
+<p>I don't know, can I access the fn name easily within iterate_to_fixpoint?</p>
+
+
+
+<a name="271218817"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271218817" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271218817">(Feb 09 2022 at 01:28)</a>:</h4>
+<p>Unsurprisingly, at peak memory usage, the 14k bitsets with 44k entries account for 32% of the heap</p>
+
+
+
+<a name="271219521"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271219521" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> simulacrum <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271219521">(Feb 09 2022 at 01:40)</a>:</h4>
+<p><span class="user-mention" data-user-id="120989">@nnethercote</span> do you have a sense of  the spread of the set bits? Would an interval set make some sense?</p>
+
+
+
+<a name="271221740"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271221740" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271221740">(Feb 09 2022 at 02:11)</a>:</h4>
+<p>I've only printed out the count of set bits so far, not their positions</p>
+
+
+
+<a name="271225047"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271225047" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271225047">(Feb 09 2022 at 03:09)</a>:</h4>
+<p>Oh, turns out <code>MaybeUninitialized</code> and <code>MaybeInitialized</code> are equally huge. And then <code>EverInitialized</code> is about 2/3 the size</p>
+
+
+
+<a name="271225208"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271225208" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271225208">(Feb 09 2022 at 03:11)</a>:</h4>
+<p>Oh, it might be possible to reuse the bitsets from MaybeInitializedPlaces in MaybeUninitializedPlaces</p>
+
+
+
+<a name="271225670"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271225670" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271225670">(Feb 09 2022 at 03:17)</a>:</h4>
+<p>which would help with the allocations, but not the memcpying</p>
+
+
+
+<a name="271226004"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271226004" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271226004">(Feb 09 2022 at 03:24)</a>:</h4>
+<p>All this stuff is used for borrowck</p>
+
+
+
+<a name="271228965"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271228965" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271228965">(Feb 09 2022 at 04:16)</a>:</h4>
+<p><span class="user-mention" data-user-id="116122">@simulacrum</span> I printed out some contents, they don't look amenable to intervals, lots of gaps</p>
+
+
+
+<a name="271228969"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271228969" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271228969">(Feb 09 2022 at 04:16)</a>:</h4>
+<p>This crate really is a worst case scenario for this code</p>
+
+
+
+<a name="271230427"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271230427" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271230427">(Feb 09 2022 at 04:46)</a>:</h4>
+<p>What <em>would</em> work is some kind of two-level BitSet structure, where you break the range up into, say, 1024 bit sequences, and if a 1024 bit sequence is all 0s or all 1s that gets an optimized representation. Because the set bits tend to be in not-quite-contiguous clusters. E.g. a bunch below a 100, and then a bunch in the 2000s, then a bunch in the 16000s, etc.</p>
+
+
+
+<a name="271231421"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271231421" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271231421">(Feb 09 2022 at 05:05)</a>:</h4>
+<p>Such a ClusterBitSet might also be able to replace the existing HybridBitSet...</p>
+
+
+
+<a name="271250106"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271250106" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271250106">(Feb 09 2022 at 09:33)</a>:</h4>
+<p>there are a few compressed bitmap structures that store sparse and dense chunks in such a way, roaring comes to mind</p>
+
+
+
+<a name="271254042"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271254042" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271254042">(Feb 09 2022 at 10:06)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="118594">Dylan MacKenzie (ecstatic-morse)</span> <a href="#narrow/stream/131828-t-compiler/topic/.60http.60.20crate/near/271216892">said</a>:</p>
+<blockquote>
+<p>What's the name of the giant function in <code>http</code>?</p>
+</blockquote>
+<p>eyeballing the CFG sizes, I'd say <a href="https://github.com/hyperium/http/blob/1179d6fa90fc6d680c718450b18f223cb0b25aeb/src/header/name.rs#L1062-L1519">parse_hdr</a></p>
+
+
+
+<a name="271353765"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271353765" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271353765">(Feb 09 2022 at 22:01)</a>:</h4>
+<p>Oh, I just skimmed over <a href="https://arxiv.org/pdf/1402.6407v4.pdf">https://arxiv.org/pdf/1402.6407v4.pdf</a>, Roaring has some similarities to what I proposed (a two-level scheme) but also some differences -- larger chunks, support for more-dense and less-dense chunks, is able to grow. I've started writing my own ClusterBitSet, I think I will continue that, it can be tailored more towards rustc's particular needs</p>
+
+
+
+<a name="271786243"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271786243" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271786243">(Feb 14 2022 at 05:29)</a>:</h4>
+<p><code>keccak</code> (in rustc-perf) is even more extreme than <code>http</code>. I rediscovered <a href="https://github.com/rust-lang/rust/issues/54208">#54208</a>, which was a big memory regression when NLL was introduced. (One of the very few notable perf regressions at all.)</p>
+
+
+
+<a name="271786304"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271786304" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271786304">(Feb 14 2022 at 05:31)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/issues/93984">#93984</a> has some draft heroics, with a new <code>ChunkedBitSet</code> type. It definitely reduces memory usage on <code>http</code> and <code>keccak</code> and few others that use very big bitsets, but the perf effects on other benchmarks aren't entirely neutral, so it's not an unambiguous win.</p>
+
+
+
+<a name="271786314"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271786314" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271786314">(Feb 14 2022 at 05:31)</a>:</h4>
+<p>I'm wondering if these bitsets really need to be this big.</p>
+
+
+
+<a name="271786465"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271786465" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271786465">(Feb 14 2022 at 05:35)</a>:</h4>
+<p>E.g. consider the <code>EverInitializedPlaces</code> analysis for <code>http</code></p>
+<ul>
+<li>There are 14,000 BBs in the function</li>
+<li>
+<p>The <code>domain_size</code> of the analysis domain bitset is 29,000</p>
+<ul>
+<li>There is one of these bitsets for every BB</li>
+<li>
+<p><code>domain_size</code> is equal to the number of <code>Init</code>s, i.e. points in the <br>
+   function that initialize an L-value.</p>
+</li>
+<li>
+<p>The number of <code>Init</code>s will correlate strongly with number of BBs</p>
+</li>
+<li>Therefore the size of these bitsets is quadratic-ish</li>
+</ul>
+</li>
+</ul>
+
+
+
+<a name="271786483"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271786483" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271786483">(Feb 14 2022 at 05:35)</a>:</h4>
+<p>For <code>keccak</code> the biggest function has bitsets with domain_size of 83328, and there are 26,000 BBs</p>
+
+
+
+<a name="271786559"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271786559" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271786559">(Feb 14 2022 at 05:37)</a>:</h4>
+<p>And the <code>MaybeInitializedPlaces</code>/<code>MaybeUninitializedPlaces</code> analyses have even bigger bitsets</p>
+
+
+
+<a name="271804557"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271804557" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271804557">(Feb 14 2022 at 09:56)</a>:</h4>
+<p>We should dump the access patterns on the bitsets on keccak and see if it would make sense to use a hashset at a certain point (no entry meaning <code>false</code>) by removing entries when the local is StorageDeaded</p>
+
+
+
+<a name="271810603"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271810603" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lqd <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271810603">(Feb 14 2022 at 10:54)</a>:</h4>
+<blockquote>
+<p>There is one of these bitsets for every BB</p>
+</blockquote>
+<p>This is surprising but maybe it’s what dylan was referring to above by them being eagerly allocated. The dataflow framework usually is able to reuse block state along BB-chains.</p>
+
+
+
+<a name="271884177"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/%60http%60%20crate/near/271884177" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nnethercote <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/.60http.60.20crate.html#271884177">(Feb 14 2022 at 20:30)</a>:</h4>
+<p>There is a <a href="https://github.com/rust-lang/rust/blob/d3f300477b89e70dd42379ba53c0e8ff74e9c694/compiler/rustc_mir_dataflow/src/framework/engine.rs#L221-L224"><code>state</code></a> variable that gets reused over and over, being <code>clone_from</code>'d on every iteration, which is a form of state reuse. Not sure if that's what you're referring to</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

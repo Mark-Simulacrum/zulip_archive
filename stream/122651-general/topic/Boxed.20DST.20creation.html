@@ -1,0 +1,335 @@
+<html>
+<head><meta charset="utf-8"><title>Boxed DST creation · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html">Boxed DST creation</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="209475154"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209475154" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ahmed Charles <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209475154">(Sep 09 2020 at 06:14)</a>:</h4>
+<p>Just curious if this is the intended way to create a boxed DST?</p>
+<div class="codehilite"><pre><span></span><code>#[repr(C)]
+#[derive(Debug)]
+struct S {
+    header: usize,
+    data: [u8],
+}
+
+impl S {
+    fn new(l: usize) -&gt; Box&lt;Self&gt; {
+        let (layout, offset) = std::alloc::Layout::new::&lt;usize&gt;()
+            .extend(std::alloc::Layout::array::&lt;u8&gt;(l).unwrap())
+            .unwrap();
+        unsafe {
+            let p: *mut u8 = std::alloc::alloc(dbg!(layout));
+            std::ptr::write(p.cast::&lt;usize&gt;(), l);
+            std::ptr::write_bytes(p.add(offset), 17, l);
+            let p: *mut [u8] = std::ptr::slice_from_raw_parts_mut(p, l);
+            Box::from_raw(p as *mut S)
+        }
+    }
+}
+
+fn main() {
+    let s = S::new(4);
+    println!(&quot;{:?}\n{:?}&quot;, std::alloc::Layout::for_value(&amp;*s), s);
+}
+</code></pre></div>
+
+
+<p>This prints:</p>
+<div class="codehilite"><pre><span></span><code>[foo.rs:14] layout = Layout {
+    size_: 12,
+    align_: 8,
+}
+Layout { size_: 16, align_: 8 }
+S { header: 4, data: [17, 17, 17, 17] }
+</code></pre></div>
+
+
+<p>Which makes me realize that the two layouts aren't the same and I'm not sure if that's problematic or not?</p>
+
+
+
+<a name="209536522"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209536522" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209536522">(Sep 09 2020 at 16:43)</a>:</h4>
+<p>Just <em>guessing</em> but I think the difference it boils down to alignment and packaging.</p>
+<p>I.e. S has a alignment of 8 so <code>for_value</code> treats it as having padding to have a multiple of 8 <strong>I geuss</strong>.</p>
+<p>But if you do <code>std::alloc::Layout::for_value(&amp;s.data)</code> you will see that the size is correctly encoded. And adding a bit more debugging we can also check and realize that the offset at which data starts is correct. So if I didn't overlook anything it's just the padding which can cause this "growth" in size.</p>
+<p>Furthermore if you do add the <code>#[repr(packed)]</code> attribute to <code>S </code> you will see that now the size is exactly what you expect (for S! we didn't add the equivalent of packed to the layout creation code) , except with align 1. </p>
+<p>While the alignment of usize doesn't need to be 8 as far as I know (I.e. I'm not sure at all) not align it to a multiple of it's size can lead to slower code on some platforms.</p>
+<p>Sadly this doesn't solve your question of weather or not it's save. As I don't know if the difference in padding can somehow load to latent undefined behavior in LLVM, it probably shouldn't but again I'm just guessing.</p>
+
+
+
+<a name="209536656"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209536656" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209536656">(Sep 09 2020 at 16:45)</a>:</h4>
+<p>From the docs of extend:</p>
+<blockquote>
+<p>Creates a layout describing the record for self followed by next, including any necessary padding to ensure that next will be properly aligned, but <em>no trailing padding</em>.</p>
+</blockquote>
+
+
+
+<a name="209537067"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209537067" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209537067">(Sep 09 2020 at 16:48)</a>:</h4>
+<p>Also from the docs:</p>
+<p>Add <code>let layout = layout.pad_to_align();</code> as a line above your unsafe block, then it all should work correct and be safe to use.</p>
+
+
+
+<a name="209537344"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209537344" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209537344">(Sep 09 2020 at 16:50)</a>:</h4>
+<p>Also note that there is a unstable  <code>extend_packed</code> for creating <code>#[repr(packed)]</code> what I did above was just to show that's most likely padding related and not safe at all (even if it somewhat works out for this simple case).</p>
+
+
+
+<a name="209580836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209580836" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Ahmed Charles <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209580836">(Sep 09 2020 at 23:24)</a>:</h4>
+<p>I'll probably try to use slice-dst, which at least means that any major issues with the approach can be found communally. :)</p>
+
+
+
+<a name="209764961"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209764961" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209764961">(Sep 11 2020 at 10:39)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="209646">Philipp Korber</span> <a href="#narrow/stream/122651-general/topic/Boxed.20DST.20creation/near/209536522">said</a>:</p>
+<blockquote>
+<p>While the alignment of usize doesn't need to be 8 as far as I know (I.e. I'm not sure at all) not align it to a multiple of it's size can lead to slower code on some platforms.</p>
+</blockquote>
+<p>everything in rust has to be aligned. unaligned loads/stores are UB unless you use <code>read_unaligned</code>/<code>write_unaligned</code>. also, unaligned references in rust are also UB<br>
+See: <a href="https://doc.rust-lang.org/beta/std/ptr/fn.read_unaligned.html#on-packed-structs">https://doc.rust-lang.org/beta/std/ptr/fn.read_unaligned.html#on-packed-structs</a></p>
+
+
+
+<a name="209765758"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209765758" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209765758">(Sep 11 2020 at 10:51)</a>:</h4>
+<p>Thanks very good to know.</p>
+
+
+
+<a name="209780766"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209780766" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209780766">(Sep 11 2020 at 13:31)</a>:</h4>
+<p>FWIW this is also true for C/C++, the whole "unaligned is just slower" is a myth. unaligned reads without specifying it somehow is 100% UB</p>
+
+
+
+<a name="209785928"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209785928" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209785928">(Sep 11 2020 at 14:17)</a>:</h4>
+<p>"unaligned is just slower" is fairly true for hardware, but compilers are still stuck with standards formed from the days when it was more hazardous and have carried the hazards with them</p>
+
+
+
+<a name="209786017"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209786017" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209786017">(Sep 11 2020 at 14:18)</a>:</h4>
+<p>IIRC, there are still arm platforms where unaligned reads are UB</p>
+
+
+
+<a name="209786110"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209786110" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209786110">(Sep 11 2020 at 14:18)</a>:</h4>
+<p>and I think x86 SIMD instructions have alignment requirements</p>
+
+
+
+<a name="209786162"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209786162" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209786162">(Sep 11 2020 at 14:18)</a>:</h4>
+<p>x86 will fault on unaligned accesses to regular variables too, if you set the #AC flag</p>
+
+
+
+<a name="209786346"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209786346" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209786346">(Sep 11 2020 at 14:20)</a>:</h4>
+<p>I wonder if there is something in the ABI standard that says don't set the AC flag because it's a giant footgun because no one knows it exists</p>
+
+
+
+<a name="209788035"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209788035" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Philipp Korber <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209788035">(Sep 11 2020 at 14:32)</a>:</h4>
+<p>For portability it's anyway better to make references to unaligned values UB, there will probably always be some platform where it's simple not supported or very limited in the way it can be used.  Through I did wonder if it will fault if you use <code>read_unaligned</code> while the AC flag is set.  It turns out no as <code>read_unaligned</code> reads the value as bytes into a aligned on-stack value and returns that so no unaligned read happens at all  ;=)</p>
+
+
+
+<a name="209788232"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209788232" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209788232">(Sep 11 2020 at 14:33)</a>:</h4>
+<p>...unless the compiler emits a multi-byte load anyways because it does not expect the #AC flag to be set</p>
+
+
+
+<a name="209794176"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209794176" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Braden Nelson <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209794176">(Sep 11 2020 at 15:19)</a>:</h4>
+<p>The compiler will 100% just emit unaligned loads anyways (I exploit this often enough, too.)</p>
+
+
+
+<a name="209816783"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209816783" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209816783">(Sep 11 2020 at 18:20)</a>:</h4>
+<p>You'll get major performance issues if you do atomic operations on unaligned values, and there are hardware features to detect and prevent that.</p>
+
+
+
+<a name="209816868"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209816868" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209816868">(Sep 11 2020 at 18:21)</a>:</h4>
+<p>Apart from that, though, #AC is pretty much verboten, and even partially repurposed in current hardware.</p>
+
+
+
+<a name="209816876"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209816876" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209816876">(Sep 11 2020 at 18:21)</a>:</h4>
+<p>wait, it's possible to do atomic operations on unaligned memory <span aria-label="eyes" class="emoji emoji-1f440" role="img" title="eyes">:eyes:</span></p>
+
+
+
+<a name="209816886"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209816886" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209816886">(Sep 11 2020 at 18:21)</a>:</h4>
+<p>how does that possibly work?</p>
+
+
+
+<a name="209816897"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209816897" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209816897">(Sep 11 2020 at 18:21)</a>:</h4>
+<p>Search for "split lock".</p>
+
+
+
+<a name="209816948"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209816948" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209816948">(Sep 11 2020 at 18:22)</a>:</h4>
+<p>The processor locks the memory bus.</p>
+
+
+
+<a name="209817025"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209817025" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209817025">(Sep 11 2020 at 18:22)</a>:</h4>
+<p><a href="https://lwn.net/Articles/790464/">https://lwn.net/Articles/790464/</a> looks interesting</p>
+
+
+
+<a name="209817026"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209817026" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209817026">(Sep 11 2020 at 18:22)</a>:</h4>
+<p>looks like <a href="https://lwn.net/Articles/790464/">https://lwn.net/Articles/790464/</a> explains it</p>
+
+
+
+<a name="209817027"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209817027" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209817027">(Sep 11 2020 at 18:22)</a>:</h4>
+<p>That's how <em>all</em> locked operations used to work, but then the processor gained more native support for handling aligned lock operations without having to lock the bus.</p>
+
+
+
+<a name="209817113"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209817113" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209817113">(Sep 11 2020 at 18:23)</a>:</h4>
+<blockquote>
+<p>Intel's choice was to lock the whole memory bus to solve the coherency problem; the processor locks the bus for the duration of the operation, meaning that no other CPUs or devices can access it. The split lock blocks not only the CPU performing the access, but also all others in the system. Configuring the bus-locking protocol itself also adds significant overhead to the system as a whole. </p>
+</blockquote>
+<p>oh oof</p>
+
+
+
+<a name="209817202"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209817202" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209817202">(Sep 11 2020 at 18:24)</a>:</h4>
+<p>not to be confused with Arm's Split-Lock architecture</p>
+
+
+
+<a name="209879398"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209879398" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209879398">(Sep 12 2020 at 12:26)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125294">Aaron Hill</span> <a href="#narrow/stream/122651-general/topic/Boxed.20DST.20creation/near/209786017">said</a>:</p>
+<blockquote>
+<p>IIRC, there are still arm platforms where unaligned reads are UB</p>
+</blockquote>
+<p>AFAIK hardware doesn't have any concept of "UB". it does reads/loads and operations exactly as specified. the UB comes from languages that give "better" promises than the hardware if you use them correctly.</p>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/122651-general/topic/Boxed.20DST.20creation/near/209785928">said</a>:</p>
+<blockquote>
+<p>"unaligned is just slower" is fairly true for hardware, but compilers are still stuck with standards formed from the days when it was more hazardous and have carried the hazards with them</p>
+</blockquote>
+<p>By hardware do you mean regular loads in x86? because in RISC-V unaligned load/store will cause a trap (abort).  also x86 SIMD can trap on unaligned access: <a href="https://play.rust-lang.org/?gist=bf9ead2f7d21c4392ce5ae276a91e28a">https://play.rust-lang.org/?gist=bf9ead2f7d21c4392ce5ae276a91e28a</a></p>
+
+
+
+<a name="209879496"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209879496" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209879496">(Sep 12 2020 at 12:29)</a>:</h4>
+<p>By "fairly true" I mean many architectures support this just fine. Almost every architecture has some unaligned load support and some explicit non-support</p>
+
+
+
+<a name="209879563"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209879563" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209879563">(Sep 12 2020 at 12:31)</a>:</h4>
+<p>Hardware specifications certainly have "UB"</p>
+
+
+
+<a name="209879582"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209879582" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209879582">(Sep 12 2020 at 12:31)</a>:</h4>
+<p>Of course if you try these operations something will happen, but they tend to be unstable with microarchitectural versions</p>
+
+
+
+<a name="209881805"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209881805" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209881805">(Sep 12 2020 at 13:35)</a>:</h4>
+<p>When claiming the alignment of a pointer is higher than the actual alignment, the compiler could do arbitrary bad things. In fact I think Ionce read an article where a wrong alignment claim caused an invalid result rather than a silently working or crashing even when targeting x86.</p>
+
+
+
+<a name="209881876"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209881876" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209881876">(Sep 12 2020 at 13:37)</a>:</h4>
+<p><span class="user-mention" data-user-id="133247">@bjorn3</span> Yep. that's why you should be <em>very</em> wary of language UB. you can't know how the compiler might use those assumptions</p>
+
+
+
+<a name="209882011"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209882011" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209882011">(Sep 12 2020 at 13:40)</a>:</h4>
+<p>Are you thinking of <a href="https://pzemtsov.github.io/2016/11/06/bug-story-alignment-on-x86.html">https://pzemtsov.github.io/2016/11/06/bug-story-alignment-on-x86.html</a> ?</p>
+
+
+
+<a name="209882092"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209882092" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209882092">(Sep 12 2020 at 13:42)</a>:</h4>
+<p>I don't think so.</p>
+
+
+
+<a name="209883692"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209883692" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209883692">(Sep 12 2020 at 14:29)</a>:</h4>
+<p><span class="user-mention" data-user-id="249222">@Elichai Turkel</span> ARM devices certainly <em>do not</em> simply "perform the access exactly as requested" when performing an unaligned access.</p>
+
+
+
+<a name="209883742"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209883742" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209883742">(Sep 12 2020 at 14:30)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="224471">Lokathor</span> <a href="#narrow/stream/122651-general/topic/Boxed.20DST.20creation/near/209883692">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="249222">Elichai Turkel</span> ARM devices certainly <em>do not</em> simply "perform the access exactly as requested" when performing an unaligned access.</p>
+</blockquote>
+<p>I only claimed they do some specified thing, not that they do the "expected thing". but I might be wrong</p>
+
+
+
+<a name="209883846"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209883846" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209883846">(Sep 12 2020 at 14:33)</a>:</h4>
+<p>They do <em>something</em> in the sense that they're a part of the universe, but not necessarily anything that you can reason about as a programmer. With Unspecified operations you can get quite strange results depending on the CPU. On some devices the temperature of the room the device is in can even be a factor.</p>
+
+
+
+<a name="209883891"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209883891" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209883891">(Sep 12 2020 at 14:34)</a>:</h4>
+<p>In these days of microcode-driven devices and ISAs that generalize over many very different chipsets, you are never actually beyond "language UB" concerns :^) Even software is hardware, even hardware is software.</p>
+
+
+
+<a name="209884249"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209884249" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209884249">(Sep 12 2020 at 14:45)</a>:</h4>
+<p>There are actually a fair number of operations on ARM that <strong>are</strong> specified to be "unaligned access tolerant", as far as I can tell, but ARM specifically notes which are tolerant and also notes that there is no guarantee the OS on top will let you get away with one... because they are not actually saying it's a good idea, they are saying "please don't, it slows everything down horribly, at best". And I would not generalize this safety net across all memory accesses on ARM.</p>
+
+
+
+<a name="209884688"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Boxed%20DST%20creation/near/209884688" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Boxed.20DST.20creation.html#209884688">(Sep 12 2020 at 14:58)</a>:</h4>
+<p>That's assuming you're using a newer ARM device at all. The older stuff just declares it UNSPECIFIED, all caps, and hopefully you don't go therr.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

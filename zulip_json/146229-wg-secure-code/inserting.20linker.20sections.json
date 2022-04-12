@@ -1,0 +1,488 @@
+[
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120823\">@DPC</span> Actually, there is one instance where I could use some tips.<br>\nI was looking into making a PoC implementation of <a href=\"https://github.com/rust-lang/rfcs/pull/2801\">https://github.com/rust-lang/rfcs/pull/2801</a> (embed list of dependencies and their versions in binaries compiled via Cargo) and the necessary building block seems to be an unstable rustc flag that embeds a given file in the compiled binary via platform-specific mechanisms (EFL section, Mach-O, PE...).<br>\nThe only sane way I've found to do that was via objcopy (part of binutils), not via the linker itself. It seems like doing this via linker scripts should be possible, but I know nothing about them and the closest linker script example I found to \"embed a file as a read-only section in the executable\" is very convoluted.<br>\nAny idea who might know more about the linking stage and could set me on the right path - i.e. either tell me to use objcopy or point me to linker script docs?</p>",
+        "id": 205427372,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596066943
+    },
+    {
+        "content": "<p>you could try creating a thread in #t-compiler/help</p>",
+        "id": 205427628,
+        "sender_full_name": "DPC",
+        "timestamp": 1596067191
+    },
+    {
+        "content": "<p>i may be wrong here but i think <code>@petrochenkov</code> generally deals with linking</p>",
+        "id": 205427718,
+        "sender_full_name": "DPC",
+        "timestamp": 1596067224
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"127617\">@Shnatsel</span> I think we can probably just emit a static in the codegen step (or earlier, even) that just has the right value and is marked as used</p>",
+        "id": 205428068,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596067463
+    },
+    {
+        "content": "<p>Would that not be sufficient? I guess some sort of LTO might remove it but maybe we can reference it in some way too</p>",
+        "id": 205428096,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596067483
+    },
+    {
+        "content": "<p>I used the static+used trick in my initial prototype (<a href=\"https://github.com/Shnatsel/rust-audit\">https://github.com/Shnatsel/rust-audit</a>) but that's a really ugly way to do that - I think it doesn't get its own section that way, and either way I have no control over the name of that section, so I had to use start/stop markers.<br>\nOnce I published that initial prototype, people pointed out that for ELF I could simply use objcopy, which is <em>way</em> cleaner:</p>\n<div class=\"codehilite\"><pre><span></span><code># Insert Cargo.lock into a new &#39;.dep-list&#39; section\nobjcopy --add-section .dep-list=Cargo.lock --set-section-flags .dep-list=noload,readonly mybinary mybinary.withdeps\n\n# Extract Cargo.lock\nobjcopy -O binary --set-section-flags .dep-list=alloc --only-section=.dep-list mybinary.withdeps Cargo.lock.extracted\n</code></pre></div>\n\n\n<p>The best part is that it allows easy recovery of the data and I don't have to invent my own start/stop markers. So this is essentially what I want to achieve, eventually for all major platforms.</p>",
+        "id": 205428493,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596067772
+    },
+    {
+        "content": "<p><code>#[link_section = \"blah\"]</code> should let you control the section, right?</p>",
+        "id": 205428630,
+        "sender_full_name": "Alex Gaynor",
+        "timestamp": 1596067886
+    },
+    {
+        "content": "<p>I admit I am completely clueless here. But if that's all it takes then I'd <em>love</em> to do it this way since it would not even require any modifications to rustc, I could implement this as a crate</p>",
+        "id": 205428720,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596067966
+    },
+    {
+        "content": "<p>Ah no, LTO would still remove it so I would need rustc to reference the static. But it's a step in the right direction.</p>",
+        "id": 205428749,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596067999
+    },
+    {
+        "content": "<p><code>#[used]</code> is a thing</p>",
+        "id": 205428757,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596068005
+    },
+    {
+        "content": "<p>though I have no idea how likely that is to still persist after LTO etc</p>",
+        "id": 205428773,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596068014
+    },
+    {
+        "content": "<p><code>#[used]</code> is not sufficient, tried that already in <a href=\"https://github.com/Shnatsel/rust-audit\">https://github.com/Shnatsel/rust-audit</a></p>",
+        "id": 205428777,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596068020
+    },
+    {
+        "content": "<p>I am surprised linkers remove symbols in non-standard sections</p>",
+        "id": 205428877,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596068101
+    },
+    {
+        "content": "<p>Ah, I haven't tried it with <em>non-standard section!</em> That's something I should check. Thanks for the tip!</p>",
+        "id": 205428921,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596068140
+    },
+    {
+        "content": "<p><code>#[link_section = \"blah\"]</code> did something! The section now exists! Reading it and printing it out gives me <del>a short bit of junk</del> 2.3 Mb file instead of the string I've put in, <del>so assume it puts a pointer to the data in there instead of the actual data.</del> Code used:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"cp\">#[link_section = </span><span class=\"s\">&quot;.dep-list&quot;</span><span class=\"cp\">]</span><span class=\"w\"></span>\n<span class=\"k\">static</span><span class=\"w\"> </span><span class=\"n\">AUDITABLE_VERSION_INFO</span>: <span class=\"kp\">&amp;</span><span class=\"nb\">&#39;static</span><span class=\"w\"> </span><span class=\"kt\">str</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">include_str</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">concat</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">env</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"s\">&quot;OUT_DIR&quot;</span><span class=\"p\">),</span><span class=\"w\"> </span><span class=\"s\">&quot;/Cargo.lock.annotated&quot;</span><span class=\"p\">));</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 205430070,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596069150
+    },
+    {
+        "content": "<p>I think that's true. You can probably test that hypothesis by doing <code>#[link_section = \".dep-list\"]  static AUDITABLE_VERSION_INFO: [u8; 10] = [something];</code> and if that gets the raw value, then the other thing is a ptr</p>",
+        "id": 205430156,
+        "sender_full_name": "Alex Gaynor",
+        "timestamp": 1596069246
+    },
+    {
+        "content": "<p>Hmm, no, something is off here. <code>#[link_section = \".dep-list\"] static AUDITABLE_VERSION_INFO: [u8; 10] = [1,2,3,4,5,6,7,8,9,10];</code> gives me a 187kb file as output if extracted with <code>objcopy -O binary --set-section-flags .dep-list=alloc --only-section=.dep-list mybinary.withdeps Cargo.lock.extracted</code></p>",
+        "id": 205430461,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596069590
+    },
+    {
+        "content": "<p>and I was wrong about the short bit of junk, the version with <code>include_str!</code> extracted via objcopy actually gives me a 2.3Mb file as the output</p>",
+        "id": 205430660,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596069718
+    },
+    {
+        "content": "<p>2.3Mb is bigger than the entire executable it was extracted from, which is 1.1Mb... weird</p>",
+        "id": 205430769,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596069805
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116122\">@simulacrum</span>  <code>#[used] #[link_section = \".dep-list\"] &amp;'static str</code> does not survive LTO</p>",
+        "id": 205430894,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596069955
+    },
+    {
+        "content": "<p>That is surprising! Maybe we're not sufficiently marking it as used or something</p>",
+        "id": 205430991,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596070070
+    },
+    {
+        "content": "<p>Yes, <code>#[used]</code> doesn't go far enough. The only thing that I could make reliably work is inserting a call to this in <code>fn main()</code>:</p>\n<div class=\"codehilite\"><pre><span></span><code><span class=\"cp\">#[inline(always)]</span><span class=\"w\"></span>\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">annotate_this_executable</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">test</span>::<span class=\"n\">black_box</span><span class=\"p\">(</span><span class=\"n\">AUDITABLE_VERSION_INFO</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n\n\n<p>where <code>AUDITABLE_VERSION_INFO</code> is the <code>&amp;'static str</code> I want to preserve</p>",
+        "id": 205431233,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596070327
+    },
+    {
+        "content": "<p>LTO is too good at its job</p>",
+        "id": 205431252,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596070351
+    },
+    {
+        "content": "<p>Ah! Got it! So this does indeed return 10 bytes: <code>#[link_section = \".dep-list\"] static AUDITABLE_VERSION_INFO: [u8; 10] = [1,2,3,4,5,6,7,8,9,10];</code><br>\nif extracted with <code>objcopy -O binary --only-section=.dep-list target/release/hello-auditable Cargo.lock.extracted</code><br>\nDoing this to a <code>&amp;'static str</code> returns 16 bytes<br>\nNow the question is, how do I embed the <code>&amp;'static str</code> as inline data instead of a pointer</p>",
+        "id": 205431466,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596070618
+    },
+    {
+        "content": "<p>Let me know if you figure it out! <a href=\"https://github.com/fishinabarrel/linux-kernel-module-rust/blob/master/src/lib.rs#L78-L81\">https://github.com/fishinabarrel/linux-kernel-module-rust/blob/master/src/lib.rs#L78-L81</a></p>",
+        "id": 205431694,
+        "sender_full_name": "Alex Gaynor",
+        "timestamp": 1596070883
+    },
+    {
+        "content": "<p>The naive version fails:</p>\n<div class=\"codehilite\"><pre><span></span><code>6 | static AUDITABLE_VERSION_INFO: str = include_str!(concat!(env!(&quot;OUT_DIR&quot;), &quot;/Cargo.lock.annotated&quot;));\n  |                                ^^^ doesn&#39;t have a size known at compile-time\n</code></pre></div>",
+        "id": 205431697,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596070889
+    },
+    {
+        "content": "<p><code>static FOO: [u8; include_bytes!(...).len()] = include_bytes!(...);</code> is the net thing I'd try, but I bet it doesn't work</p>",
+        "id": 205431759,
+        "sender_full_name": "Alex Gaynor",
+        "timestamp": 1596070942
+    },
+    {
+        "content": "<p>I think it worked... 285 bytes now</p>",
+        "id": 205431928,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596071180
+    },
+    {
+        "content": "<p>I CANNOT BELIEVE IT ACTUALLY WORKED</p>",
+        "id": 205431939,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596071201
+    },
+    {
+        "content": "<p>Typing nonsense is my specialty</p>",
+        "id": 205431945,
+        "sender_full_name": "Alex Gaynor",
+        "timestamp": 1596071215
+    },
+    {
+        "content": "<p>All hail const fn and const generics</p>",
+        "id": 205431946,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596071217
+    },
+    {
+        "content": "<p>This isn't const generics!</p>",
+        "id": 205431950,
+        "sender_full_name": "Alex Gaynor",
+        "timestamp": 1596071225
+    },
+    {
+        "content": "<p>It is const generics MVP so I could use <code>[u8; 285]</code></p>",
+        "id": 205431959,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596071246
+    },
+    {
+        "content": "<p>(deleted)</p>",
+        "id": 205431964,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596071257
+    },
+    {
+        "content": "<p><a href=\"https://github.com/Shnatsel/rust-audit\">https://github.com/Shnatsel/rust-audit</a> updated with <code>#[link_section = \".rust-audit-dep-list\"]</code> so it can also be extracted via <code>objcopy</code></p>",
+        "id": 205432569,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596072086
+    },
+    {
+        "content": "<p>And it even survives LTO without ugly hacks!</p>",
+        "id": 205432873,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596072523
+    },
+    {
+        "content": "<p>Wow. Thanks a lot! It's starting to look like <a href=\"https://github.com/rust-lang/rfcs/pull/2801\">https://github.com/rust-lang/rfcs/pull/2801</a> is going to be actually practical to implement as a crate now!</p>",
+        "id": 205433050,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596072780
+    },
+    {
+        "content": "<p>Oh gosh that <code>build.rs</code> <code>../../../..</code></p>",
+        "id": 205435114,
+        "sender_full_name": "Alex Gaynor",
+        "timestamp": 1596075230
+    },
+    {
+        "content": "<p>Is that bad?</p>",
+        "id": 205435197,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596075298
+    },
+    {
+        "content": "<p>Well, it relies on an assumption about where <code>OUT_DIR</code> is relative to the project, so if you use <code>CARGO_TARGET_DIR</code>, it'd break, right?</p>",
+        "id": 205435240,
+        "sender_full_name": "Alex Gaynor",
+        "timestamp": 1596075342
+    },
+    {
+        "content": "<p>Frankly I have no clue, this is a proof-of-concept implementation and I didn't actually look up the docs for the variables I used</p>",
+        "id": 205435301,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596075390
+    },
+    {
+        "content": "<p>I would however very much welcome input on it since I'm trying to turn it into a full-fledged implementation</p>",
+        "id": 205435317,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596075413
+    },
+    {
+        "content": "<p>If <code>OUT_DIR</code> can be set to an arbitrary location then the entire idea of using it to locate <code>Cargo.lock</code> is a bust, and I need some other approach...</p>",
+        "id": 205435407,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596075506
+    },
+    {
+        "content": "<p>Let's see if <code>CARGO_MANIFEST_DIR</code> does the job</p>",
+        "id": 205435524,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596075610
+    },
+    {
+        "content": "<p>Nope. The problem with <code>CARGO_MANIFEST_DIR</code> is that when accesses from <code>build.rs</code> it is set to the crate where <code>build.rs</code> is run; so users of the crate would have to modify their own <code>build.rs</code> for this to work</p>",
+        "id": 205435700,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596075874
+    },
+    {
+        "content": "<p>Which is not the end of the world, but I would prefer adding the dependency on <code>auditable</code> to be sufficient to get the executable annotated</p>",
+        "id": 205435735,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596075943
+    },
+    {
+        "content": "<p>Oh well, perhaps it is for the best - allows finer-grained control and all that</p>",
+        "id": 205435820,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596076064
+    },
+    {
+        "content": "<p>That is surprising! Maybe we're not sufficiently marking it as used or something</p>",
+        "id": 205464073,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596106134
+    },
+    {
+        "content": "<p>There is an open issue about <code>#[used]</code> not being sufficient in this case: <a href=\"https://github.com/rust-lang/rust/issues/47384\">https://github.com/rust-lang/rust/issues/47384</a></p>",
+        "id": 205469874,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596110959
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116122\">@simulacrum</span> so apparently <code>#[used]</code> not working properly is a known bug, and it's quite old: <a href=\"https://github.com/rust-lang/rust/issues/47384\">https://github.com/rust-lang/rust/issues/47384</a><br>\nUsing <code>#[link_section = \"foo\"]</code> doesn't preserve the static either.</p>",
+        "id": 205635485,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596225614
+    },
+    {
+        "content": "<p>/me is quite confused by linkers removing <em>unknown</em> data</p>",
+        "id": 205636282,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596226109
+    },
+    {
+        "content": "<p>that just seems crazy</p>",
+        "id": 205636287,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596226115
+    },
+    {
+        "content": "<p>I guess -- one other thing we could try -- is to attach the data as DWARF or something</p>",
+        "id": 205636310,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596226132
+    },
+    {
+        "content": "<p>but that is... questionable</p>",
+        "id": 205636319,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596226137
+    },
+    {
+        "content": "<p>maybe we can look at sources for gcc or something like that and figure out what conditions things are retained under</p>",
+        "id": 205637242,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596226733
+    },
+    {
+        "content": "<p>I suspect that because of that bug my<code>#[used]</code> static doesn't even reach the linker</p>",
+        "id": 205637998,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596227193
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"127617\">@Shnatsel</span> that bug feels fixable to me, but I've not touched that part of the compiler in a while</p>",
+        "id": 205639166,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1596227981
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"127617\">@Shnatsel</span> have you checked out <a href=\"https://github.com/lukaslueg/built\">https://github.com/lukaslueg/built</a> ?</p>",
+        "id": 205693132,
+        "sender_full_name": "Tony Arcieri",
+        "timestamp": 1596307076
+    },
+    {
+        "content": "<p>No, thanks for the pointer! I was also pointed to <a href=\"https://github.com/danielschemmel/build-info\">https://github.com/danielschemmel/build-info</a> yesterday</p>",
+        "id": 205696713,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596313221
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132721\">@Tony Arcieri</span> Also I think I've managed to build the JSON serialization/parsing in a separate crate and interoperate with <code>cargo-lock</code> via <code>From</code>/<code>TryInto</code>. <br>\nI see <code>checksum</code> field is optional, could you explain under what conditions it may be missing? In V1 format where it's stored in metadata, will it be copied into the struct or not?</p>",
+        "id": 205696790,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596313373
+    },
+    {
+        "content": "<p>I believe it should be but I’m not at a computer ATM</p>",
+        "id": 205697057,
+        "sender_full_name": "Tony Arcieri",
+        "timestamp": 1596313847
+    },
+    {
+        "content": "<p>the crate tries to provide a unified representation across the two formats</p>",
+        "id": 205697062,
+        "sender_full_name": "Tony Arcieri",
+        "timestamp": 1596313864
+    },
+    {
+        "content": "<p>Excellent</p>",
+        "id": 205697080,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596313899
+    },
+    {
+        "content": "<p>Initial JSON format convertible to/from Cargo.lock via <code>cargo-lock</code> crate: <a href=\"https://github.com/Shnatsel/rust-audit/tree/master/auditable-serde\">https://github.com/Shnatsel/rust-audit/tree/master/auditable-serde</a></p>",
+        "id": 205700498,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596320291
+    },
+    {
+        "content": "<p>I'll wire it up to <code>auditable</code> tomorrow so that it would embed this JSON we could later stabilize instead of unstable Cargo.lock</p>",
+        "id": 205702190,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596323701
+    },
+    {
+        "content": "<p>After that the only remaining piece is the cross-platform extractor of this data from the compiled binary, and waiting for 1.46 for loops in <code>const fn</code> to reach stable</p>",
+        "id": 205702243,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596323775
+    },
+    {
+        "content": "<p>Side effect of <code>auditable</code> development: <a href=\"https://github.com/Frommi/miniz_oxide/pull/88\">https://github.com/Frommi/miniz_oxide/pull/88</a><br>\n<code>Add support for limiting output size when decompressing to Vec</code></p>",
+        "id": 205849369,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596490119
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"132721\">@Tony Arcieri</span> I'm adding you as uploader for <code>auditable</code> crate to increase bus factor</p>",
+        "id": 205921833,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1596554970
+    },
+    {
+        "content": "<p>Speaking of <a href=\"https://github.com/rust-lang/rfcs/pull/2801\">https://github.com/rust-lang/rfcs/pull/2801</a> again:<br>\nCan anyone see a reason to embed package hash for packages that came from a registry? Hashes are not compressible and so bloat the info quite a bit (they make up &gt;80% of the data), plus I just can't come up with a use case for them</p>",
+        "id": 206408479,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1597001329
+    },
+    {
+        "content": "<p>I guess if the hashes are not included one has to trust the registry to be able to check that the package content is still what it used to be</p>",
+        "id": 206408932,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1597002128
+    },
+    {
+        "content": "<p>Yeah, but if your registry was compromised and you got a malicious package, the malicious package could lie about its hash because it literally has arbitrary code execution through <a href=\"http://build.rs\">build.rs</a></p>",
+        "id": 206409085,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1597002454
+    },
+    {
+        "content": "<p>Hashes are useful for Cargo.lock where it can reject a download with a the mismatch in the hash, but not in the compiled executable. Or at least the way I see it, I do want people to challenge this view</p>",
+        "id": 206409145,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1597002550
+    },
+    {
+        "content": "<p>A <a href=\"http://build.rs\">build.rs</a> script can also cause a different crate name to be embedded.</p>",
+        "id": 206411095,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1597006146
+    },
+    {
+        "content": "<p>Indeed. Once you have downloaded a malicious dependency, it can lie in arbitrary ways since it can execute arbitrary code and has write access to the resulting binary</p>",
+        "id": 206416797,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1597016292
+    },
+    {
+        "content": "<p>having the package hash at least makes that <a href=\"http://build.rs\">build.rs</a> script correlatable and auditable</p>",
+        "id": 206419541,
+        "sender_full_name": "Tony Arcieri",
+        "timestamp": 1597021158
+    },
+    {
+        "content": "<p>also ideally they could be better sandboxed</p>",
+        "id": 206419546,
+        "sender_full_name": "Tony Arcieri",
+        "timestamp": 1597021167
+    },
+    {
+        "content": "<p>Status update: I now have a full pipeline for embedding dependency info in compiled executable, including the dependency graph and dependency type (build/runtime), all below 1% of the executable size (or below 0.1% without the hashes).<br>\nThe extractor for this data in Rust is not yet public, I'm awaiting legal clearance, but it can be substituted with a shell one-liner. The rest is public at <a href=\"https://github.com/Shnatsel/rust-audit\">https://github.com/Shnatsel/rust-audit</a><br>\nBut the more I work on this, the more there is to do.</p>",
+        "id": 206525557,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1597102503
+    },
+    {
+        "content": "<p>Binary parser is now public: <a href=\"https://github.com/Shnatsel/binfarce\">https://github.com/Shnatsel/binfarce</a><br>\nNow that <code>binfarce</code> is public, I've added the extraction pipeline to <a href=\"https://github.com/Shnatsel/rust-audit\">https://github.com/Shnatsel/rust-audit</a> repo</p>",
+        "id": 206583654,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1597157000
+    },
+    {
+        "content": "<p>It should be fully functional for ELF</p>",
+        "id": 206583701,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1597157025
+    },
+    {
+        "content": "<p>The documentation is not up to date - I've had to change the interfaces a few times, I'd rather not waste a lot of effort documenting them before I freeze them</p>",
+        "id": 206589305,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1597159605
+    },
+    {
+        "content": "<p>The conversion to <code>cargo-lock</code> data structures is also implemented now</p>",
+        "id": 206618674,
+        "sender_full_name": "Shnatsel",
+        "timestamp": 1597173474
+    }
+]

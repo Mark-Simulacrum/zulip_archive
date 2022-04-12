@@ -1,0 +1,79 @@
+<html>
+<head><meta charset="utf-8"><title>some thinlto questions · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/some.20thinlto.20questions.html">some thinlto questions</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="229160527"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/some%20thinlto%20questions/near/229160527" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> andbleo <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/some.20thinlto.20questions.html#229160527">(Mar 07 2021 at 06:02)</a>:</h4>
+<p>I am trying to better understand ThinLTO and rust's use of it, but I haven't been able to find the answers I'm looking for on Google so here we are!</p>
+<ol>
+<li>My understanding is that ThinLTO runs many of the LLVM optimization passes at the link stage.  My testing seems to indicate that it does not do any optimizations within a module/CGU and instead only does optimizations across the modules/CGUs.  Is this correct?</li>
+<li>If ThinLTO does optimizations across modules, does this mean we can increase the codegen units on release builds to improve compile-time parallelism on high core count CPUs without taking a runtime performance hit?</li>
+<li>Does rustc have the ability to do incremental ThinLTO?  That is outlined here: <a href="https://clang.llvm.org/docs/ThinLTO.html#incremental">https://clang.llvm.org/docs/ThinLTO.html#incremental</a></li>
+</ol>
+<p>Thanks!</p>
+
+
+
+<a name="229203176"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/some%20thinlto%20questions/near/229203176" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eric Huss <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/some.20thinlto.20questions.html#229203176">(Mar 07 2021 at 17:21)</a>:</h4>
+<ol>
+<li>
+<p>Can you say more why it looks like you're not seeing the expected optimizations? My understanding is that the set of LLVM optimizations applied to a module are slightly different for ThinLTO, but shouldn't be substantially different. See <a href="https://github.com/rust-lang/rust/blob/66ec64ccf31883cd2c28d045912a76179c0c6ed2/compiler/rustc_codegen_llvm/src/back/lto.rs#L866-L876">lto.rs</a> for more details (the Rust side is usually pretty well commented).</p>
+</li>
+<li>
+<p>CGUs on release is already 16 <em>per crate</em>. I'm not sure how many cores you have, but you can always experiment with larger values if you have a lot (like if you have a 96 core CPU), but I suspect it won't get much more parallelism. As with most optimization settings, you may get surprising behavior (it may generate better or worse code with more CGUs), and there may be many bottlenecks that get in the way. You may also run into memory issues with too many threads at once.</p>
+</li>
+<li>
+<p>I believe that if you enable rustc's incremental support, it will do some caching of incremental ThinLTO for the local crate (see <a href="https://github.com/rust-lang/rust/issues/53673">#53673</a>), but not across crates. I'm not sure if it is possible to do more caching, or if there would be much benefit.</p>
+</li>
+</ol>
+
+
+
+<a name="229244275"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/some%20thinlto%20questions/near/229244275" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> andbleo <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/some.20thinlto.20questions.html#229244275">(Mar 08 2021 at 04:03)</a>:</h4>
+<ol>
+<li>I definitely do see optimizations being run during ThinLTO (-Z time-llvm-passes shows a LOT more passes being run on the final binary than in non-ThinLTO builds).  As I have thought about my reasoning for intramodule optimizations not happening, I now realize it didn't make any sense (sorry), so I won't rehash them here.  That being said, it would still be good to know if ThinLTO only optimizes across modules or if it also optimizes within modules.  If the latter, it might be possible to disable some of the non-ThinLTO pass manager optimizations since the ThinLTO pass manager will eventually run them, which could be a compile time improvement without any hit to runtime perf.</li>
+</ol>
+
+
+
+<a name="229246713"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/some%20thinlto%20questions/near/229246713" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/some.20thinlto.20questions.html#229246713">(Mar 08 2021 at 04:40)</a>:</h4>
+<p>I suspect you want to always do the definitely-worth-it transformations on all the CGUs before the ThinLTO step because then they can be run in parallel.  They may run again in ThinLTO, but ideally then they have to do the things that were exposed by the cross-unit availability, rather than <em>everything</em>.  Incremental probably wants the same -- if a CGU doesn't change, it's nicer to reuse the in-that-CGU optimizations rather than re-running them in ThinLTO every link.</p>
+
+
+
+<a name="229271233"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/some%20thinlto%20questions/near/229271233" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nikita Popov <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/some.20thinlto.20questions.html#229271233">(Mar 08 2021 at 09:39)</a>:</h4>
+<p><span class="user-mention" data-user-id="322305">@andbleo</span> ThinLTO (and LTO) has pre-link and post-link optimization pipelines, where the latter happen either after module merging (LTO) or cross import (ThinLTO). The pre-link phase is pretty similar to normal optimization, but drops passes at the end of pipeline like vectorization and full unrolling that would interfere with further optimization and cost modeling.</p>
+
+
+
+<a name="229336597"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/some%20thinlto%20questions/near/229336597" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/some.20thinlto.20questions.html#229336597">(Mar 08 2021 at 17:06)</a>:</h4>
+<p>For (3) I believe rustc, with incremental enabled, will do all the incrementality described with clang. If I ever test with a release build I always test it with incremental turned on to speed up codegen times.</p>
+
+
+
+<a name="229336730"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/some%20thinlto%20questions/near/229336730" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/some.20thinlto.20questions.html#229336730">(Mar 08 2021 at 17:07)</a>:</h4>
+<p>For 1/2, ThinLTO itself literally only does cross-module inlining. There's then a standard pass manager you run post-inlining. If you mean the term "ThinLTO" to cover the inlining and everything afterwards then, yes, it effectively enables cross-module optimizations (due to inlining).</p>
+
+
+
+<a name="229336861"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/some%20thinlto%20questions/near/229336861" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alex Crichton <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/some.20thinlto.20questions.html#229336861">(Mar 08 2021 at 17:08)</a>:</h4>
+<p>Ah and when I say "ThinLTO itself" I mean all the infrastructure we've implemented for ThinLTO minus the pass manager bits which at least from an integration perspective was less interesting.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

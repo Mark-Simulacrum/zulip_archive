@@ -1,0 +1,328 @@
+<html>
+<head><meta charset="utf-8"><title>Alternative to Async trait: AsyncDrop + ?Leak · wg-async · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/index.html">wg-async</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html">Alternative to Async trait: AsyncDrop + ?Leak</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="245527057"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/245527057" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#245527057">(Jul 10 2021 at 03:35)</a>:</h4>
+<p>I think it's possible to obtain the benefits of the proposed <code>Async</code> trait, without actually introducing a new trait. Only requirements are a good <code>AsyncDrop</code> design, and the <code>?Leak</code> auto trait.</p>
+<p><strong>How It Works</strong></p>
+<p>The key idea is that there is significant overlap with <code>Async</code>'s "must call poll until completion" and <code>AsyncDrop</code>'s "must call poll_drop until done". <code>AsyncDrop</code> is a mechanism for disposing of things asynchronously, which is applicable even if the "thing" is a <code>Future</code>. So, why not use <code>AsyncDrop</code> for everything, instead of building a parallel mechanism just for futures?</p>
+<p>Futures that must be async-canceled would implement AsyncDrop. When <code>poll_drop</code> is first called, the future interprets it as a cancel request, and initiates cancelation. Subsequent <code>poll_drop</code> calls continue doing the cancelation work.   Examples of such async cancels are: flush a file buffer, gracefully close a connection, stop an io-uring operation, stop a DMA transfer.</p>
+<p>Futures that are non-cancelable at all would also implement AsyncDrop, but its <code>poll_drop</code> just calls <code>poll</code> internally. When dropped, it just keeps working on its original work, and drop finishes when the original work finishes.</p>
+<p><strong>What about sync Drop?</strong></p>
+<p>This depends on how the final <code>AsyncDrop</code> design looks. We'll asume we have found a way to enforce that all things with <code>AsyncDrop</code> are async-dropped instead of sync-dropped.</p>
+<p><strong>What about leaking?</strong></p>
+<p>These non/async-cancellable futures are only really non/async-cancellable if Drop/AsyncDrop is guaranteed to run.</p>
+<p>Unfortunately in current Rust it's perfectly safe to "leak" objects: bring them out of scope without running Drop. Much has been <a href="https://cglab.ca/~abeinges/blah/everyone-poops/">written</a> <a href="https://gankra.github.io/blah/only-in-rust/#destructor-leaking---the-leakpocalypse">about</a> <a href="https://doc.rust-lang.org/nomicon/leaking.html">this</a>. I would even argue this is a <em>design mistake</em> in Rust. There are lots of nice things that we can't have due to leaking being safe:</p>
+<ul>
+<li>All the examples in the PPYP post and the nomicon. These have been "creatively" workarounded with the PPYP trick.</li>
+<li>Non-cancellable, async-cancellable futures, as seen here.</li>
+<li>io-uring operations with borrowed buffers. <a href="https://boats.gitlab.io/blog/post/io-uring/">post</a>. <a href="https://github.com/spacejam/rio#soundness-status">one project that gave up</a>.</li>
+<li>DMA operations with borrowed buffers. <a href="https://github.com/embassy-rs/embassy">embassy</a> has given up on this too, it asks users to not leak futures. <a href="#narrow/stream/187312-wg-async-foundations/topic/mem.3A.3Aforget.2C.20borrowed.20buffers.20and.20DMA">topic here</a></li>
+<li>The new "scope" API: scope drop must ensure Drop runs so child tasks are canceled, because they use data borrowed from the current task.</li>
+</ul>
+<p>It's time to put an end to this suffering. Let's fix the root issue.</p>
+<ul>
+<li>Introduce a new <code>Leak</code> auto trait. </li>
+<li>For backwards compatibility, all bounds require it by default, like <code>Sized</code>. To opt out, user has to do <code>where T: ?Leak</code>. Therefore all existing types implement <code>Leak</code>, all existing code continues to compile.</li>
+<li>Introduce a new <code>PhantomNoLeak</code> type that is not <code>Leak</code>. This is the only not-<code>Leak</code> type at launch.</li>
+<li>Define the safety contract for <code>!Leak</code> types as "drop MUST run before Self's lifetime ends".</li>
+<li>APIs that can violate this contract require <code>T: Leak</code>: 'mem::forget', 'Box::leak', 'Rc', 'Arc', 'MaybeUninit', 'ManuallyDrop'.</li>
+</ul>
+<p>Note that the contract is not "drop MUST run", it's "drop MUST run <em>before Self's lifetime ends</em>". Drop may still not run in cases like <code>process::exit</code> or <code>panic!()</code> with <code>panic=abort</code>. These cases are sound, since the entire process exits the "universe ends", so you could say "time stops" and Self's lifetime never ends. </p>
+<p><strong>Result</strong></p>
+<p>With this, we get noncancellable / async-cancellable futures without duplicating traits, and without an <code>unsafe fn poll()</code>. As a bonus, we get ergonomic io-uring and DMA, and the Scope API. All on top of the current <code>Future</code> trait.</p>
+<p>The only unknown is how to enforce async-droppable things are async-dropped. Hopefully we can work something out.</p>
+
+
+
+<a name="245878791"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/245878791" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#245878791">(Jul 13 2021 at 19:59)</a>:</h4>
+<p>Thanks-- I was planning on starting a kind of design doc on this spce</p>
+
+
+
+<a name="245878802"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/245878802" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#245878802">(Jul 13 2021 at 19:59)</a>:</h4>
+<p>enumerating the alternatives and so forth</p>
+
+
+
+<a name="245878814"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/245878814" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#245878814">(Jul 13 2021 at 19:59)</a>:</h4>
+<p>I'll try to read this and follow up on it</p>
+
+
+
+<a name="245878844"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/245878844" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#245878844">(Jul 13 2021 at 19:59)</a>:</h4>
+<p>that said, I do feel introducing <code>?Leak</code> (or any <code>?</code> trait) has a pretty big cost too, not to be underestimated.</p>
+
+
+
+<a name="246265947"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246265947" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246265947">(Jul 16 2021 at 19:10)</a>:</h4>
+<p>Crazy idea: maybe Leak could stop being a <code>?Trait</code> as an edition change?  </p>
+<p>Rust 2018: <code>Foo&lt;T&gt;</code>  implicitly means <code>where T: Sized + Leak</code>.<br>
+Rust 2021 <code>Foo&lt;T&gt;</code> implicitly means <code>where T: Sized</code>.</p>
+<p><code>Sized</code> has a valid reason to stay as a <code>?</code> trait forever: it's super common to want to store a T in a struct field or local variable. There's no such reason for <code>Leak</code>. Only code that needs <code>T: Leak</code> is code that wants to store the T in an Arc or similar, which is much rarer.</p>
+
+
+
+<a name="246266054"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246266054" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246266054">(Jul 16 2021 at 19:11)</a>:</h4>
+<p>This removes the need for it to be a <code>?Trait</code>, which is the main drawback of the <code>Leak</code> idea. I agree <code>?Trait</code>s suck</p>
+
+
+
+<a name="246278902"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246278902" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Kestrer <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246278902">(Jul 16 2021 at 21:04)</a>:</h4>
+<p>A very useful feature of this design would be that users don't have to make a trade-off between eager spawning and implicit scoping. With <code>unsafe fn poll</code>-based designs, completion is only guaranteed after the first poll, meaning scoped tasks can either be:</p>
+<ul>
+<li>Implicitly scoped, but spawned lazily to ensure that the future is actually polled after spawning (i.e. <code>async fn spawn&lt;F: Async&gt;(fut: F) -&gt; F::Output</code>)</li>
+<li>Explicitly (i.e. with <code>scope(async |scope| { ... })</code>) scoped, and spawned eagerly. But explicit scoping increases indentation.</li>
+</ul>
+<p>This design provides the best of both worlds, where <code>spawn</code> does not require any kind of explicit <code>scope</code> API, and can simply take in a future of any lifetime and immediately start running it.</p>
+
+
+
+<a name="246287751"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246287751" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246287751">(Jul 16 2021 at 22:24)</a>:</h4>
+<p>Quick newbie question: What does the <code>Leak</code> trait mean?</p>
+
+
+
+<a name="246287954"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246287954" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246287954">(Jul 16 2021 at 22:27)</a>:</h4>
+<p>currently in Rust it's perfectly safe to leak values (destroy them without calling Drop). The proposed Leak trait adds a way to "close" this hole: only Leak types would be safe to leak, so a type can declare it's <em>not</em> safe to leak by not implementing Leak.</p>
+
+
+
+<a name="246288063"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246288063" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246288063">(Jul 16 2021 at 22:28)</a>:</h4>
+<p>these links from the OP are a great read: <br>
+<a href="https://cglab.ca/~abeinges/blah/everyone-poops/">https://cglab.ca/~abeinges/blah/everyone-poops/</a><br>
+<a href="https://gankra.github.io/blah/only-in-rust/#destructor-leaking---the-leakpocalypse">https://gankra.github.io/blah/only-in-rust/#destructor-leaking---the-leakpocalypse</a><br>
+<a href="https://doc.rust-lang.org/nomicon/leaking.html">https://doc.rust-lang.org/nomicon/leaking.html</a></p>
+
+
+
+<a name="246291835"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246291835" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246291835">(Jul 16 2021 at 23:35)</a>:</h4>
+<p>Ah, thanks!</p>
+
+
+
+<a name="246292413"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246292413" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246292413">(Jul 16 2021 at 23:46)</a>:</h4>
+<p>I don't think the "lifetime" of a value is a well defined concept unless you do something afterward with the memory (like free it, or overwrite it with something unrelated). What is an example of a piece of code that requires the <code>Leak</code> bound for memory safety or correctness?</p>
+
+
+
+<a name="246292810"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246292810" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thales Fragoso <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246292810">(Jul 16 2021 at 23:54)</a>:</h4>
+<p><span class="user-mention" data-user-id="271719">@Mario Carneiro</span> do you mean require the type to be <code>!Leak</code> ?</p>
+
+
+
+<a name="246292826"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246292826" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246292826">(Jul 16 2021 at 23:54)</a>:</h4>
+<p>You can't require a negative bound</p>
+
+
+
+<a name="246292855"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246292855" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thales Fragoso <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246292855">(Jul 16 2021 at 23:55)</a>:</h4>
+<p>Sure, but I meant as a type that doesn't implement Leak</p>
+
+
+
+<a name="246292858"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246292858" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246292858">(Jul 16 2021 at 23:55)</a>:</h4>
+<p>The claim is that <code>Leak</code> gives more promises, so those promises have to be more than the <code>?Leak</code> baseline</p>
+
+
+
+<a name="246292988"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246292988" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246292988">(Jul 16 2021 at 23:57)</a>:</h4>
+<p>The closest thing I can think of is some kind of relationship between the scope-based static view of lifetimes and the dynamic extent of a piece of memory like this:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span>: <span class="nc">T</span><span class="w"> </span>:<span class="o">=</span><span class="w"> </span><span class="o">..</span><span class="p">.;</span><span class="w"></span>
+<span class="w">    </span><span class="n">do_stuff</span><span class="p">(</span><span class="n">x</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// If this line is executed, then `drop(x)` must have been called and completed</span>
+<span class="w">  </span><span class="n">do_more_stuff</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>But at the point indicated, <code>x</code> is not in scope so you can't even assert that</p>
+
+
+
+<a name="246293633"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246293633" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246293633">(Jul 17 2021 at 00:08)</a>:</h4>
+<p>Here's a simple example that you probably wouldn't call "leaking" that nevertheless fails the test:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">vec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="fm">vec!</span><span class="p">[];</span><span class="w"></span>
+<span class="w">  </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span>: <span class="nc">T</span><span class="w"> </span>:<span class="o">=</span><span class="w"> </span><span class="o">..</span><span class="p">.;</span><span class="w"></span>
+<span class="w">    </span><span class="n">vec</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">x</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// x is not dropped yet!</span>
+<span class="w">  </span><span class="n">do_more_stuff</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="246294049"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246294049" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thales Fragoso <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246294049">(Jul 17 2021 at 00:16)</a>:</h4>
+<p>I think the lifetime thing is w.r.t when a type borrow something, like <code>MyStruct&lt;'a&gt;</code>, the Leak would mean that the lifetime <code>'a</code> won't end before Drop</p>
+
+
+
+<a name="246294064"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246294064" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Thales Fragoso <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246294064">(Jul 17 2021 at 00:17)</a>:</h4>
+<p>So if you borrow a buffer, you're guaranteed that the borrow won't end until Drop gets called</p>
+
+
+
+<a name="246301984"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246301984" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246301984">(Jul 17 2021 at 03:39)</a>:</h4>
+<p><span class="user-mention" data-user-id="271719">@Mario Carneiro</span>: It doesn't make a difference for safe code, as the borrow checker enforces no UB can occur even when leaking. It enables currently impossible to make sound patterns of unsafe code.</p>
+<p>Examples where Leak is useful.</p>
+<ol>
+<li>Type A borrows type B and mucks with its internal state in a way that would create UB if that internal state was observed. with !Leak A can rely on Drop running before anyone else can observe B, so it can fix up the state on drop. Example: <code>Vec::drain</code> as detailed <a href="https://cglab.ca/~abeinges/blah/everyone-poops/">here</a>.</li>
+<li>Type that borrows data and unsafely creates something "globally" that uses the borrowed data, something that would normally be possible only for <code>'static</code> data. Examples: the old scoped thread API as detailed <a href="https://cglab.ca/~abeinges/blah/everyone-poops/">here</a>, the new proposed Async Scope API.</li>
+<li>Type that gives a pointer to borrowed data to some "external actor" that will read/write to it. The "external actor" should be stopped on drop, to stop it from using the pointer after the borrow has ended. Examples: futures that read/write to borrowed buffers using <a href="https://boats.gitlab.io/blog/post/io-uring/">io-uring</a>. Futures that read/write to borrowed buffers using <a href="https://en.wikipedia.org/wiki/Direct_memory_access">hardware DMA</a>, super common on embedded firmware.</li>
+</ol>
+<p>All of these use <code>unsafe</code>, but can be made sound if there's a way to enforce Drop runs. With today's Rust they're impossible to make sound.</p>
+
+
+
+<a name="246302098"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302098" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302098">(Jul 17 2021 at 03:43)</a>:</h4>
+<p>What I'm trying to get at is exactly what about <code>mem::forget</code> or <code>Arc</code> makes them not leak safe, and how exactly is that encoded in the types/traits. <em>Which</em> arc function requires a <code>Leak</code> bound?</p>
+
+
+
+<a name="246302153"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302153" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302153">(Jul 17 2021 at 03:45)</a>:</h4>
+<p>I'm on board with the basic idea but it's not clear to me how you can distinguish a type that leaks from one that doesn't, because leaking is a thing functions do, not types</p>
+
+
+
+<a name="246302184"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302184" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302184">(Jul 17 2021 at 03:45)</a>:</h4>
+<p>what's "leak safe or not" is the types. For example a <code>IoUringReadFuture&lt;'a&gt;</code>type wouldn't be leak safe, so it wouldn't implement <code>Leak</code>.</p>
+<p><code>mem::forget</code>, <code>Arc</code> are "things that can be used to leak values", therefore they'd require that <code>T: Leak</code>, so you may not <code>mem::forget</code> a <code>IoUringReadFuture&lt;'a&gt;</code>, for example.</p>
+
+
+
+<a name="246302244"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302244" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302244">(Jul 17 2021 at 03:46)</a>:</h4>
+<p><code>T</code> implementing <code>Leak</code> trait means it's OK to leak values of type <code>T</code>.</p>
+
+
+
+<a name="246302299"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302299" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302299">(Jul 17 2021 at 03:48)</a>:</h4>
+<p>if <code>T</code> doesn't implement <code>Leak</code> then its Drop must run before <code>T</code>'s lifetime ends.</p>
+<p>Types/functions generic over <code>T</code> that use unsafe internally must audit if they can uphold "all values of T will be dropped before their lifetime ends". If they do, great, they can accept <code>!Leak</code> types. If they don't, then they must require <code>T: Leak</code></p>
+
+
+
+<a name="246302306"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302306" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302306">(Jul 17 2021 at 03:49)</a>:</h4>
+<p>See that sentence doesn't make sense to me because a value's lifetime ends when it is dropped</p>
+
+
+
+<a name="246302364"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302364" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302364">(Jul 17 2021 at 03:51)</a>:</h4>
+<p>Types have lifetimes too, what matters here is the type's lifetime</p>
+
+
+
+<a name="246302372"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302372" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302372">(Jul 17 2021 at 03:51)</a>:</h4>
+<p>okay, so <code>Leak</code> bounds don't make sense unless the type has a lifetime argument. Maybe <code>Leak&lt;'a&gt;</code> itself should have a lifetime?</p>
+
+
+
+<a name="246302380"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302380" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302380">(Jul 17 2021 at 03:52)</a>:</h4>
+<p>for example:<br>
+lifetime of <code>Foo&lt;'a&gt;</code> is <code>'a</code><br>
+lifetime of <code>Foo&lt;'a, 'b&gt;</code> is <code>min('a, 'b)</code> (speaking loosely)<br>
+lifetime of <code>Foo</code> is <code>'static</code></p>
+
+
+
+<a name="246302453"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302453" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302453">(Jul 17 2021 at 03:53)</a>:</h4>
+<p><code>Leak</code> makes sense for types without lifetime argument: "Drop must be run before T's lifetime ends" + "T's lifetime is 'static" implies it's OK for T's Drop to never run, since the <code>'static</code> lifetime never ends</p>
+
+
+
+<a name="246302461"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302461" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302461">(Jul 17 2021 at 03:53)</a>:</h4>
+<p>so yes,  it's OK to leak <code>'static</code> things even if they're <code>!Leak</code></p>
+
+
+
+<a name="246302544"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302544" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302544">(Jul 17 2021 at 03:55)</a>:</h4>
+<p>I've been reading the rustbelt semantics for the past few hours to see if there is a way to formalize this. Part of the problem is that <code>drop</code> has a weird type signature: it's supposed to be returning the resources borrowed in the constructor but it is just <code>drop(&amp;mut T)</code> so you have to be in a valid state afterward (and one which is leak-safe, since the cleanup should be done at that point), which means that other functions can't assume that the value is necessarily in its "armed" state</p>
+
+
+
+<a name="246302545"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302545" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302545">(Jul 17 2021 at 03:55)</a>:</h4>
+<p>Not sure what you gain with <code>Leak&lt;'a&gt;</code></p>
+
+
+
+<a name="246302743"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246302743" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dario Nieuwenhuis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246302743">(Jul 17 2021 at 03:58)</a>:</h4>
+<p>yeah you could say it's OK to leak a <code>T</code> after <code>Drop</code> has run even if it's <code>!Leak</code></p>
+
+
+
+<a name="246307527"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246307527" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Kestrer <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246307527">(Jul 17 2021 at 06:05)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak/near/246302098">said</a>:</p>
+<blockquote>
+<p>What I'm trying to get at is exactly what about <code>mem::forget</code> or <code>Arc</code> makes them not leak safe, and how exactly is that encoded in the types/traits. <em>Which</em> arc function requires a <code>Leak</code> bound?</p>
+</blockquote>
+<p>I would say that it's <code>Arc::new</code> and <code>Arc::new_cyclic</code> that requires a <code>Leak</code> bound, because then there is a possibility of an <code>unsafe</code> <code>Arc::new_acyclic</code>/<code>Arc::new_unchecked</code> constructor.</p>
+
+
+
+<a name="246307579"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246307579" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Kestrer <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246307579">(Jul 17 2021 at 06:06)</a>:</h4>
+<p>And by the way this "defining leaking" problem occurs with _all_ the new async proposals; <code>Async</code> has to define it for the safety of <code>Async::poll</code>.</p>
+
+
+
+<a name="246309852"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246309852" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Kestrer <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246309852">(Jul 17 2021 at 07:05)</a>:</h4>
+<p>An important thing to consider: Does <code>Leak</code> leak in async blocks? Currently all auto-traits do, but it would be possible to add an exception for <code>Leak</code> if deemed necessary.</p>
+
+
+
+<a name="246310550"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Alternative%20to%20Async%20trait%3A%20AsyncDrop%20%2B%20%3FLeak/near/246310550" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak.html#246310550">(Jul 17 2021 at 07:22)</a>:</h4>
+<p>that doesn't seem much different from leaking <code>Send</code> and <code>Sync</code>, I don't see why it would need an exception</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

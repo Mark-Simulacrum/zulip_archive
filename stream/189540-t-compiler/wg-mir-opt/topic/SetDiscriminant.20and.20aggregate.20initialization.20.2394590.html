@@ -1,0 +1,1469 @@
+<html>
+<head><meta charset="utf-8"><title>SetDiscriminant and aggregate initialization #94590 · t-compiler/wg-mir-opt · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/index.html">t-compiler/wg-mir-opt</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html">SetDiscriminant and aggregate initialization #94590</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="274390252"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274390252" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274390252">(Mar 07 2022 at 13:24)</a>:</h4>
+<p>cc <span class="user-group-mention" data-user-group-id="1162">@WG-mir-opt</span> <span class="user-mention" data-user-id="310518">@Jake</span> </p>
+<p>I always thought <code>SetDiscriminant</code> was the thing that marked an enum as fully initialized (so requiring all fields to have been initialized before that). Under the same logic, I assumed that some day we'd use it to mark structs as initialized (and again, assuming all their fields had been initialized).</p>
+<p>This PR swaps this around, by requiring <code>SetDiscriminant</code> to be called first, but now we'll never know that the enum/struct is fully initialized without tracking  all fields somehow (and even then, without having put too much thought into it, I worry about <code>(i32, !)</code> types and how they behave under such a scheme).</p>
+<p>So, I would like to clarify our semantics here, as obviously (considering the PR) they were unclear. I'm not saying my mental model (init fields, then discrimiant) is the right one, but so far I have not been able to grok the (discriminant, then init fields) scheme.</p>
+
+
+
+<a name="274391001"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274391001" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274391001">(Mar 07 2022 at 13:30)</a>:</h4>
+<p>specifically</p>
+<blockquote>
+<p>Deaggregation of enums is now unambiguously non-lossy. Previously, deaggregation of enums would set both the fields and the discriminant - however, under some interpretations of the semantics of SetDiscriminant this would be lossy, since now possibly padding has to be preserved.</p>
+</blockquote>
+<p>How are they lossy at present? The <code>SetDiscriminant</code> statement only sets the tag field (if necessary at all, in case of no explicit tag field, this operation does nothing). This is also how miri handles discriminants, so I don't see how preserving padding is an issue here.</p>
+<p>Also from the PR:</p>
+<blockquote>
+<p>The MaybeLiveLocals analysis was previously somewhat broken in that it marked locals killed on SetDiscriminant, although this was obviously not true for any fields that had been set previously. This change makes that decision completely justified, without requiring any changes to the code.</p>
+</blockquote>
+<p>Does anything speak against fixing <code>MaybeLiveLocals</code>?</p>
+<blockquote>
+<p>In a future PR, we can start emitting SetDiscriminant for structs as well, with the same semantics. This will have the benefit of making deaggregation for structs also non-lossy.</p>
+</blockquote>
+<p>why can't we do this under today's model?</p>
+
+
+
+<a name="274436506"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274436506" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274436506">(Mar 07 2022 at 18:29)</a>:</h4>
+<p>So, just putting down my thoughts in rough order of the things mentioned above:</p>
+<ol>
+<li>"Is fully initialized" is, as far as I can tell, not that useful a concept for the main consumers of <code>SetDiscriminant</code> - probably this means I'm missing something. It seems like optimizations and codegen backends generally don't care if you fail to initialize your things - they'll just be happy about the potentially increased UB. (and MIRI is smarter about this anyway, although I forget if it sees deaggregation)</li>
+<li>Under the current semantics, I believe deaggregation is lossy for the following reason:</li>
+</ol>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">struct</span> <span class="nc">S</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">a</span>: <span class="kt">i16</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">b</span>: <span class="kt">i8</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">initialize</span><span class="p">();</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">initialize</span><span class="p">();</span><span class="w"></span>
+
+<span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">a</span>: <span class="nc">t</span><span class="p">.</span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="nc">t</span><span class="p">.</span><span class="n">b</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="c1">// ^ has different behavior from</span>
+<span class="n">s</span><span class="p">.</span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">a</span><span class="p">;</span><span class="w"></span>
+<span class="n">s</span><span class="p">.</span><span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">b</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<p>The difference is whether padding is overwritten or not. Deaggregation on structs essentially turns the first into the second. Going the other is way is an illegal optimization. Now, depending on the semantics of <code>SetDiscriminant</code>, we have the same problem for enums. <em>If</em> we were to choose "writes the minimum bytes to mark the discriminant of the enum in the layout", then we leave some padding bytes unwritten. For example, this makes the <code>SimplifyArmIdentity</code> pass (which basically does re-aggregation) fundamentally incorrect. This leaves us with what I believe is closest to the current semantics, which is "SetDiscriminant overwrites all non-field bytes of the variant." That allows emitting <code>SetDiscriminant</code> as a part of struct and enum deaggregation, while also allowing passes like <code>SimplifyArmIdentity</code>.</p>
+<ol start="3">
+<li>For <code>MaybeLiveLocals</code>, it's current behavior is to mark a place as killed when it sees <code>SetDiscriminant</code>. This has two potential issues: a) Even if all field assignments are present before the <code>SetDiscriminant</code>, it's clearly wrong-ish, since one could try to use this to DSE those field assignments. The comment in the pass before my PR notes exactly this, and basically just says "the things we currently use it for don't mind." b) <code>MaybeLiveLocals</code>does not actually <em>check</em> that all field assignments are present before the <code>SetDiscriminant</code> - right now that doesn't matter, because I don't think there are any optimizations that could cause this, but it certainly seems unfortunate. The fix for this would be to add such a check to <code>MaybeLiveLocals</code> - that is <em>possible</em>, but it's messy, and seems difficult to do in a <code>GenKillAnalysis</code>.</li>
+</ol>
+
+
+
+<a name="274445517"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274445517" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274445517">(Mar 07 2022 at 19:33)</a>:</h4>
+<blockquote>
+<p>The difference is whether padding is overwritten or not.</p>
+</blockquote>
+<p>Isn't it UB to observe padding bytes, and hence optimizations are free to go either way on this?</p>
+
+
+
+<a name="274445523"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274445523" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274445523">(Mar 07 2022 at 19:33)</a>:</h4>
+<p>I don't think we need to preserve padding in any way, not even in repr(C) structs.</p>
+
+
+
+<a name="274445608"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274445608" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274445608">(Mar 07 2022 at 19:34)</a>:</h4>
+<p>Great timing <span class="user-mention" data-user-id="271719">@Mario Carneiro</span></p>
+
+
+
+<a name="274445871"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274445871" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274445871">(Mar 07 2022 at 19:36)</a>:</h4>
+<p>Why can we use SetDiscriminant to DSE the preceding field assignments? It's essentially just an operation working on an unknown part of the place</p>
+
+
+
+<a name="274446128"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274446128" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274446128">(Mar 07 2022 at 19:38)</a>:</h4>
+<p>Miri works on deaggregated MIR for the most part. MIR with aggregate Rvalues only exists as an optimization, because deaggregating arrays can be a pain</p>
+
+
+
+<a name="274447837"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274447837" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274447837">(Mar 07 2022 at 19:51)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274445517">said</a>:</p>
+<blockquote>
+<blockquote>
+<p>The difference is whether padding is overwritten or not.</p>
+</blockquote>
+<p>Isn't it UB to observe padding bytes, and hence optimizations are free to go either way on this?</p>
+</blockquote>
+<p>Not if I explicitly write to them.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[repr(C)]</span><span class="w"></span>
+<span class="k">struct</span> <span class="nc">S</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">a</span>: <span class="kt">u16</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">b</span>: <span class="kt">u8</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">a</span>: <span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="mi">2</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">).</span><span class="n">wrapping_add</span><span class="p">(</span><span class="mi">3</span><span class="p">);</span><span class="w"></span>
+<span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="n">s</span><span class="p">.</span><span class="n">a</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span><span class="w"></span>
+<span class="n">s</span><span class="p">.</span><span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w"></span>
+<span class="fm">dbg!</span><span class="p">(</span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="p">});</span><span class="w"></span>
+</code></pre></div>
+<p>is DB and passes MIRI. In general, we have to assume during our optimizations that the user may have done this. Of course, because of struct deaggregation,</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[repr(C)]</span><span class="w"></span>
+<span class="k">struct</span> <span class="nc">S</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">a</span>: <span class="kt">u16</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">b</span>: <span class="kt">u8</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">a</span>: <span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="mi">2</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">).</span><span class="n">wrapping_add</span><span class="p">(</span><span class="mi">3</span><span class="p">);</span><span class="w"></span>
+<span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">a</span>: <span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="mi">4</span><span class="w"> </span><span class="p">};</span><span class="w"></span>
+<span class="kd">let</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">).</span><span class="n">wrapping_add</span><span class="p">(</span><span class="mi">3</span><span class="p">);</span><span class="w"></span>
+<span class="fm">dbg!</span><span class="p">(</span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">*</span><span class="n">p</span><span class="w"> </span><span class="p">});</span><span class="w"></span>
+</code></pre></div>
+<p>also passes MIRI. I think that is pretty clearly missed UB though (this is similar to, but not the same as, <a href="https://github.com/rust-lang/miri/issues/845">https://github.com/rust-lang/miri/issues/845</a>. cc <span class="user-mention" data-user-id="120791">@RalfJ</span> )</p>
+
+
+
+<a name="274447932"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274447932" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274447932">(Mar 07 2022 at 19:52)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274445871">said</a>:</p>
+<blockquote>
+<p>Why can we use SetDiscriminant to DSE the preceding field assignments? It's essentially just an operation working on an unknown part of the place</p>
+</blockquote>
+<p>Well, we can't right now. After my change we could</p>
+
+
+
+<a name="274449462"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274449462" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274449462">(Mar 07 2022 at 20:02)</a>:</h4>
+<blockquote>
+<p>I think that is pretty clearly missed UB though (this is similar to, but not the same as, <a href="https://github.com/rust-lang/miri/issues/845">https://github.com/rust-lang/miri/issues/845</a>. cc @RalfJ )</p>
+</blockquote>
+<p>I think it is the same?</p>
+
+
+
+<a name="274449533"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274449533" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274449533">(Mar 07 2022 at 20:03)</a>:</h4>
+<p>well I guess it's not even clear on the MIR any more what happens. we'd want to run Miri without deaggregation to have a chance to catch this.</p>
+
+
+
+<a name="274449669"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274449669" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274449669">(Mar 07 2022 at 20:04)</a>:</h4>
+<p>I don't think it is the same. Doing a full copy of the <code>S { a: 3, b: 4 }</code> rvalue would yield the UB. The problem is that after deaggregation, we no longer do a full copy but just a by-field copy</p>
+
+
+
+<a name="274449736"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274449736" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274449736">(Mar 07 2022 at 20:04)</a>:</h4>
+<p>right, so the after-deaggregation MIR actually has DB</p>
+
+
+
+<a name="274449749"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274449749" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274449749">(Mar 07 2022 at 20:04)</a>:</h4>
+<p>deaggregation as a pass removes UB</p>
+
+
+
+<a name="274449762"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274449762" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274449762">(Mar 07 2022 at 20:04)</a>:</h4>
+<p>which is legal but potentially undesirable</p>
+
+
+
+<a name="274449821"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274449821" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274449821">(Mar 07 2022 at 20:05)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274449533">said</a>:</p>
+<blockquote>
+<p>well I guess it's not even clear on the MIR any more what happens. we'd want to run Miri without deaggregation to have a chance to catch this.</p>
+</blockquote>
+<p>Yes, this would be one option. The other one would be emitting the <code>SetDiscriminant</code> (under the semantics I proposed) as part of deaggregation, which preserves the UB</p>
+
+
+
+<a name="274449845"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274449845" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274449845">(Mar 07 2022 at 20:05)</a>:</h4>
+<p>but a MIR transformation should be justified against MIR semantics, not "which kind of surface Rust might have generated this code", and on that level both examples have DB</p>
+
+
+
+<a name="274449993"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274449993" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274449993">(Mar 07 2022 at 20:06)</a>:</h4>
+<p>i.e. if we want MIR opts to exploit the UB in the 2nd program, those opts have to run pre-deaggregation. (or we find some way to preserve the UB.)</p>
+
+
+
+<a name="274450020"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274450020" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274450020">(Mar 07 2022 at 20:06)</a>:</h4>
+<p>Yep, fully agreed</p>
+
+
+
+<a name="274450269"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274450269" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274450269">(Mar 07 2022 at 20:09)</a>:</h4>
+<blockquote>
+<p>Initialize the place with the given variant and all fields uninit.</p>
+</blockquote>
+<p>no strong opinion on whether or not that's a better semantics, but if the PR makes that the semantics then it should also adjust <code>interpret</code> to implement that semantics</p>
+
+
+
+<a name="274454834"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274454834" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274454834">(Mar 07 2022 at 20:47)</a>:</h4>
+<p>I always assumed it would be legal to randomly inject  overwrites of padding bytes of locals. Indirect operations on some memory place are another story, but locals have types...</p>
+
+
+
+<a name="274456021"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274456021" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274456021">(Mar 07 2022 at 20:57)</a>:</h4>
+<p>I don't think that is the current status of things. I'm not sure if this has been discussed</p>
+
+
+
+<a name="274456327"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274456327" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274456327">(Mar 07 2022 at 20:59)</a>:</h4>
+<p>Well... any surface language discussion always said "you can't rely on padding being preserved", and is assumed "across assignments" wasn't the only thing</p>
+
+
+
+<a name="274456524"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274456524" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274456524">(Mar 07 2022 at 21:00)</a>:</h4>
+<p>Since we are allowed to do random things to the layout, you can't even know where the padding is, so idk how you could rely on it</p>
+
+
+
+<a name="274457067"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274457067" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274457067">(Mar 07 2022 at 21:04)</a>:</h4>
+<p>Now, I get the point that we avoid the UB in MIR by deaggregating, but why should <code>SetDiscriminant</code> now introduce new UB?</p>
+
+
+
+<a name="274457204"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274457204" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274457204">(Mar 07 2022 at 21:05)</a>:</h4>
+<p>Can't it essentially be a field assignment to a field you can't name and possibly doesn't actually assign anything without extra semantics?</p>
+
+
+
+<a name="274457283"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274457283" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274457283">(Mar 07 2022 at 21:06)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274456524">said</a>:</p>
+<blockquote>
+<p>Since we are allowed to do random things to the layout, you can't even know where the padding is, so idk how you could rely on it</p>
+</blockquote>
+<p>Well, you can always compute struct layouts at runtime. But you can also do things like</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">x</span>: <span class="nc">T</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Default</span>::<span class="n">default</span><span class="p">();</span><span class="w"></span>
+<span class="c1">// write `[0; size_of::&lt;T&gt;]` to `x`</span>
+<span class="n">x</span><span class="p">.</span><span class="n">int_field</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="c1">// read `x` as `[u8; size_of::&lt;T&gt;]`</span>
+</code></pre></div>
+<p>In general though, I think this is just a logical consequence of not having typed memory</p>
+
+
+
+<a name="274457380"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274457380" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274457380">(Mar 07 2022 at 21:06)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274457067">said</a>:</p>
+<blockquote>
+<p>Now, I get the point that we avoid the UB in MIR by deaggregating, but why should <code>SetDiscriminant</code> now introduce new UB?</p>
+</blockquote>
+<p>I don't quite follow; what makes you say this introduces new UB?</p>
+
+
+
+<a name="274457652"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274457652" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274457652">(Mar 07 2022 at 21:08)</a>:</h4>
+<p>We could then DSE preceding field assignments, even though SetDiscriminant (at least in miri right now, and in how I see it) is just a field assignment at best, a no-op in case of single variant adts or niches</p>
+
+
+
+<a name="274457858"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274457858" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274457858">(Mar 07 2022 at 21:10)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274457204">said</a>:</p>
+<blockquote>
+<p>Can't it essentially be a field assignment to a field you can't name and possibly doesn't actually assign anything without extra semantics?</p>
+</blockquote>
+<p>This is one of the options I mentioned above. The problem is that this makes the <code>SimplifyArmIdentity</code>, which turns</p>
+<div class="codehilite"><pre><span></span><code>(P as Some).0 = (Q as Some).0;
+SetDiscriminant(P) = Some;
+</code></pre></div>
+<p>into</p>
+<div class="codehilite"><pre><span></span><code>P = Q;
+</code></pre></div>
+<p>incorrect, since now we overwrite padding bytes. Even if we add in extra rules for locals, this still does not recover the case where <code>P.is_indirect()</code></p>
+
+
+
+<a name="274458042"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274458042" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274458042">(Mar 07 2022 at 21:11)</a>:</h4>
+<p>But why do typed operations have to care about padding? I get that memory is untyped, but especially SetDiscriminant is typed</p>
+
+
+
+<a name="274458348"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274458348" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274458348">(Mar 07 2022 at 21:13)</a>:</h4>
+<p>Typed for what place though? If there may exist bytes in <code>T</code> that are not within <code>SetDiscriminant</code> or a field, then there can still be padding left. If we require that all bytes that are not in fields are within the discriminant, then I think we're back to the alternative I proposed at the beginning of this topic</p>
+
+
+
+<a name="274458585"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274458585" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274458585">(Mar 07 2022 at 21:15)</a>:</h4>
+<p>This still means we have to complicate <code>MaybeLiveLocals</code> to check that all fields are assigned before marking the place as killed. In other words, although</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="p">(</span><span class="n">P</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nb">Some</span><span class="p">).</span><span class="mi">0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Rvalue</span><span class="p">;</span><span class="w"></span>
+<span class="n">SetDiscriminant</span><span class="p">(</span><span class="n">P</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Some</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<p>as a <em>whole</em> kills <code>P</code>, neither statement does on its own</p>
+
+
+
+<a name="274459303"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274459303" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274459303">(Mar 07 2022 at 21:19)</a>:</h4>
+<p>Essentially, I think there are three options for which bytes <code>SetDiscriminant</code> writes to:</p>
+<ol>
+<li>All of them. This is my proposal.</li>
+<li>All that aren't within a field. I think this is technically ok, but more complicated (for example in <code>MaybeLiveLocals</code>)</li>
+<li>The bare minimum, whatever that is for the layout. This means padding bytes are preserved (this is what const eval seems to currently implement)</li>
+</ol>
+
+
+
+<a name="274459669"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274459669" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274459669">(Mar 07 2022 at 21:22)</a>:</h4>
+<p>Hmm... I like the simplicity of 1., but it does mean we'll never know when a place is fully initialized. I remember that being important somehow.</p>
+
+
+
+<a name="274459996"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274459996" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274459996">(Mar 07 2022 at 21:24)</a>:</h4>
+<p>Yeah, I would love to know when this matters. I can't think of an example, but if it exists it definitely seems like a concern</p>
+
+
+
+<a name="274460151"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274460151" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274460151">(Mar 07 2022 at 21:25)</a>:</h4>
+<p>Like, such a thing definitely matters for static analysis, but that isn't relevant for us as far as I can tell, because <code>SetDiscriminant</code> isn't around then</p>
+
+
+
+<a name="274461375"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274461375" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274461375">(Mar 07 2022 at 21:35)</a>:</h4>
+<p>cc <span class="user-mention" data-user-id="119009">@eddyb</span> I'm hoping your long term memory didn't just throw out the old info like mine did</p>
+
+
+
+<a name="274471589"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274471589" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274471589">(Mar 07 2022 at 23:01)</a>:</h4>
+<p>Initialization checking is MIR-level flow-sensitive these days, right?  I'd be nice if that could one day grow to be compatible with field-level writes.</p>
+<p>(It's a pretty common confusion, AFAIK, that you can move out of a field but not then initialize it again.)</p>
+
+
+
+<a name="274474907"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274474907" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274474907">(Mar 07 2022 at 23:38)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125270">scottmcm</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274471589">said</a>:</p>
+<blockquote>
+<p>Initialization checking is MIR-level flow-sensitive these days, right?  I'd be nice if that could one day grow to be compatible with field-level writes.</p>
+<p>(It's a pretty common confusion, AFAIK, that you can move out of a field but not then initialize it again.)</p>
+</blockquote>
+<p>Do you have a quick example to show what you mean? In any case, I don't think it's affected. Borrowck and friends run well before <code>SetDiscriminant</code> is legal in MIR</p>
+
+
+
+<a name="274475150"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274475150" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274475150">(Mar 07 2022 at 23:41)</a>:</h4>
+<p>That reminds me actually; needing to be able to identify initalized-ness post-deaggregation seems to be a bit of a dangerous road to go down in any case. Even if the user wrote</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">a</span>: <span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="mi">2</span><span class="p">};</span><span class="w"></span>
+<span class="fm">dbg!</span><span class="p">(</span><span class="n">x</span><span class="p">.</span><span class="n">a</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+<p>an optimization might come along and remove the dead store to <code>x.b</code>, while the <code>SetDiscriminant</code> stays. Anything that depends on the <code>SetDiscriminant</code> to indicate initialized-ness would need to deal with that (or we would have to restrict such optimizations to run after wherever this is needed)</p>
+
+
+
+<a name="274475633"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274475633" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274475633">(Mar 07 2022 at 23:47)</a>:</h4>
+<p>That optimization sounds pretty sketchy. The <code>SetDiscriminant</code> operation could be depending on all the fields being initialized, and if not it might end up smearing that undefinedness over the other bytes, which would have an observable effect.</p>
+
+
+
+<a name="274475761"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274475761" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274475761">(Mar 07 2022 at 23:48)</a>:</h4>
+<p>I think an optimization like that should be required to remove the <code>SetDiscriminant</code> as well, in order to indicate that the struct/enum is only piecewise initialized</p>
+
+
+
+<a name="274475844"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274475844" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274475844">(Mar 07 2022 at 23:50)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274475633">said</a>:</p>
+<blockquote>
+<p>That optimization sounds pretty sketchy. The <code>SetDiscriminant</code> operation could be depending on all the fields being initialized, and if not it might end up smearing that undefinedness over the other bytes, which would have an observable effect.</p>
+</blockquote>
+<p>Hm, I would be very concerned if <code>SetDiscriminant</code> did any reading whatsoever</p>
+
+
+
+<a name="274475940"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274475940" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274475940">(Mar 07 2022 at 23:50)</a>:</h4>
+<p>Not sure why you have that intuition; encoding complex niches could certainly require reading</p>
+
+
+
+<a name="274475987"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274475987" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274475987">(Mar 07 2022 at 23:51)</a>:</h4>
+<p>Can you give an example?</p>
+
+
+
+<a name="274476160"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274476160" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274476160">(Mar 07 2022 at 23:53)</a>:</h4>
+<p>It's a contrived example, but let's say that the enum is a <code>[u8; 2]</code> layout and it has two variants, with the first variant being <code>[x, x]</code> and the second variant <code>[x, y]</code> where <code>x != y</code>. Then <code>SetDiscriminant(x) = 0</code> would copy the first byte to the second</p>
+
+
+
+<a name="274476346"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274476346" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274476346">(Mar 07 2022 at 23:55)</a>:</h4>
+<p>(Obviously rustc doesn't do any niche encoding nearly as complex as this at the moment, but AFAIK it would be legal to do so)</p>
+
+
+
+<a name="274476560"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274476560" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274476560">(Mar 07 2022 at 23:57)</a>:</h4>
+<p>The point is that a discriminant is a property of <em>all</em> the bytes, it is not localized to any subpart of the layout in general. So <code>SetDiscriminant</code> on a type with uninitialized fields is not a safe operation to do</p>
+
+
+
+<a name="274476745"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274476745" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274476745">(Mar 07 2022 at 23:59)</a>:</h4>
+<p>What sort of type does this correspond to? The closest thing I can think of is</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">enum</span> <span class="nc">E</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">A</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">x</span>: <span class="kt">u8</span> <span class="p">},</span><span class="w"> </span><span class="c1">// laid out as `[x, x]`</span>
+<span class="w">    </span><span class="n">B</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">y</span>: <span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="n">z</span>: <span class="kt">u8</span> <span class="p">},</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="n">assert</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">z</span><span class="p">,</span><span class="w"> </span><span class="c1">// laid out as `[y, z]`</span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>But even then, this is not a legal layout because you need to be able to get a <code>&amp;mut u8</code> pointing to <code>x</code>. And even if we ignore that, you don't need <code>SetDiscriminant</code> do to a read because setting the <code>x</code> field should set both bytes</p>
+
+
+
+<a name="274476831"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274476831" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274476831">(Mar 08 2022 at 00:00)</a>:</h4>
+<p>Yes, the type is <code>enum E { A(u8), B(U16ButWithDifferentBytes) }</code></p>
+
+
+
+<a name="274476960"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274476960" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274476960">(Mar 08 2022 at 00:00)</a>:</h4>
+<p>in a magical future rustc that noticed that <code>U16ButWithDifferentBytes</code> has exactly 256 niches in the right places to apply this niche optimization</p>
+
+
+
+<a name="274477031"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477031" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477031">(Mar 08 2022 at 00:01)</a>:</h4>
+<p>In "pre-initialized variant A" state, the layout is <code>[x, uninit]</code> where <code>x</code> is a valid <code>u8</code></p>
+
+
+
+<a name="274477078"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477078" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477078">(Mar 08 2022 at 00:01)</a>:</h4>
+<p>and in "pre-initialized variant B" state the layout is <code>[x, y]</code> where <code>[x, y]</code> is a valid <code>U16ButWithDifferentBytes</code></p>
+
+
+
+<a name="274477082"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477082" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477082">(Mar 08 2022 at 00:01)</a>:</h4>
+<p>But they're not in the right places, since you need to be able to get a <code>&amp;mut u8</code>. And as soon as you make your type</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">enum</span> <span class="nc">E</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">A</span><span class="p">(</span><span class="n">U16ButWithSameBytes</span><span class="p">),</span><span class="w"> </span><span class="n">B</span><span class="p">(</span><span class="n">U16ButWithDifferentBytes</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>your <code>SetDiscriminant</code> is a nop for all variants</p>
+
+
+
+<a name="274477169"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477169" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477169">(Mar 08 2022 at 00:02)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274477031">said</a>:</p>
+<blockquote>
+<p>In "pre-initialized variant A" state, the layout is <code>[x, uninit]</code> where <code>x</code> is a valid <code>u8</code></p>
+</blockquote>
+<p>Why are we giving preference to the first byte over the second here?</p>
+
+
+
+<a name="274477199"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477199" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477199">(Mar 08 2022 at 00:02)</a>:</h4>
+<p>Distinguishing between them seems to be quite arbitrary</p>
+
+
+
+<a name="274477205"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477205" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477205">(Mar 08 2022 at 00:02)</a>:</h4>
+<p>It's an arbitrary choice of the layout design</p>
+
+
+
+<a name="274477266"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477266" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477266">(Mar 08 2022 at 00:03)</a>:</h4>
+<p>Well, yes, but at this point all you've shown is that this doesn't work with if we allow layout designs that are broken</p>
+
+
+
+<a name="274477279"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477279" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477279">(Mar 08 2022 at 00:03)</a>:</h4>
+<p>how so?</p>
+
+
+
+<a name="274477296"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477296" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477296">(Mar 08 2022 at 00:03)</a>:</h4>
+<p>You still need to be able to get a <code>&amp;mut x</code></p>
+
+
+
+<a name="274477311"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477311" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477311">(Mar 08 2022 at 00:03)</a>:</h4>
+<p>You can, the first byte is such</p>
+
+
+
+<a name="274477369"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477369" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477369">(Mar 08 2022 at 00:04)</a>:</h4>
+<p>But then when you write to it, and go and read the enum, its variant has changed</p>
+
+
+
+<a name="274477472"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477472" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477472">(Mar 08 2022 at 00:05)</a>:</h4>
+<p>The <code>SetDiscriminant</code> is supposed to fix up the layout before it is observable as a whole</p>
+
+
+
+<a name="274477709"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477709" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477709">(Mar 08 2022 at 00:07)</a>:</h4>
+<p>No, what I mean is code like this:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">E</span>::<span class="n">A</span><span class="p">(</span><span class="mi">5_</span><span class="k">u8</span><span class="p">);</span><span class="w"></span>
+<span class="c1">// `(x as A).0 = 5;`</span>
+<span class="c1">//  `SetDiscriminant(x) = A;</span>
+<span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="n">E</span>::<span class="n">A</span><span class="p">(</span><span class="n">r</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">*</span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// No `SetDiscriminant` here. This code might be in a different function, so it can't know to do such a thing</span>
+<span class="p">}</span><span class="w"></span>
+<span class="fm">dbg!</span><span class="p">(</span><span class="n">x</span><span class="p">);</span><span class="w"> </span><span class="c1">// prints B(10, 5)</span>
+</code></pre></div>
+
+
+
+<a name="274477837"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274477837" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274477837">(Mar 08 2022 at 00:08)</a>:</h4>
+<p>The behavior of <code>SetDiscriminant</code> has to cause a read of the discriminant to be well behaved regardless of what values the fields have; this essentially guarantees that reading those fields cannot be useful to it - besides the things it knows statically about the fields anyway (niches) everything else can change</p>
+
+
+
+<a name="274478031"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274478031" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274478031">(Mar 08 2022 at 00:10)</a>:</h4>
+<p>Hm, you're right. It's possible that adding some more <code>SetDiscriminant</code>s in the right place could fix that (for example at the end of the <code>if let</code>) but it seems like the current codegen wouldn't support layouts like that</p>
+
+
+
+<a name="274478178"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274478178" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274478178">(Mar 08 2022 at 00:12)</a>:</h4>
+<p>Still, I don't know that it is important to ensure that <code>SetDiscriminant</code> doesn't read</p>
+
+
+
+<a name="274478246"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274478246" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274478246">(Mar 08 2022 at 00:13)</a>:</h4>
+<p>I mean, my argument from before applies more generally. Any useful information you get from reading the fields might have been changed by the time a discriminant is read, so you can't actually depend on it anyway</p>
+
+
+
+<a name="274478421"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274478421" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274478421">(Mar 08 2022 at 00:15)</a>:</h4>
+<p>You essentially have to ban taking a <code>&amp;mut field</code> and at that point there are better ways to express this (like having <code>(x as A).0 = 5</code> write to both bytes)</p>
+
+
+
+<a name="274478449"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274478449" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274478449">(Mar 08 2022 at 00:15)</a>:</h4>
+<p>The way I would put it is that from the "fully initialized, variant A" state, valid variant A field writes cannot take the enum out of this state</p>
+
+
+
+<a name="274478546"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274478546" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274478546">(Mar 08 2022 at 00:16)</a>:</h4>
+<p>In the example writing to <code>x</code> works in the "partially initialized, variant A" state but not the fully initialized version</p>
+
+
+
+<a name="274478676"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274478676" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274478676">(Mar 08 2022 at 00:18)</a>:</h4>
+<p>Yes, essentially, the <code>SetDiscriminant</code> statement can only make use of those properties that are preserved by the <code>*r = opaquevalue;</code> write. But all these properties are statically known anyway - it has no need to read</p>
+
+
+
+<a name="274478805"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274478805" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274478805">(Mar 08 2022 at 00:20)</a>:</h4>
+<p>Does this imply that a discriminant write cannot touch any field bytes (of the active variant)?</p>
+
+
+
+<a name="274479013"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274479013" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274479013">(Mar 08 2022 at 00:22)</a>:</h4>
+<p>Yes, since those bytes will be overwritten by a future write to the field</p>
+
+
+
+<a name="274479032"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274479032" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274479032">(Mar 08 2022 at 00:23)</a>:</h4>
+<p>Yes: A field is potentially restricted to a subset of all values for the underlying bytes, but the discriminant write cannot stash any information there since any value in the subset (and no value outside that subset) is legal for the field, so there is no space for additional data.</p>
+
+
+
+<a name="274479230"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274479230" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274479230">(Mar 08 2022 at 00:25)</a>:</h4>
+<p>Indeed. Reading the discriminant later can make use of the information about the restricted subset (this is what niche optimizations are) but no such analogue exists for writes</p>
+
+
+
+<a name="274479669"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274479669" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274479669">(Mar 08 2022 at 00:30)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="310518">Jake</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274475150">said</a>:</p>
+<blockquote>
+<p>That reminds me actually; needing to be able to identify initalized-ness post-deaggregation seems to be a bit of a dangerous road to go down in any case. Even if the user wrote</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">S</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">a</span>: <span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="mi">2</span><span class="p">};</span><span class="w"></span>
+<span class="fm">dbg!</span><span class="p">(</span><span class="n">x</span><span class="p">.</span><span class="n">a</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+<p>an optimization might come along and remove the dead store to <code>x.b</code>, while the <code>SetDiscriminant</code> stays. Anything that depends on the <code>SetDiscriminant</code> to indicate initialized-ness would need to deal with that (or we would have to restrict such optimizations to run after wherever this is needed)</p>
+</blockquote>
+<p>Coming back to this, I think that <code>SetDiscriminant</code> should just be defined to have no effect on partially initialized variants then. That is, if you are in state "partially initialized variant A, a init, b uninit" then <code>SetDiscriminant(x) = S::A</code> will leave it in this state because it's not fully initialized</p>
+
+
+
+<a name="274479739"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274479739" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274479739">(Mar 08 2022 at 00:31)</a>:</h4>
+<p>In the case where the discriminant is a tag field, in the "partially initialized" state this field is allowed to have any value, so even though we wrote to it it still has "don't care" value</p>
+
+
+
+<a name="274480567"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274480567" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274480567">(Mar 08 2022 at 00:41)</a>:</h4>
+<p>I don't think defining the behavior of this operation in terms of "initialization states" is a good way forward. It's unclear to me how this maps to actual memory operations and states</p>
+
+
+
+<a name="274480684"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274480684" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274480684">(Mar 08 2022 at 00:42)</a>:</h4>
+<p>At least, I'm having trouble coming up with a clear definition of this that does not indirectly create some kind of typed memory, which we imo should not try to have at MIR level if it doesn't exist at Rust level</p>
+
+
+
+<a name="274486540"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274486540" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274486540">(Mar 08 2022 at 02:04)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="310518">Jake</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274474907">said</a>:</p>
+<blockquote>
+<p>Do you have a quick example to show what you mean? In any case, I don't think it's affected. Borrowck and friends run well before <code>SetDiscriminant</code> is legal in MIR</p>
+</blockquote>
+<p>Hmm, looks like we made a breaking change at some point.</p>
+<p>This works in 1.5: &lt;<a href="https://rust.godbolt.org/z/qzsWh87od">https://rust.godbolt.org/z/qzsWh87od</a>&gt;</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="k">struct</span> <span class="nc">Foo</span><span class="p">(</span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="nb">String</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">x</span>: <span class="nc">Foo</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">x</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"asdf"</span><span class="p">.</span><span class="n">into</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="n">x</span><span class="p">.</span><span class="mi">1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">"hjkl"</span><span class="p">.</span><span class="n">into</span><span class="p">();</span><span class="w"></span>
+</code></pre></div>
+<p>But it doesn't in 1.59, even in edition 2015.</p>
+<p>Regardless, it would make sense to me to one day consider that initialized (without the <code>mut</code>, ideally).</p>
+<p>Maybe that's irrelevant to SetDiscriminant, though.</p>
+<p>(EDIT: probably for <code>!Drop</code> types only, though.)</p>
+
+
+
+<a name="274486751"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274486751" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274486751">(Mar 08 2022 at 02:09)</a>:</h4>
+<p>Yeah, I do think that is unrelated</p>
+
+
+
+<a name="274486769"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274486769" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274486769">(Mar 08 2022 at 02:09)</a>:</h4>
+<p>Wow, bisecting in godbolt is super convenient. Looks like this was introduced as a compatibility hazard warning on 1.36 and became an error on 1.38, so I guess this was intentional</p>
+
+
+
+<a name="274486863"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274486863" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274486863">(Mar 08 2022 at 02:11)</a>:</h4>
+<p>As a matter of fact, I think the proposed change actually works in favor of allowing this kind of code. If we required <code>SetDiscriminant</code> to indicate initialized-ness, there'd be no clear place to put it</p>
+
+
+
+<a name="274486952"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274486952" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274486952">(Mar 08 2022 at 02:13)</a>:</h4>
+<p>What about enums with one variant that nevertheless have a tag field? For example I think enum variant types would act like this</p>
+
+
+
+<a name="274487026"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274487026" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274487026">(Mar 08 2022 at 02:14)</a>:</h4>
+<p>I think you need the <code>SetDiscriminant</code> whenever the layout has a tag field, even if at the rust surface level it looks like a struct</p>
+
+
+
+<a name="274487135"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274487135" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274487135">(Mar 08 2022 at 02:16)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274486952">said</a>:</p>
+<blockquote>
+<p>What about enums with one variant that nevertheless have a tag field? For example I think enum variant types would act like this</p>
+</blockquote>
+<p>We don't emit <code>SetDiscriminant</code> for those either today afaik. I would like to start emitting it for all ADTs regardless of the number of variants though</p>
+
+
+
+<a name="274487235"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274487235" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274487235">(Mar 08 2022 at 02:18)</a>:</h4>
+<p>I mean, suppose that a struct has layout <code>[1, x, y]</code> where the first byte has to be 1 and the others are fields. If you piecewise initialize this struct you get <code>[?, x, y]</code> instead, so you have to set the tag at some point. I think this speaks in favor of always emitting <code>SetDiscriminant</code> and disallowing Scott's trick. Or at least, there should be some class of "tagless" structs which allow this kind of behavior (and includes all structs constructible today AFAIK)</p>
+
+
+
+<a name="274487364"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274487364" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274487364">(Mar 08 2022 at 02:20)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274450269">said</a>:</p>
+<blockquote>
+<blockquote>
+<p>Initialize the place with the given variant and all fields uninit.</p>
+</blockquote>
+<p>no strong opinion on whether or not that's a better semantics, but if the PR makes that the semantics then it should also adjust <code>interpret</code> to implement that semantics</p>
+</blockquote>
+<p>I was looking at this, but there doesn't seem to be a great way to implement it. Afaik there is no way to completely overwrite a place with uninit that doesn't involve creating an allocation full of uninit solely for this purpose (which seems bad). Any tips on how/where to add this? <strong>Edit:</strong> Hm, it seems that this requires a new function on <code>Memory</code>, I'll take a look at that</p>
+
+
+
+<a name="274487505"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274487505" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274487505">(Mar 08 2022 at 02:24)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274487235">said</a>:</p>
+<blockquote>
+<p>I mean, suppose that a struct has layout <code>[1, x, y]</code> where the first byte has to be 1 and the others are fields. If you piecewise initialize this struct you get <code>[?, x, y]</code> instead, so you have to set the tag at some point. I think this speaks in favor of always emitting <code>SetDiscriminant</code> and disallowing Scott's trick. Or at least, there should be some class of "tagless" structs which allow this kind of behavior (and includes all structs constructible today AFAIK)</p>
+</blockquote>
+<p>Right, so you need to emit a <code>SetDiscriminant</code> for this place. I believe we don't currently do this, which means we cannot have layouts like you propose. I agree that we should, in the future, start always emitting <code>SetDiscriminant</code>. The nice thing is that if that operation does what I propose, we don't have to disallow Scott's trick. We can emit the <code>SetDiscriminant</code> when the struct/single variant enum is declared, and then never have to worry about it again</p>
+
+
+
+<a name="274487767"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274487767" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274487767">(Mar 08 2022 at 02:29)</a>:</h4>
+<p>BTW one more side observation about <code>SetDiscriminant</code>: since the discriminant write doesn't touch field bytes, we know that it commutes with field writes, so this can conclusively answer whether <code>SetDiscriminant</code> needs to be first or last - it doesn't matter</p>
+
+
+
+<a name="274487913"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274487913" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274487913">(Mar 08 2022 at 02:31)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274487767">said</a>:</p>
+<blockquote>
+<p>BTW one more side observation about <code>SetDiscriminant</code>: since the discriminant write doesn't touch field bytes, we know that it commutes with field writes, so this can conclusively answer whether <code>SetDiscriminant</code> needs to be first or last - it doesn't matter</p>
+</blockquote>
+<p>Well, it doesn't <em>need to</em> touch field bytes. I'm specifically proposing that <code>SetDiscriminant</code> overwrite field bytes with uninit</p>
+
+
+
+<a name="274488172"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274488172" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274488172">(Mar 08 2022 at 02:36)</a>:</h4>
+<p>If the goal you are after is to have fields in the other variants be unset by a <code>SetDiscriminant</code>, I think you can make that work by instead having the fields get set to uninit whenever the active variant changes, with the <code>SetDiscriminant</code> setting the active variant but is otherwise a no-op. That way setting <code>SetDiscriminant</code> twice wouldn't clear the fields if it's already set to the right variant</p>
+
+
+
+<a name="274488523"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274488523" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274488523">(Mar 08 2022 at 02:42)</a>:</h4>
+<p>Again, I don't think you can actually define this without having some kind of typed memory</p>
+
+
+
+<a name="274489010"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489010" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489010">(Mar 08 2022 at 02:51)</a>:</h4>
+<p>The type state I'm talking about is only in the compiler and MIR type system, the abstract machine is just seeing a write to the discriminant field if there is one</p>
+
+
+
+<a name="274489120"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489120" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489120">(Mar 08 2022 at 02:52)</a>:</h4>
+<p>I guess your worry is that this could preserve padding bytes?</p>
+
+
+
+<a name="274489128"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489128" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489128">(Mar 08 2022 at 02:52)</a>:</h4>
+<p>Well, not really though. Because MIRI and const eval have to implement the abstract machine, and they need to know which to do. Const eval at least doesn't have to care that much because it doesn't have to detect UB, but MIRI does</p>
+
+
+
+<a name="274489275"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489275" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489275">(Mar 08 2022 at 02:55)</a>:</h4>
+<p>Would it be a problem if, say, <code>SetDiscriminant</code> on a simple tagged enum like <code>Result&lt;u8, u8&gt;</code> just set the tag and did not make the other field uninit? The compiler / MIR type system would still treat it as uninit but unsafe code could make use of the fact that it is not without causing UB, and this seems fine to me</p>
+
+
+
+<a name="274489351"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489351" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489351">(Mar 08 2022 at 02:56)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489275">said</a>:</p>
+<blockquote>
+<p>Would it be a problem if, say, <code>SetDiscriminant</code> on a simple tagged enum like <code>Result&lt;u8, u8&gt;</code> just set the tag and did not make the other field uninit? The compiler / MIR type system would still treat it as uninit but unsafe code could make use of the fact that it is not without causing UB, and this seems fine to me</p>
+</blockquote>
+<p>Something being "uninit" in MIR when it isn't actually uninit sounds like it is bound to cause incorrect optimizations</p>
+
+
+
+<a name="274489354"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489354" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489354">(Mar 08 2022 at 02:56)</a>:</h4>
+<p>Miri would implement the behavior of the abstract machine, meaning that it would not touch the field byte and would not give an error on code that read it</p>
+
+
+
+<a name="274489377"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489377" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489377">(Mar 08 2022 at 02:57)</a>:</h4>
+<p>If I may ask more generally; what problem are you trying to solve right now?</p>
+
+
+
+<a name="274489378"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489378" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489378">(Mar 08 2022 at 02:57)</a>:</h4>
+<p>the MIR type system is (necessarily) an underapproximation of the true definedness of the machine. Things get more defined as you get more concrete</p>
+
+
+
+<a name="274489443"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489443" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489443">(Mar 08 2022 at 02:58)</a>:</h4>
+<p>I'm trying to determine what the spec for the MIR operations is, in the context of the MIR type system (that doesn't exist yet)</p>
+
+
+
+<a name="274489464"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489464" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489464">(Mar 08 2022 at 02:58)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489378">said</a>:</p>
+<blockquote>
+<p>the MIR type system is (necessarily) an underapproximation of the true definedness of the machine. Things get more defined as you get more concrete</p>
+</blockquote>
+<p>But having something be <code>uninit</code> when it isn't is not making it underdefined. It's making it be very clearly defined in a wrong way</p>
+
+
+
+<a name="274489473"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489473" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489473">(Mar 08 2022 at 02:59)</a>:</h4>
+<p>Underdefined would be "this is some unknown opaque value"</p>
+
+
+
+<a name="274489486"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489486" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489486">(Mar 08 2022 at 02:59)</a>:</h4>
+<p>Hm, I would expect that the compiler does not distinguish between "don't care" and "uninit"</p>
+
+
+
+<a name="274489549"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489549" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489549">(Mar 08 2022 at 03:00)</a>:</h4>
+<p>I can't think of any example where it would be correct to do so</p>
+
+
+
+<a name="274489588"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489588" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489588">(Mar 08 2022 at 03:00)</a>:</h4>
+<p>"uninit" does exist in the AM but the compiler doesn't directly deal with it</p>
+
+
+
+<a name="274489639"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489639" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489639">(Mar 08 2022 at 03:00)</a>:</h4>
+<p>"don't know" and "uninit" are <em>very, very</em> different things. <code>let x = uninit;</code> can be "optimized" to <code>let x = 3;</code>. <code>let x = dontknow</code> cannot be optimized</p>
+
+
+
+<a name="274489686"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489686" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489686">(Mar 08 2022 at 03:01)</a>:</h4>
+<p>Ah, I don't mean "don't know" I mean "any value can be present here and I have no obligation to preserve it"</p>
+
+
+
+<a name="274489757"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489757" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489757">(Mar 08 2022 at 03:02)</a>:</h4>
+<p>that is how I understand the compiler's conception of "uninit"</p>
+
+
+
+<a name="274489766"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489766" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489766">(Mar 08 2022 at 03:02)</a>:</h4>
+<p>which is to say, maybe actual <code>uninit</code> and maybe something else</p>
+
+
+
+<a name="274489782"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489782" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489782">(Mar 08 2022 at 03:03)</a>:</h4>
+<p>That's what uninit is</p>
+
+
+
+<a name="274489801"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489801" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489801">(Mar 08 2022 at 03:03)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489275">said</a>:</p>
+<blockquote>
+<p>Would it be a problem if, say, <code>SetDiscriminant</code> on a simple tagged enum like <code>Result&lt;u8, u8&gt;</code> just set the tag and did not make the other field uninit? The compiler / MIR type system would still treat it as uninit but unsafe code could make use of the fact that it is not without causing UB, and this seems fine to me</p>
+</blockquote>
+<p>You'd have to specify what the other option here is</p>
+
+
+
+<a name="274489805"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489805" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489805">(Mar 08 2022 at 03:03)</a>:</h4>
+<p>The compiler's uninit doesn't have to be AM uninit though</p>
+
+
+
+<a name="274489829"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489829" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489829">(Mar 08 2022 at 03:03)</a>:</h4>
+<p>What do you mean by "the compiler's uninit"</p>
+
+
+
+<a name="274489910"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489910" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489910">(Mar 08 2022 at 03:05)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489443">said</a>:</p>
+<blockquote>
+<p>I'm trying to determine what the spec for the MIR operations is, in the context of the MIR type system (that doesn't exist yet)</p>
+</blockquote>
+<p>Also, addressing this more generally real quick; I don't think MIR can have a type system that we expect to be able to statically verify in all cases. After all, we have to lower Rust to MIR and Rust <code>unsafe</code> doesn't have such a type system</p>
+
+
+
+<a name="274489928"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274489928" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274489928">(Mar 08 2022 at 03:05)</a>:</h4>
+<p>To the extent that the compiler has knowledge about what values exist where in dataflow analyses and so on, it can say that values are uninit or not. I forget the name of the pass but it's like <code>MaybeUninitLocals</code> IIRC</p>
+
+
+
+<a name="274490064"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490064" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490064">(Mar 08 2022 at 03:07)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="310518">Jake</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489910">said</a>:</p>
+<blockquote>
+<p>Also, addressing this more generally real quick; I don't think MIR can have a type system that we expect to be able to statically verify in all cases. After all, we have to lower Rust to MIR and Rust <code>unsafe</code> doesn't have such a type system</p>
+</blockquote>
+<p>Rust has a type system even though there is <code>unsafe</code>, so I don't see the issue. The main claim would be that the type system is sound if there is no unsafe code, or if the unsafe code that is present satisfies some laundry list of conditions</p>
+
+
+
+<a name="274490189"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490189" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490189">(Mar 08 2022 at 03:09)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489928">said</a>:</p>
+<blockquote>
+<p>To the extent that the compiler has knowledge about what values exist where in dataflow analyses and so on, it can say that values are uninit or not. I forget the name of the pass but it's like <code>MaybeUninitLocals</code> IIRC</p>
+</blockquote>
+<p>So, I do not think we should have two definitions of MIR like this. In order to allow this we would need to, for each operation in MIR, 1) define what it does on the AM (after all this is what codegen needs to know), and 2) define what it does in terms of  "what the compiler is allowed to do" (or whatever you're proposing here)</p>
+
+
+
+<a name="274490288"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490288" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490288">(Mar 08 2022 at 03:11)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274490064">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="310518">Jake</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489910">said</a>:</p>
+<blockquote>
+<p>Also, addressing this more generally real quick; I don't think MIR can have a type system that we expect to be able to statically verify in all cases. After all, we have to lower Rust to MIR and Rust <code>unsafe</code> doesn't have such a type system</p>
+</blockquote>
+<p>Rust has a type system even though there is <code>unsafe</code>, so I don't see the issue. The main claim would be that the type system is sound if there is no unsafe code, or if the unsafe code that is present satisfies some laundry list of conditions</p>
+</blockquote>
+<p>It is not possible to statically prove that all Rust code obeys the type system's rules; my point is that we should not expect this of MIR either</p>
+
+
+
+<a name="274490373"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490373" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490373">(Mar 08 2022 at 03:12)</a>:</h4>
+<p>The target is no more or less than what Rust is already doing with its type system. It's a somewhat comprehensive static analysis along certain axes with a deliberate escape hatch.</p>
+
+
+
+<a name="274490470"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490470" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490470">(Mar 08 2022 at 03:13)</a>:</h4>
+<p>Hm, I still don't quite understand. Are you suggesting that the MIR produced by optimizations must pass static analysis (of whatever kind the type system mandates)?</p>
+
+
+
+<a name="274490528"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490528" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490528">(Mar 08 2022 at 03:14)</a>:</h4>
+<p>I would love to know what kinds of optimizations can't be done in a type preserving way though. I can believe they exist, but if possible I would certainly like to keep up the type system all the way through</p>
+
+
+
+<a name="274490541"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490541" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490541">(Mar 08 2022 at 03:14)</a>:</h4>
+<p>Yes, that's the hope. Still not sure to what extent this is achievable</p>
+
+
+
+<a name="274490670"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490670" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490670">(Mar 08 2022 at 03:16)</a>:</h4>
+<p>I mean, various kinds of dead store elimination make it impossible to reason about initializedness in general. It also seems extremely difficult to make use of alias analysis in a way that requires MIR continue to pass borrowck (or some analogue), instead of just the runtime aliasing model</p>
+
+
+
+<a name="274490730"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490730" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490730">(Mar 08 2022 at 03:17)</a>:</h4>
+<p>As far as I can tell, initializedness is a complex but solvable problem, no matter what semantics and order of operations is done for things like <code>SetDiscriminant</code></p>
+
+
+
+<a name="274490752"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490752" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490752">(Mar 08 2022 at 03:17)</a>:</h4>
+<p>This may be a good question to bring up with T-Semantics at some point. Maybe I'm underestimating the degree to which this is achievable, but at least my instinct tells me that it's not very much</p>
+
+
+
+<a name="274490835"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490835" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490835">(Mar 08 2022 at 03:18)</a>:</h4>
+<p>Yeah I'm basically projecting what I imagine T-semantics will be doing</p>
+
+
+
+<a name="274490920"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274490920" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274490920">(Mar 08 2022 at 03:20)</a>:</h4>
+<p>I was almost convinced by Oli's argument that we only really need a type system for the input MIR before optimizations, but Miri runs on optimized MIR so a preservation + progress style argument for miri would be really tough if it's disconnected from the original MIR</p>
+
+
+
+<a name="274491031"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274491031" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274491031">(Mar 08 2022 at 03:21)</a>:</h4>
+<p>So to summarize the question real quick: "Optimized MIR will obviously be required to pass at least some basic well-formedness constraints. How strong is the type system/static analysis that we can require it adhere to?"</p>
+
+
+
+<a name="274491244"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274491244" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274491244">(Mar 08 2022 at 03:24)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274490920">said</a>:</p>
+<blockquote>
+<p>I was almost convinced by Oli's argument that we only really need a type system for the input MIR before optimizations, but Miri runs on optimized MIR so a preservation + progress style argument for miri would be really tough if it's disconnected from the original MIR</p>
+</blockquote>
+<p>I would much rather we address this by doing less optimizations (or transformations more generally) before MIRI</p>
+
+
+
+<a name="274491312"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274491312" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274491312">(Mar 08 2022 at 03:25)</a>:</h4>
+<p>I think we should be able to typecheck structural transformations like deaggregation, but code motion stuff is particularly hard on the typechecker</p>
+
+
+
+<a name="274491398"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274491398" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274491398">(Mar 08 2022 at 03:26)</a>:</h4>
+<p>Yeah. I mean, analyzing the deaggregation that I proposed is not particularly hard anyway; it's actually made somewhat easier by the fact that <code>SetDiscriminant</code> sets the place it refers to to a very well-defined state in a context-free way</p>
+
+
+
+<a name="274491510"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274491510" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274491510">(Mar 08 2022 at 03:28)</a>:</h4>
+<p>Although, it would be super cool if this caught bugs in mir-opt. I've seen several of Simon Peyton Jones's talks where he highly lauds the decision to have types through all the compiler IRs of Haskell and how effective they are at finding compiler bugs</p>
+
+
+
+<a name="274491751"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274491751" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274491751">(Mar 08 2022 at 03:31)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="271719">Mario Carneiro</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274491510">said</a>:</p>
+<blockquote>
+<p>Although, it would be super cool if this caught bugs in mir-opt. I've seen several of Simon Peyton Jones's talks where he highly lauds the decision to have types through all the compiler IRs of Haskell and how effective they are at finding compiler bugs</p>
+</blockquote>
+<p>I mean, the little MIR validation that we have right now has done that for me already <span aria-label="laughing" class="emoji emoji-1f606" role="img" title="laughing">:laughing:</span> . But I just do not think it is possible for many kinds of optimizations</p>
+
+
+
+<a name="274491957"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274491957" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mario Carneiro <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274491957">(Mar 08 2022 at 03:34)</a>:</h4>
+<p>well, it's always <em>possible</em>, it just might not be economical <span aria-label="laughing" class="emoji emoji-1f606" role="img" title="laughing">:laughing:</span></p>
+
+
+
+<a name="274496579"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274496579" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274496579">(Mar 08 2022 at 04:53)</a>:</h4>
+<p>I've added a commit to the PR that implements these changes in const eval</p>
+
+
+
+<a name="274501034"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274501034" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274501034">(Mar 08 2022 at 06:14)</a>:</h4>
+<p>I tend to think <code>SetDiscriminant</code> should make direct padding (that is padding not part of fields) uninit, but not touch any fields.</p>
+
+
+
+<a name="274511036"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274511036" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274511036">(Mar 08 2022 at 08:45)</a>:</h4>
+<blockquote>
+<p>I would much rather we address this by doing less optimizations (or transformations more generally) before MIRI</p>
+</blockquote>
+<p>I don't think this is a good idea. Miri implements the dynamic checks that "we" believe MIR must satisfy. Anything lower level is LLVM IR or other backend IR. All backends can rely on the model implemented by miri. If we break from this it means MIR becomes uncheckable and thus imo we stop having a reasonable model.</p>
+
+
+
+<a name="274511951"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274511951" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274511951">(Mar 08 2022 at 08:56)</a>:</h4>
+<p>Oh, sorry, i had misunderstood the comment (I thought the concern was about missing UB). Yes, i agree that optimized MIR should pass Miri.</p>
+
+
+
+<a name="274513372"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274513372" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274513372">(Mar 08 2022 at 09:11)</a>:</h4>
+<p>A great <span aria-label="big smile" class="emoji emoji-1f604" role="img" title="big smile">:big_smile:</span>! Yea, miri runs on unoptimized and optimized mir, because opts will remove UB by making decisions where there was UB, and we want to catch both misoptimizations and UB before opts</p>
+
+
+
+<a name="274514416"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274514416" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274514416">(Mar 08 2022 at 09:23)</a>:</h4>
+<p>The only opt that your proposed scheme makes impossible is one where we go from one variant to another while keeping the field data.</p>
+<p>On the "having to know when stuff is fully initialized" side I'm wondering how this plays into the validity checks that miri performs on locals. I think we run validity checks on places before reading them, but I need to check if that's actually how it works. I think your change is completely fine in that regard.</p>
+
+
+
+<a name="274518968"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274518968" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274518968">(Mar 08 2022 at 10:05)</a>:</h4>
+<p>The deaggregator is run even with mir optimizations disabled as the codegen backends can't handle aggregates. This necessarily means that the optimized_mir encoded in the crate metadata as read by miri the tool also sees the deaggregated version.</p>
+
+
+
+<a name="274612553"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274612553" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274612553">(Mar 08 2022 at 21:50)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274514416">said</a>:</p>
+<blockquote>
+<p>The only opt that your proposed scheme makes impossible is one where we go from one variant to another while keeping the field data.</p>
+<p>On the "having to know when stuff is fully initialized" side I'm wondering how this plays into the validity checks that miri performs on locals. I think we run validity checks on places before reading them, but I need to check if that's actually how it works. I think your change is completely fine in that regard.</p>
+</blockquote>
+<p>Regarding the first point, yes. This is sort of by design. I had actually started this conversation by asking if such a thing was supposed to be legal (<a href="#narrow/stream/131828-t-compiler/topic/Semantics.20of.20.60SetDiscriminant.60.20in.20MIR/near/273749927">link</a>).</p>
+
+
+
+<a name="274612624"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274612624" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274612624">(Mar 08 2022 at 21:51)</a>:</h4>
+<p>This is also the kind of optimization that LLVM can do (at least in principle), so I don't mind leaving it for there</p>
+
+
+
+<a name="274616966"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274616966" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274616966">(Mar 08 2022 at 22:26)</a>:</h4>
+<p>That being said, there was a good point brought up in the thread that should probably be discussed explicitly here. This change can only apply to ADTs, not to generators, since generators need to preserve some of their fields. Ralf indicated that his intuition was that these two statements are generally alike, and that such a difference in behavior was maybe surprising. This does indeed give me some pause. However, I think it is the <code>SetDiscriminant</code> for generators that is the odd one out here, not the other way around. For generators specifically, I think <span class="user-mention" data-user-id="125250">@Wesley Wiser</span> 's idea of making the discriminant a field projection might be the right way forward.</p>
+<p>For example, this makes reasoning about aliasing somewhat easier:</p>
+<div class="codehilite"><pre><span></span><code>P.field = value;
+SetDiscriminant(P);
+use P.field;
+</code></pre></div>
+<p>A precise analysis to track aliasing would need to treat the <code>SetDiscriminant</code> specially for generators, and essentially have to make up a <code>generator</code> projection from which it could then prove that the <code>P.field</code> and <code>SetDiscriminant</code> don't alias. Putting this projection into MIR directly seems like a good way to simplify this sort of thing</p>
+
+
+
+<a name="274618115"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274618115" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274618115">(Mar 08 2022 at 22:38)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274456524">said</a>:</p>
+<blockquote>
+<p>Since we are allowed to do random things to the layout, you can't even know where the padding is, so idk how you could rely on it</p>
+</blockquote>
+<p>you can use <code>repr(C)</code> though, or determine the layout at runtime with <code>offset_of!</code>.<br>
+ultimately in memory it's all just bytes (I object to making the Rust memory model more complicated by actually having type structure in memory). only when that memory is accessed with a given type, does that type play a role -- such as when doing an assignment.</p>
+
+
+
+<a name="274618500"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274618500" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274618500">(Mar 08 2022 at 22:43)</a>:</h4>
+<p>Yes... I realize now that Operands on the full typed place are the most frequent situation where the place actually needs to be valid. Whether we set the discriminant first or last is pretty much irrelevant. Locals themselves, while having types, don't actually have any invariants to enforce on their value.</p>
+
+
+
+<a name="274618828"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274618828" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274618828">(Mar 08 2022 at 22:46)</a>:</h4>
+<p>So... generators get a magic field for their state? Seems ok unless we want some weirder way to track state than just a plain field. I don't think we'll go all niche-encoding on generators, but I don't actually know the plans people have for generators</p>
+
+
+
+<a name="274618846"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274618846" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274618846">(Mar 08 2022 at 22:46)</a>:</h4>
+<p>yes, locals are just pointers</p>
+
+
+
+<a name="274621474"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/274621474" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#274621474">(Mar 08 2022 at 23:13)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274618828">said</a>:</p>
+<blockquote>
+<p>So... generators get a magic field for their state? Seems ok unless we want some weirder way to track state than just a plain field. I don't think we'll go all niche-encoding on generators, but I don't actually know the plans people have for generators</p>
+</blockquote>
+<p>Even if we decide to do this, it doesn't prevent using the <code>.discriminant</code> field projection for the generator state. That particular projection will just have to be... a little magic (ie can't take references to it)</p>
+
+
+
+<a name="275191376"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275191376" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275191376">(Mar 14 2022 at 03:46)</a>:</h4>
+<p>So I thought about this again, and I have an alternative proposal that may or may not be better: <code>SetDiscriminant</code> is no longer permitted on ADTs; instead, we introduce a new <code>RValue</code>. Specifically, deaggregation for <code>P</code> outputs MIR like this:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="n">P</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">UninitVariant</span><span class="p">(</span><span class="n">variant_idx</span><span class="p">);</span><span class="w"></span>
+<span class="n">P</span><span class="p">.</span><span class="n">field_1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">operand_1</span><span class="p">;</span><span class="w"></span>
+<span class="n">P</span><span class="p">.</span><span class="n">field_2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">operand_2</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<p>Semantically, the <code>P = UninitVariant(variant_idx);</code> is no different from what I proposed <code>SetDiscriminant(P) = variant_idx;</code> should mean. However:</p>
+<ol>
+<li>There is no confusion with <code>SetDiscriminant</code> having different meanings for generators vs ADTs. <code>SetDiscriminant</code> has a consistent meaning regardless of the type, and what its exact properties are can be decided in the future, with no need to ever concern ourselves with such inconsistencies.</li>
+<li>This brings the "shape" of MIR much more in line with what the behavior of the statement is. I didn't realize this until now, but the version of <code>SetDiscriminant</code> I proposed has always had the semantics of an assignment.</li>
+<li>As a result, reasoning about MIR becomes simpler. <code>P = UninitVariant</code> is an assignment to <code>P</code>, and hence <code>P</code> is dead immediately before the assignment - no need to reason about two different <code>StatementKind</code>s. Similarly, the variant of a place <code>P</code> can only ever change with an <code>Assign</code>ment to that place (or another place that overlaps it).</li>
+</ol>
+<p>The main downside is that this is a more invasive change. Possibly we could do a two-phase approach to this, beginning with the changes in the current PR, and then adding the <code>RValue</code> in a follow-up. I'm not sure if that would be simpler or more complicated though.</p>
+
+
+
+<a name="275200342"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275200342" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275200342">(Mar 14 2022 at 07:13)</a>:</h4>
+<p>Can we codegen such an assignment properly? For miri it's not an issue, but I don't want codegen to end go generating the whole uninit value and copying it into the local</p>
+
+
+
+<a name="275200671"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275200671" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275200671">(Mar 14 2022 at 07:20)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/275200342">said</a>:</p>
+<blockquote>
+<p>Can we codegen such an assignment properly? For miri it's not an issue, but I don't want codegen to end go generating the whole uninit value and copying it into the local</p>
+</blockquote>
+<p>The old codegen for <code>SetDiscriminant</code> is a correct implementation of the semantics of that assignment, so it shouldn't be a problem</p>
+
+
+
+<a name="275201327"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275201327" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275201327">(Mar 14 2022 at 07:32)</a>:</h4>
+<p>If in the future we identify instances where it might help optimization, we can then emit the additional <code>uninit</code> to LLVM in just those cases</p>
+
+
+
+<a name="275206299"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275206299" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275206299">(Mar 14 2022 at 08:39)</a>:</h4>
+<p>Oh I'm not worried about correctness, but for for now rvalues are actual values of the correct size and not just a magic field assignment. At this point we can get rid of special rvalues and statements and just use a constant that has the right bytes set. We'll need to address <a href="https://github.com/rust-lang/rust/issues/63159">https://github.com/rust-lang/rust/issues/63159</a> and <a href="https://github.com/rust-lang/rust/issues/54360">https://github.com/rust-lang/rust/issues/54360</a> first though</p>
+
+
+
+<a name="275216412"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275216412" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275216412">(Mar 14 2022 at 10:22)</a>:</h4>
+<p>Sorry, you've lost me here a little bit. Is the concern whether this will be reasonably implementable in current codegen?</p>
+
+
+
+<a name="275217015"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275217015" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275217015">(Mar 14 2022 at 10:28)</a>:</h4>
+<p>Yes. codegen will have to special case <code>Assign(_, Rvalue::UninitVariant(..))</code> in order to keep just setting the tag and not actually write a gazillion bytes for large enums</p>
+
+
+
+<a name="275217559"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275217559" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275217559">(Mar 14 2022 at 10:33)</a>:</h4>
+<p>Right, I see. If this is complexity that we don't want to deal with, then maybe sticking with the current version and revisiting this idea in the future is best</p>
+
+
+
+<a name="275217947"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275217947" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275217947">(Mar 14 2022 at 10:37)</a>:</h4>
+<p>Well... there may be precedent, or it maybe entirely efficient to just generate the large enum rvalue. Without experimentation, I don't think we can tell</p>
+
+
+
+<a name="275219164"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275219164" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275219164">(Mar 14 2022 at 10:49)</a>:</h4>
+<p>Yeah, I can try and get a branch up today or tomorrow that makes this change</p>
+
+
+
+<a name="275400372"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275400372" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275400372">(Mar 15 2022 at 16:45)</a>:</h4>
+<p>aha! I found the discussion about using <code>SetDiscriminant</code>: <a href="https://github.com/rust-lang/rust/issues/49199">https://github.com/rust-lang/rust/issues/49199</a></p>
+
+
+
+<a name="275400430"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275400430" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275400430">(Mar 15 2022 at 16:45)</a>:</h4>
+<p>but we can work around that by adding some form of <code>ThisIsInitializedNow</code> statement that we remove after borrowck</p>
+
+
+
+<a name="275432776"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275432776" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275432776">(Mar 15 2022 at 20:44)</a>:</h4>
+<p>Yeah, i would greatly prefer that. I don't think we should be overloading statements more than we have to</p>
+
+
+
+<a name="275441084"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275441084" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275441084">(Mar 15 2022 at 21:54)</a>:</h4>
+<p>Sort of unrelated, but is there a way that I can be added to the mir-opt ping group on GH? I don't know what the procedures are for joining the WG, if that's the easiest way of going about it - mostly I just want to be able to keep up on PRs and changes and such</p>
+
+
+
+<a name="275934466"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/275934466" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#275934466">(Mar 19 2022 at 22:54)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="310518">Jake</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/275219164">said</a>:</p>
+<blockquote>
+<p>Yeah, I can try and get a branch up today or tomorrow that makes this change</p>
+</blockquote>
+<p>Well, longer than expected, but <a href="https://github.com/rust-lang/rust/issues/95125">#95125</a> is up</p>
+
+
+
+<a name="276814140"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/276814140" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jak{e,ob} Degen <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#276814140">(Mar 27 2022 at 23:43)</a>:</h4>
+<p>So, after <span class="user-mention" data-user-id="116009">@nikomatsakis</span> 's request, I've decided to write up what I think is the question and the possible solutions: <a href="https://hackmd.io/@2S4Crel_Q9OwC_vamlwXmw/SyiViEAM5/edit">https://hackmd.io/@2S4Crel_Q9OwC_vamlwXmw/SyiViEAM5/edit</a> This definitely suffers from the "if I had more time, I would've written a shorter letter" effect, but whatever. cc <span class="user-mention" data-user-id="124288">@oli</span> , <span class="user-mention" data-user-id="120791">@RalfJ</span> , <span class="user-mention" data-user-id="119009">@eddyb</span> .</p>
+<p>The tldr is this: There seem to be three interesting "basic primitives" - <code>Deinit</code>, <code>SetDiscriminant</code> and <code>Finalize</code> - and they can be combined in a number of ways. It feels like all but two of those ways are strictly worse than others (among the ones I could come up with). I'm undecided on which of them is better; neither of those options are the same as either of the two current PRs. It probably depends on the question of whether we want to support MIR like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">enum</span> <span class="nc">E</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">A</span><span class="p">(</span><span class="kt">u8</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">B</span><span class="p">(</span><span class="kt">u8</span><span class="p">),</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="n">_1</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span><span class="w"></span>
+<span class="n">SetDiscriminant</span><span class="p">(</span><span class="n">_1</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">A</span><span class="p">;</span><span class="w"></span>
+<span class="c1">// other code</span>
+<span class="n">SetDiscriminant</span><span class="p">(</span><span class="n">_1</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">B</span><span class="p">;</span><span class="w"></span>
+<span class="c1">// use `_1` as a fully initialized value</span>
+</code></pre></div>
+<p>There seemed to be disagreement about this in the PR. My opinion is that we shouldn't support it in MIR if we don't intend to support it in Rust</p>
+
+
+
+<a name="276836892"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/276836892" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#276836892">(Mar 28 2022 at 07:40)</a>:</h4>
+<p>This is a great summary! I'm still in the "Do all three" team, but we can just ignore <code>Finalize</code> and moving earlier for now and figure it out separately later.</p>
+<p>I think running <code>SetDiscriminant</code> twice on an initialized value should be fine, if only for the reason that removing <code>Deinit</code> statements is technically a fine operation as it removes UB (at which point you could encounter multiple SetDiscriminant statements for the same place). I think we'll also want to drop all <code>Deinit</code> calls before going into LLVM (and maybe convert some of them into <code>StorageLive</code> statements)</p>
+
+
+
+<a name="276945439"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/276945439" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jak{e,ob} Degen <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#276945439">(Mar 29 2022 at 00:16)</a>:</h4>
+<p>Hmm, yeah, this is a good point. Doing all three is also growing on me actually. It does seem like the most straightforward and future proof solution to the problem at hand. I'll hold off for another few days though, let the idea simmer a little bit and give anyone else who wants to time to weigh in</p>
+
+
+
+<a name="277049929"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277049929" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277049929">(Mar 29 2022 at 18:54)</a>:</h4>
+<p>I dont quite get why (3) <em>requires</em> (2), but dont mind it either</p>
+
+
+
+<a name="277050036"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277050036" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277050036">(Mar 29 2022 at 18:55)</a>:</h4>
+<blockquote>
+<p>The correctness of such MIR is fundamentally layout dependent</p>
+</blockquote>
+<p>is it? not any more than, say, using ptr arithmetic to mess with struct fields (which can even be expressed in Rust, and hence in MIR)</p>
+
+
+
+<a name="277050371"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277050371" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277050371">(Mar 29 2022 at 18:58)</a>:</h4>
+<blockquote>
+<p>One possible mitigation here (if we don’t want goal 6) would be a rule that states that for enums, SetDiscriminant may only appear immediately after a Deinit for the same place.</p>
+</blockquote>
+<p>I dont mind having such a rule as part of what we consider "canonical MIR", but I think we should describe MIR semantics (and implement Miri) in a way that even MIR not following this rule 'makes sense'. IOW I wouldnt want such non-local effects to affect our operational semantics.</p>
+
+
+
+<a name="277062652"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277062652" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jak{e,ob} Degen <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277062652">(Mar 29 2022 at 20:46)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277049929">said</a>:</p>
+<blockquote>
+<p>I dont quite get why (3) <em>requires</em> (2), but dont mind it either</p>
+</blockquote>
+<p>It specifically requires the "easy to reason about initialization" thing. borrowck and drop elaboration need to be able to figure out when things are initialized</p>
+
+
+
+<a name="277062751"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277062751" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jak{e,ob} Degen <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277062751">(Mar 29 2022 at 20:47)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277050036">said</a>:</p>
+<blockquote>
+<blockquote>
+<p>The correctness of such MIR is fundamentally layout dependent</p>
+</blockquote>
+<p>is it? not any more than, say, using ptr arithmetic to mess with struct fields (which can even be expressed in Rust, and hence in MIR)</p>
+</blockquote>
+<p>Well, yes, that also is. Rust code can fundamentally be layout dependent, and of course there is nothing that MIR can or should do about that. I would only prefer if we do our best to not introduce more layout specific things than there already are</p>
+
+
+
+<a name="277062874"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277062874" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jak{e,ob} Degen <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277062874">(Mar 29 2022 at 20:49)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277050371">said</a>:</p>
+<blockquote>
+<blockquote>
+<p>One possible mitigation here (if we don’t want goal 6) would be a rule that states that for enums, SetDiscriminant may only appear immediately after a Deinit for the same place.</p>
+</blockquote>
+<p>I dont mind having such a rule as part of what we consider "canonical MIR", but I think we should describe MIR semantics (and implement Miri) in a way that even MIR not following this rule 'makes sense'. IOW I wouldnt want such non-local effects to affect our operational semantics.</p>
+</blockquote>
+<p>I agree - I am not suggesting that this would affect our operational semantics, and miri should accept such code in any case. I'm arguing that maybe the validator shouldn't. This is in effect no different from the requirement that <code>copy</code> operands have <code>Copy</code> types - the operational semantics are completely ok with us just dropping that requirement, but we have it anyway</p>
+
+
+
+<a name="277317724"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277317724" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277317724">(Mar 31 2022 at 17:55)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="310518">Jak{e,ob} Degen</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277062751">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277050036">said</a>:</p>
+<blockquote>
+<blockquote>
+<p>The correctness of such MIR is fundamentally layout dependent</p>
+</blockquote>
+<p>is it? not any more than, say, using ptr arithmetic to mess with struct fields (which can even be expressed in Rust, and hence in MIR)</p>
+</blockquote>
+<p>Well, yes, that also is. Rust code can fundamentally be layout dependent, and of course there is nothing that MIR can or should do about that. I would only prefer if we do our best to not introduce more layout specific things than there already are</p>
+</blockquote>
+<p>right so I am asking in which sense this is introducing new kinds of layout dependencies.<br>
+overwriting the discriminant in an enum without de-initing the fields is like overwriting a union field, it is not a new kind of layout dependency.</p>
+
+
+
+<a name="277342632"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277342632" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jak{e,ob} Degen <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277342632">(Mar 31 2022 at 21:27)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277317724">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="310518">Jak{e,ob} Degen</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277062751">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277050036">said</a>:</p>
+<blockquote>
+<blockquote>
+<p>The correctness of such MIR is fundamentally layout dependent</p>
+</blockquote>
+<p>is it? not any more than, say, using ptr arithmetic to mess with struct fields (which can even be expressed in Rust, and hence in MIR)</p>
+</blockquote>
+<p>Well, yes, that also is. Rust code can fundamentally be layout dependent, and of course there is nothing that MIR can or should do about that. I would only prefer if we do our best to not introduce more layout specific things than there already are</p>
+</blockquote>
+<p>right so I am asking in which sense this is introducing new kinds of layout dependencies.<br>
+overwriting the discriminant in an enum without de-initing the fields is like overwriting a union field, it is not a new kind of layout dependency.</p>
+</blockquote>
+<p>I don't mean to imply that it's a "new layout dependency" in the sense of a new language feature - what I mean is that if we allow such code, optimizations might be encouraged to take code for which we could previously prove some analysis result in a layout independent way, and turn it into code for which we can only prove that analysis result by accessing layout information</p>
+
+
+
+<a name="277342722"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277342722" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jak{e,ob} Degen <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277342722">(Mar 31 2022 at 21:28)</a>:</h4>
+<p>I would like to avoid accessing layout information in as many parts of MIR as possible (because I'm hopeful that it will simplify things), and so this is something that I'm a little weary of</p>
+
+
+
+<a name="277343284"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277343284" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jak{e,ob} Degen <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277343284">(Mar 31 2022 at 21:35)</a>:</h4>
+<p>That being said, I've thought about this more and at this point I'm completely on board with the approach of emitting all three. I'll try and update the PR over the next day or so - it'll probably be some time before it lands, so concerns can still be filed</p>
+
+
+
+<a name="277363451"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277363451" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277363451">(Apr 01 2022 at 02:18)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="310518">Jak{e,ob} Degen</span> <a href="#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277342722">said</a>:</p>
+<blockquote>
+<p>I would like to avoid accessing layout information in as many parts of MIR as possible (because I'm hopeful that it will simplify things), and so this is something that I'm a little weary of</p>
+</blockquote>
+<p>FWIW, I agree with the general concern, I am just not sure it applies here. I would have asked for a concrete example next. But it seems we actually agree on which primitives to provide so never mind ;)</p>
+
+
+
+<a name="277363459"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant%20and%20aggregate%20initialization%20%2394590/near/277363459" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/189540-t-compiler/wg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590.html#277363459">(Apr 01 2022 at 02:18)</a>:</h4>
+<p>in particular not accessing layout info is crucial to be able to do pre-mono optimizations on generic code</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

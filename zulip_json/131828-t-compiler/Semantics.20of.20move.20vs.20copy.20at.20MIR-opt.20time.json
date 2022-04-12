@@ -1,0 +1,74 @@
+[
+    {
+        "content": "<p>What are the requirements of the \"correct\" usage of <code>move</code> vs <code>copy</code> in the MIR that optimizations run on? I assume using a non-<code>Copy</code> value after it has been <code>move</code>d out of is MIR UB even if the semantics of the thing at runtime are ok (for example if the store is dead). Does this remain true for <code>Copy</code> values? Is copying a non-<code>Copy</code> value ok even if that copy is never used (either at all, or to do anything bad)?</p>",
+        "id": 270801543,
+        "sender_full_name": "Jake",
+        "timestamp": 1644031576
+    },
+    {
+        "content": "<p>Also, is there some place where these types of decisions are recorded? I know that MIR semantics are fairly up in the air right now, but other than the code for the validator, are the decisions that have been made written down anywhere?</p>",
+        "id": 270802040,
+        "sender_full_name": "Jake",
+        "timestamp": 1644032289
+    },
+    {
+        "content": "<p><a class=\"stream\" data-stream-id=\"189540\" href=\"/#narrow/stream/189540-t-compiler.2Fwg-mir-opt\">#t-compiler/wg-mir-opt</a> would probably have a better idea.</p>\n<p>As far as I know, the <em>intention</em> of <code>Move(_3)</code> in MIR is to help allow reasoning by being a guarantee that <code>_3</code> is never used after that.  The HIR-&gt;MIR code generates <code>Copy</code>s for places where things might be used again.</p>",
+        "id": 270808827,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1644041581
+    },
+    {
+        "content": "<p>(I don't recall whether the MIR validation pass double-checks it, but if it does that might be an easy way to confirm it.)</p>",
+        "id": 270808925,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1644041693
+    },
+    {
+        "content": "<p>MIR validation does some checks, but no \"is place read after move\". Due to pointers, this is hard/impossible  to do anyway. We want to do this in miri though. Deinitialize the place that was moved from. So yes, from my understanding of MIR, you are reading uninitialized bytes if you read from something that was moved out of.</p>",
+        "id": 270811538,
+        "sender_full_name": "oli",
+        "timestamp": 1644045681
+    },
+    {
+        "content": "<p>This thread reminds me of my question here <a href=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/307\">https://github.com/rust-lang/unsafe-code-guidelines/issues/307</a></p>",
+        "id": 270812926,
+        "sender_full_name": "Frank Steffahn",
+        "timestamp": 1644047911
+    },
+    {
+        "content": "<p>Time to create precedent by making miri deinit sources on move xD</p>",
+        "id": 270819299,
+        "sender_full_name": "oli",
+        "timestamp": 1644057499
+    },
+    {
+        "content": "<p>Was thinking about this, and an example I came up with: If we have a</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">Foo</span><span class=\"p\">(</span><span class=\"kt\">usize</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">String</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>\n<p>and MIR like</p>\n<div class=\"codehilite\"><pre><span></span><code>let _1: Foo;\nlet _2: Foo;\nlet _3: usize;\n...\n_2.0 = copy _1.0;\n_2.1 = move _1.0;\n...\n_3 = copy _1.0;\n</code></pre></div>\n<p>we might want to optimize the middle batch of statements into <code>_2 = move _1;</code>, but that would be incorrect if <code>move</code> is supposed to invalidate. I can think of many ways around this (SSA, allowing <code>_2 = copy _1;</code>, making <code>move</code> not recursive on <code>Copy</code> fields), but it's potentially something to consider</p>",
+        "id": 271654596,
+        "sender_full_name": "Jake",
+        "timestamp": 1644623604
+    },
+    {
+        "content": "<p>Probably the best of those options is to allow optimizations to produce <code>_2 = copy _1;</code>, although this once more brings up the issue I had asked about in some PR regarding whether optimized MIR is expected to pass analysis</p>",
+        "id": 271655633,
+        "sender_full_name": "Jake",
+        "timestamp": 1644624348
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Semantics.20of.20move.20vs.20copy.20at.20MIR-opt.20time/near/271654596\">said</a>:</p>\n<blockquote>\n<p><div class=\"codehilite\"><pre><span></span><code>_2.0 = copy _1.0;\n_2.1 = move _1.0;\n</code></pre></div><br>\n</p>\n</blockquote>\n<p>Was that perhaps supposed to be this?</p>\n<div class=\"codehilite\"><pre><span></span><code>_2.0 = copy _1.0;\n_2.1 = move _1.1;\n</code></pre></div>",
+        "id": 271658503,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1644627130
+    },
+    {
+        "content": "<p>If we care about analysis on optimized MIR, but want optimizations that produce copies of non-<code>Copy</code> type, we could add a new Operand to mark them, maybe name it <code>ForcedCopy</code>. Then we can reintroduce the reborrow to copy optimization.</p>",
+        "id": 271658904,
+        "sender_full_name": "spunit262",
+        "timestamp": 1644627572
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125270\">scottmcm</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Semantics.20of.20move.20vs.20copy.20at.20MIR-opt.20time/near/271658503\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Semantics.20of.20move.20vs.20copy.20at.20MIR-opt.20time/near/271654596\">said</a>:</p>\n<blockquote>\n<p><div class=\"codehilite\"><pre><span></span><code>_2.0 = copy _1.0;\n_2.1 = move _1.0;\n</code></pre></div><br>\n</p>\n</blockquote>\n<p>Was that perhaps supposed to be this?</p>\n<p><div class=\"codehilite\"><pre><span></span><code>_2.0 = copy _1.0;\n_2.1 = move _1.1;\n</code></pre></div><br>\n</p>\n</blockquote>\n<p>Yep, thanks</p>",
+        "id": 271659609,
+        "sender_full_name": "Jake",
+        "timestamp": 1644628221
+    }
+]

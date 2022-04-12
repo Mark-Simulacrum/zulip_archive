@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>There is a very relevant difference between <code>T: ~const Drop</code> bounds and <code>T: Drop</code>. The latter means that there is a user written <code>Drop</code> impl for that type. The bound will not hold for types like <code>String</code> which just have a field that impls drop manually.</p>\n<p><code>~const Drop</code> on the other hand holds for all types that satisfy one of the following:</p>\n<ul>\n<li>have no <code>Drop</code> impl or drop glue (meaning this condition is also true for all fields, recursively)</li>\n<li>have an <code>impl const Drop</code></li>\n<li>have drop glue, but all fields satisfy one of these three rules</li>\n</ul>\n<p>This requires some fancy handling, the latest of which is <a href=\"https://github.com/rust-lang/rust/pull/92149\">https://github.com/rust-lang/rust/pull/92149</a></p>\n<p>I'm wondering if it would make sense to desugar <code>~const Drop</code> to some completely different predicate that is specially crafted for upholding these rules. We could create a libcore-private lang  item trait (<code>DropGlueish</code>) that we replace all uses of <code>~const Drop</code> with (as <code>~const DropGlueish</code>). Then there should be no more confusion with <code>Drop</code> within the trait solver.</p>\n<p>Thoughts? <span class=\"user-mention\" data-user-id=\"361356\">@fee1-dead</span></p>",
+        "id": 265672514,
+        "sender_full_name": "oli",
+        "timestamp": 1640084553
+    },
+    {
+        "content": "<p>Yes, that is what I meant when I wrote the short comment on that PR.</p>\n<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/146212-t-compiler.2Fconst-eval/topic/~const.20Drop/near/265672514\">said</a>:</p>\n<blockquote>\n<ul>\n<li>have drop glue, but all fields satisfy one of these three rules</li>\n</ul>\n</blockquote>\n<p>This is probably not correct. Here are the exact semantics: (to me)</p>\n<p>To prove that <code>T: ~const Drop</code>, one needs to either </p>\n<ol>\n<li>prove <code>T: Copy</code>, or</li>\n<li>prove that <code>T: !Drop</code>(i.e. no explicit non-const drop impl) <strong>and</strong> all of its recursive fields types satisfy <code>~const Drop</code>.</li>\n</ol>\n<p>Whether a type has <code>impl const Drop</code> does not matter because it doesn't remove the drop glues.</p>",
+        "id": 265674056,
+        "sender_full_name": "fee1-dead",
+        "timestamp": 1640085613
+    },
+    {
+        "content": "<p>Oh lol, I did not see your comment. Sorry yea, good thing we both came to the same conclusion independently.</p>",
+        "id": 265677292,
+        "sender_full_name": "oli",
+        "timestamp": 1640088077
+    },
+    {
+        "content": "<p>Yes, your formulation is simpler and easier to implement. Mine is roundabout, but I think still results in the same behaviour?</p>",
+        "id": 265677454,
+        "sender_full_name": "oli",
+        "timestamp": 1640088186
+    },
+    {
+        "content": "<blockquote>\n<p><code>have an impl const Drop</code></p>\n</blockquote>\n<p>that's not sufficient on its own, right? additionally all fields also need to be <code>~const Drop</code></p>",
+        "id": 265913357,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1640263799
+    },
+    {
+        "content": "<p>basically the bound means that the (auto-generated) drop_in_place for this type could be a const fn</p>",
+        "id": 265913424,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1640263830
+    },
+    {
+        "content": "<blockquote>\n<p>prove that T: !Drop(i.e. no explicit non-const drop impl)</p>\n</blockquote>\n<p>so that's what <code>!Drop</code> means? this is confusing, I would expect <code>!Drop</code> means there is <em>no</em> <code>impl Drop</code> for this type, const or otherwise</p>",
+        "id": 265913453,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1640263860
+    },
+    {
+        "content": "<p>I didn't propose that meaning of <code>!Drop</code>, I just used it because I thought it was straightforward...</p>",
+        "id": 265915723,
+        "sender_full_name": "fee1-dead",
+        "timestamp": 1640265701
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/146212-t-compiler.2Fconst-eval/topic/~const.20Drop/near/265913357\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p><code>have an impl const Drop</code></p>\n</blockquote>\n<p>that's not sufficient on its own, right? additionally all fields also need to be <code>~const Drop</code></p>\n</blockquote>\n<p>Yes, which is why I thought his formulation was incorrect</p>",
+        "id": 265915829,
+        "sender_full_name": "fee1-dead",
+        "timestamp": 1640265797
+    },
+    {
+        "content": "<p>Ah.. yea, the <code>impl const Drop</code> should error at the impl site if the fields don't also all hold <code>~const Drop</code>. That's why knowing there's a <code>const Drop</code> impl needs no further recursive checking</p>",
+        "id": 265915996,
+        "sender_full_name": "oli",
+        "timestamp": 1640265934
+    },
+    {
+        "content": "<p>That sounds like too much magic. It is perfectly fine for a type to implement <code>const Drop</code> while having non-const drop glue. For example, generic types. If we decided that <code>impl const Drop</code> had the requirements, then it actually causes pain for generic code :<code>impl&lt;T: ~const Drop&gt; const Drop for Foo</code></p>",
+        "id": 265916757,
+        "sender_full_name": "fee1-dead",
+        "timestamp": 1640266512
+    },
+    {
+        "content": "<p>If you already have a Foo&lt;T&gt; type that you have to manually impl Drop glue for, one extra bound doesn't seem like a big deal. It's not as good as \"automatically\" solving it or whatever, but it's a very small ask on the user.</p>",
+        "id": 265919141,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1640268221
+    },
+    {
+        "content": "<p>I prefer special casing <code>~const Drop</code> in trait system logic over this, because this special cases checking validity of const impls of <code>Drop</code>, and it doesn't remove the need to special case it in trait system logic. It's probably unnecessary complexity.</p>",
+        "id": 265919754,
+        "sender_full_name": "fee1-dead",
+        "timestamp": 1640268614
+    },
+    {
+        "content": "<p>We already have such magic in impls for <code>impl Copy for Type</code>. The impl itself errors if any of <code>Type</code>'s fields are <code>!Copy</code>. But I see the point that <code>Drop</code> is more special, as it can't have more bounds than the type declaration</p>",
+        "id": 265924339,
+        "sender_full_name": "oli",
+        "timestamp": 1640271865
+    },
+    {
+        "content": "<p>Seems kind of bad though if you get an error about a drop impl not being <code>const</code> even though it is declared as such, especially since the error will mention private fields and types that may be a few crates removed</p>",
+        "id": 265924433,
+        "sender_full_name": "oli",
+        "timestamp": 1640271941
+    },
+    {
+        "content": "<p>At least for non generic fields we should check it at the impl site. Now about generic fields.... I feel like there's a footgun here, i'll try to draft an example of what I'm thinking</p>",
+        "id": 265924647,
+        "sender_full_name": "oli",
+        "timestamp": 1640272070
+    },
+    {
+        "content": "<p><a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2021&amp;gist=1a5f79b63bda64cbed3409e62ef00c4e\">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2021&amp;gist=1a5f79b63bda64cbed3409e62ef00c4e</a> shows that you can observe how a generic parameter is used inside the type. This basically makes <code>~const Drop</code> a new marker trait that is magic like <code>Send</code> is. Not saying this isn't how we should do it, as it is convenient for users, but it may be a new thing library authors need to be aware of from now on.</p>",
+        "id": 265927886,
+        "sender_full_name": "oli",
+        "timestamp": 1640274280
+    },
+    {
+        "content": "<p>Can't you already observe how generic parameters are used even on <strong>stable</strong>?</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"c1\">// upstream</span>\n<span class=\"k\">struct</span> <span class=\"nc\">Bar</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span>: <span class=\"nc\">std</span>::<span class=\"n\">marker</span>::<span class=\"n\">PhantomData</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">b</span>: <span class=\"kt\">i32</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"c1\">// user crate</span>\n<span class=\"k\">const</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">bar</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">_</span>: <span class=\"nc\">Bar</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">{}</span><span class=\"w\"></span>\n\n<span class=\"c1\">// later changed to..</span>\n\n<span class=\"k\">struct</span> <span class=\"nc\">BarNew</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span>: <span class=\"nc\">T</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">b</span>: <span class=\"kt\">i32</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"c1\">// user's code now BREAKS 🤯</span>\n<span class=\"c1\">//</span>\n<span class=\"c1\">// const fn bar_&lt;T&gt;(_: BarNew&lt;T&gt;) {}</span>\n</code></pre></div>\n<p><a href=\"https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2021&amp;gist=1a5f79b63bda64cbed3409e62ef00c4e\">play</a></p>",
+        "id": 265932275,
+        "sender_full_name": "fee1-dead",
+        "timestamp": 1640277506
+    },
+    {
+        "content": "<p>Oh wow...</p>",
+        "id": 265933117,
+        "sender_full_name": "oli",
+        "timestamp": 1640278176
+    },
+    {
+        "content": "<p>I did not know this. That is surprising to me, but obvious when considering how <code>needs_drop</code> works</p>",
+        "id": 265933283,
+        "sender_full_name": "oli",
+        "timestamp": 1640278274
+    },
+    {
+        "content": "<p>I guess we should make the diagnostic on your example explain this...</p>",
+        "id": 265933462,
+        "sender_full_name": "oli",
+        "timestamp": 1640278391
+    }
+]

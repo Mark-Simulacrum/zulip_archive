@@ -1,0 +1,382 @@
+<html>
+<head><meta charset="utf-8"><title>Crash dump debugging of async programs · wg-async · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/index.html">wg-async</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html">Crash dump debugging of async programs</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="250118393"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250118393" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250118393">(Aug 20 2021 at 13:39)</a>:</h4>
+<p>Hey everyone! I am interesting in implementing better support for crash dump debugging of async programs, with the goal of ideally providing something similar to what <span class="user-mention" data-user-id="421986">@eholk</span> described in his <a href="https://github.com/rust-lang/wg-async-foundations/pull/229">shiny future vision doc</a> on the topic. And I was wondering I anyone else is also looking into this <code>:)</code></p>
+<p>I have looked exclusively at <code>async-std</code> so far, trying to get a feel of what would need to be done. (Thanks, <span class="user-mention" data-user-id="211722">@Yoshua Wuyts</span>, for getting me started!). My findings so far are:</p>
+<ul>
+<li>Async runtimes tend to be very complex and without some explicit support from the runtime itself it will be hard to write debugger extensions that can extract useful information (e.g. in <code>async-std</code> a task's name, id, and local variables are injected into a wrapping future around the future to be executed and it seems to impossible to get them back out again because we lose too much type information along the way). </li>
+<li>Crash dump debugging can only rely on things that are in the process's memory at the time of the crash. One might not have access to logs and such. </li>
+<li>Because we have to work with the actual runtime in-memory data structures, any debugger extension is likely to depend on implementation details of the runtime. An extension that works for one version of the runtime is unlikely to work for the next version of the same runtime. </li>
+<li>Because we are working with runtime data structures, a debugger extension that works for crash dumps should work just as well with a running process.</li>
+<li>There seems to be at least some overlap with what TurboWish / tokio-console is trying to achieve, so maybe there are synergies? At the very least when it comes to finding useful abstractions for describing the state of an async program.</li>
+<li>Debuginfo for optimized Rust programs might not be 100% reliable, especially when it comes to local variables and scoping. Debuginfo describing global variables, thread-local variables, and types, on the other hand, should be pretty reliable even for optimized code.</li>
+<li>We probably cannot rely on being able to call helper functions/methods in the debuggee.</li>
+</ul>
+<p>Given the points above it seems to me that it might make sense to try and reduce the dependence on low-level implementation details of async runtimes. Otherwise the initial implementation- and subsequent maintenance-cost of debugger extensions and other tooling might be prohibitively large, with the additional side effect of adding a lot of friction to changing and refactoring a given runtime's implementation.</p>
+<p>Some preliminary thoughts on how to achieve this:</p>
+<ul>
+<li>Come up with guidelines for framework authors on how to make their framework debugging friendly.</li>
+<li>Implement a support library that provides easy to use callbacks (e.g. <code>task_created</code>, <code>task_blocked_on</code>, <code>resource_created</code>, etc) that frameworks can use and that will maintain a simplified, abstract model of the program's state in memory, in a format that can easily and reliably be inspected by a debugger.</li>
+<li>Provide a support library with common primitives that can be used directly in the implementation of an async framework and gives debugger extensions just enough well-known parts to work with. </li>
+</ul>
+<p>I'd be really interested in what others think about this topic! </p>
+<p>cc <span class="user-mention" data-user-id="116883">@tmandry</span> <span class="user-mention" data-user-id="116083">@pnkfelix</span></p>
+
+
+
+<a name="250139215"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250139215" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250139215">(Aug 20 2021 at 16:15)</a>:</h4>
+<blockquote>
+<p>Debuginfo for optimized Rust programs might not be 100% reliable, especially when it comes to local variables and scoping. Debuginfo describing global variables, thread-local variables, and types, on the other hand, should be pretty reliable even for optimized code.</p>
+</blockquote>
+<p>I think this is not a problem for our use case; what we mostly want is to be able to crawl the data structures of the executor itself and the types of the tasks it allocates.</p>
+<blockquote>
+<p>We probably cannot rely on being able to call helper functions/methods in the debuggee.</p>
+</blockquote>
+<p>This was actually a question of mine, what are the constraints here?</p>
+
+
+
+<a name="250139862"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250139862" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250139862">(Aug 20 2021 at 16:21)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124287">mw</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250118393">said</a>:</p>
+<blockquote>
+<ul>
+<li>Implement a support library that provides easy to use callbacks (e.g. <code>task_created</code>, <code>task_blocked_on</code>, <code>resource_created</code>, etc) that frameworks can use and that will maintain a simplified, abstract model of the program's state in memory, in a format that can easily and reliably be inspected by a debugger.</li>
+</ul>
+</blockquote>
+<p>That's an interesting idea, and given the constraints you set (particularly not being able to call functions) I think it's a promising option. I don't want to dictate how executors organize their internal state.</p>
+<p>One detail: For this to be low overhead (e.g. not adding ref counts everywhere) we might have to use raw pointers, which itself isn't unsafe, but are there any cases where we need to dereference those in-process and this would potentially lead to UB? (This wouldn't be a deal killer, we'd just make the interface unsafe)</p>
+
+
+
+<a name="250140088"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250140088" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250140088">(Aug 20 2021 at 16:23)</a>:</h4>
+<p>I'm really glad someone else is thinking about this :)</p>
+
+
+
+<a name="250153296"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250153296" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250153296">(Aug 20 2021 at 18:12)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124287">mw</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250118393">said</a>:</p>
+<blockquote>
+<ul>
+<li>Come up with guidelines for framework authors on how to make their framework debugging friendly.</li>
+</ul>
+</blockquote>
+<p>This was kind of what I had in mind when writing the shiny future story. That said, I have no idea what these guidelines would look like. </p>
+<p>I like the idea of a set of callbacks that we can use to build a simplified in-memory data structure that debuggers can use. It'd be nice if we could include type info in here somehow too (maybe <code>Any</code> would work?) so that the debugger would be able to get from an abstract debugger task to the actual runtime task in case someone wants to inspect the specifics of a certain executor.</p>
+
+
+
+<a name="250153422"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250153422" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250153422">(Aug 20 2021 at 18:13)</a>:</h4>
+<p>Assuming we can't execute code in process (which as far as I know is true), I wonder if we could do something like include a wasm module in the binary somewhere that has well define entry points and knows how to inspect the important parts.</p>
+
+
+
+<a name="250153516"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250153516" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250153516">(Aug 20 2021 at 18:14)</a>:</h4>
+<p>Also, one nice thing about the callbacks and in-memory summary is that with a minidump we could make sure that chunk of memory gets included to make it more likely we can successfully debug it.</p>
+
+
+
+<a name="250154753"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250154753" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250154753">(Aug 20 2021 at 18:24)</a>:</h4>
+<p><span class="user-mention" data-user-id="124287">@mw</span> here is a silly quesiton for you</p>
+
+
+
+<a name="250154777"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250154777" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250154777">(Aug 20 2021 at 18:24)</a>:</h4>
+<p>I am looking at the "roadmap" and revamping things</p>
+
+
+
+<a name="250154791"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250154791" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250154791">(Aug 20 2021 at 18:24)</a>:</h4>
+<p>I would be happy to add an item about this -- but do you feel it is <em>tooling</em> or <em>polish</em>?</p>
+
+
+
+<a name="250154792"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250154792" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250154792">(Aug 20 2021 at 18:24)</a>:</h4>
+<p>I think the former</p>
+
+
+
+<a name="250155140"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250155140" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250155140">(Aug 20 2021 at 18:27)</a>:</h4>
+<p>I'm not @mw, but it sounds more like tooling to me, even though currently tooling seems to be listed under polish.</p>
+
+
+
+<a name="250155698"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250155698" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250155698">(Aug 20 2021 at 18:32)</a>:</h4>
+<blockquote>
+<p>It'd be nice if we could include type info in here somehow too (maybe Any would work?)</p>
+</blockquote>
+<p>Yes, I think that's vital. A pointer to the vtable should hopefully be enough to recover debuginfo for the type.</p>
+
+
+
+<a name="250322658"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250322658" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250322658">(Aug 23 2021 at 08:20)</a>:</h4>
+<p>Yes, "tooling" sounds right to me</p>
+
+
+
+<a name="250322984"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250322984" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250322984">(Aug 23 2021 at 08:23)</a>:</h4>
+<p><span class="user-mention" data-user-id="116883">@tmandry</span> </p>
+<blockquote>
+<p>This was actually a question of mine, what are the constraints here?</p>
+</blockquote>
+<p>I need to do more research there myself. Maybe it would be possible to call, for example, side-effect-free non-allocating functions with C ABI or something. I imagine this to be very platform- and debugger-specific and we'll need to support exotic cases like debugging core dumps from one target platform on another platform.</p>
+
+
+
+<a name="250349923"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250349923" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250349923">(Aug 23 2021 at 13:18)</a>:</h4>
+<p>I just tried calling a simple C function in the debuggee in GDB and LLDB on Linux and in WinDbg and Visual Studio on Windows. All of them gave me an error message that that isn't supported without a running process. I also did an internet search but I did not find the topic even mentioned. So I'm pretty sure we can't rely on that being available.</p>
+
+
+
+<a name="250354681"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250354681" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250354681">(Aug 23 2021 at 13:55)</a>:</h4>
+<blockquote>
+<p>One detail: For this to be low overhead (e.g. not adding ref counts everywhere) we might have to use raw pointers, which itself isn't unsafe, but are there any cases where we need to dereference those in-process and this would potentially lead to UB? (This wouldn't be a deal killer, we'd just make the interface unsafe)</p>
+</blockquote>
+<p>I think this is something that we can only find out by implementing prototypes. My naïve hope is that most of the synchronization and resource management would basically fall out of the runtime's own synchronization/resource management. But that's probably too much to hope for <code>:)</code></p>
+
+
+
+<a name="250356855"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250356855" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250356855">(Aug 23 2021 at 14:10)</a>:</h4>
+<blockquote>
+<p>This was kind of what I had in mind when writing the shiny future story. That said, I have no idea what these guidelines would look like.</p>
+</blockquote>
+<p>Some points that came to mind while looking at <code>async-std</code>:</p>
+<ul>
+<li>Use named types with named fields instead e.g. <code>async move { ... }</code> for injecting interesting information about a task (so that a debugger can reliably decode runtime structures.</li>
+<li>Provide global variables to executor state so that debuggers have a reliable entry point to global executor state.</li>
+<li>Write a good high-level overview of how the runtime works. E.g. what executors are there? How are tasks implemented? Locks? I/O? etc.</li>
+</ul>
+<p>But even with all that available, it would still be a lot of work to write debugger extensions for every combination of runtime/debugger. We already have GDB, LLDB, WinDbg (and the shiny future mentioned <code>zxdb</code> at some point?) on the debugger side and at least async-std, Tokio, and smol (?) on the runtime side. Turning this from <code>N * M</code> into <code>N + M</code> implementation effort by having a common "protocol" seems like a good idea.</p>
+
+
+
+<a name="250373576"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250373576" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250373576">(Aug 23 2021 at 16:11)</a>:</h4>
+<blockquote>
+<p>and the shiny future mentioned <code>zxdb</code> at some point?</p>
+</blockquote>
+<p>Oh yeah, that's apparently the Fuchsia debugger. That was taken from an example <span class="user-mention" data-user-id="116883">@tmandry</span> shared with me.</p>
+
+
+
+<a name="250378781"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250378781" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250378781">(Aug 23 2021 at 16:50)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124287">mw</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250349923">said</a>:</p>
+<blockquote>
+<p>I just tried calling a simple C function in the debuggee in GDB and LLDB on Linux and in WinDbg and Visual Studio on Windows. All of them gave me an error message that that isn't supported without a running process. I also did an internet search but I did not find the topic even mentioned. So I'm pretty sure we can't rely on that being available.</p>
+</blockquote>
+<p>This is interesting. I’ve had an interest in experimenting with adding some sort of checkpoint+resume facility to Rust (potentially only supported on some target archs+OS’es). And now I’m wondering what info is in a typical checkpoint that <em>isn’t</em> in a crashdump.</p>
+
+
+
+<a name="250379081"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250379081" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250379081">(Aug 23 2021 at 16:52)</a>:</h4>
+<p>Here we go: <a href="https://stackoverflow.com/questions/16047636/checkpoint-restart-using-core-dump-in-linux/16047837">https://stackoverflow.com/questions/16047636/checkpoint-restart-using-core-dump-in-linux/16047837</a></p>
+
+
+
+<a name="250420627"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250420627" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nick Cameron <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250420627">(Aug 23 2021 at 22:31)</a>:</h4>
+<p>@mw there must be somebody at Microsoft who can tell us more about crashdump debugging and what is possible, at least for windbg/VS, no idea who of course :-)</p>
+
+
+
+<a name="250479743"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250479743" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250479743">(Aug 24 2021 at 12:52)</a>:</h4>
+<p><span class="user-mention" data-user-id="256841">@Nick Cameron</span> Yes, I've reached out to the WinDbg team. I've also asked on the GDB mailing list.</p>
+
+
+
+<a name="250480287"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250480287" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250480287">(Aug 24 2021 at 12:56)</a>:</h4>
+<p>But I think whatever approach we choose has to work on <em>all</em> debuggers we want to support, so we have to go for the lowest common denominator in terms of assumed debugger features.</p>
+
+
+
+<a name="250495488"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250495488" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250495488">(Aug 24 2021 at 14:45)</a>:</h4>
+<p><span class="user-mention" data-user-id="116083">@pnkfelix</span>, out of interest: how does tokio-console integrate with the runtime? From <a href="https://github.com/tokio-rs/console">https://github.com/tokio-rs/console</a>, it looks like it is getting its data by hooking into <code>tracing</code> events. What I can't quite tell is if these events are generated by the tokio runtime or at a higher level by the application.</p>
+
+
+
+<a name="250495795"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250495795" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250495795">(Aug 24 2021 at 14:47)</a>:</h4>
+<p>yes, it is based on <code>tracing</code> events that are emitted by the tokio runtime itself. Longer term we want the console to also support higher-level <code>tracing</code> events emitted by the application, to get domain-specific info, but we don’t have that yet.</p>
+
+
+
+<a name="250495937"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250495937" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250495937">(Aug 24 2021 at 14:48)</a>:</h4>
+<p>So e.g. to have the console provide info about the rayon runtime, we have to instrument rayon in a corresponding manner.</p>
+
+
+
+<a name="250495954"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250495954" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250495954">(Aug 24 2021 at 14:48)</a>:</h4>
+<p>(and same for async-std)</p>
+
+
+
+<a name="250501104"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250501104" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250501104">(Aug 24 2021 at 15:21)</a>:</h4>
+<p>Thanks! OK, so the tokio runtime will generate a tracing event whenever a task is created, scheduled, starts being blocked, etc? Does that cause noticeable overhead? Or are those events cheaply filtered out if nothing subscribes to them?</p>
+
+
+
+<a name="250554046"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250554046" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nick Cameron <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250554046">(Aug 24 2021 at 21:49)</a>:</h4>
+<p>"But I think whatever approach we choose has to work on all debuggers we want to support, so we have to go for the lowest common denominator in terms of assumed debugger features." - I disagree with this - as long as there is graceful degradation, I think it's OK for some debuggers to have better support than others. In a way, that is true already - GDB works better than LLDB because someone happened to be able to implement better support there</p>
+
+
+
+<a name="250580072"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250580072" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250580072">(Aug 25 2021 at 04:54)</a>:</h4>
+<p>Should we merge the stories about this, <a href="https://github.com/rust-lang/wg-async-foundations/issues/228">wg-async-foundations#228</a> and <a href="https://github.com/rust-lang/wg-async-foundations/issues/229">wg-async-foundations#229</a>?</p>
+
+
+
+<a name="250597068"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250597068" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250597068">(Aug 25 2021 at 09:26)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="256841">Nick Cameron</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250554046">said</a>:</p>
+<blockquote>
+<p>I disagree with this - as long as there is graceful degradation, I think it's OK for some debuggers to have better support than others. In a way, that is true already - GDB works better than LLDB because someone happened to be able to implement better support there</p>
+</blockquote>
+<p>In general I agree. However, my thinking is that</p>
+<ul>
+<li>there is some basic functionality (like listing all tasks and what they are doing) that we want to have everywhere</li>
+<li>providing that basic functionality already requires us to solve most (or even all) of the hard problems (i.e. navigating the complex internal data structures of a given runtime)</li>
+<li>so there probably won't be a real benefit in requiring async runtimes to implement and maintain additional infrastructure on their side.</li>
+</ul>
+<p>Of course, these assumptions might change as we learn more about the problem. But right now it looks like no debugger has support for code execution in crash dumps anyway.</p>
+
+
+
+<a name="250643020"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250643020" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250643020">(Aug 25 2021 at 16:21)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116883">tmandry</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250580072">said</a>:</p>
+<blockquote>
+<p>Should we merge the stories about this, <a href="https://github.com/rust-lang/wg-async-foundations/issues/228">wg-async-foundations#228</a> and <a href="https://github.com/rust-lang/wg-async-foundations/issues/229">wg-async-foundations#229</a>?</p>
+</blockquote>
+<p>I'd say go ahead and merge it. For the open questions, I'd rather update them later after we have time to get some more experience.</p>
+
+
+
+<a name="250664216"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250664216" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250664216">(Aug 25 2021 at 18:54)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124287">mw</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250501104">said</a>:</p>
+<blockquote>
+<p>Thanks! OK, so the tokio runtime will generate a tracing event whenever a task is created, scheduled, starts being blocked, etc? Does that cause noticeable overhead? Or are those events cheaply filtered out if nothing subscribes to them?</p>
+</blockquote>
+<p>The tracing architecture is meant to cheaply filter out the events. However, I don’t know if the <em>current</em> version is optimal on that axis. More specifically, I know the tracing designers are considering redoing the low-level design in order to reduce overhead.</p>
+
+
+
+<a name="250664259"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250664259" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250664259">(Aug 25 2021 at 18:54)</a>:</h4>
+<p>Having said that, I think the current overhead is reasonable?</p>
+
+
+
+<a name="250664305"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250664305" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250664305">(Aug 25 2021 at 18:54)</a>:</h4>
+<p>but to be honest I should have a better answer there than “I think"</p>
+
+
+
+<a name="250664338"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250664338" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pnkfelix <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250664338">(Aug 25 2021 at 18:54)</a>:</h4>
+<p>(like, hard numbers re overhead)</p>
+
+
+
+<a name="250864636"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250864636" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250864636">(Aug 27 2021 at 01:19)</a>:</h4>
+<p><span class="user-mention" data-user-id="124287">@mw</span> you asked what I meant by logical stack trace, I'll post my mockup here for further discussion. Something like</p>
+<div class="codehilite"><pre><span></span><code>Task 123
+- currently: async fn foo() in foo.rs:43
+- awaiting : async fn bar() in bar.rs:89
+- awaiting : async fn baz() in baz.rs:23
+- awaiting : Join on the following futures:
+  - async fn fee()
+    - awaiting: std::io::AsyncWriteFut { fd: 42 (/dev/null) }
+  - async fn foe()
+  - async fn fum()
+</code></pre></div>
+<p>In particular we should be able to see this while the task is not being polled, i.e. none of its code is on the stack.</p>
+
+
+
+<a name="250864674"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250864674" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250864674">(Aug 27 2021 at 01:19)</a>:</h4>
+<p>There's probably a better name for this</p>
+
+
+
+<a name="250864735"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250864735" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250864735">(Aug 27 2021 at 01:20)</a>:</h4>
+<p>For one, this is really a tree of futures in general, not a stack.</p>
+
+
+
+<a name="250866842"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250866842" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250866842">(Aug 27 2021 at 01:54)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="421986">eholk</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250643020">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="116883">tmandry</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/Crash.20dump.20debugging.20of.20async.20programs/near/250580072">said</a>:</p>
+<blockquote>
+<p>Should we merge the stories about this, <a href="https://github.com/rust-lang/wg-async-foundations/issues/228">wg-async-foundations#228</a> and <a href="https://github.com/rust-lang/wg-async-foundations/issues/229">wg-async-foundations#229</a>?</p>
+</blockquote>
+<p>I'd say go ahead and merge it. For the open questions, I'd rather update them later after we have time to get some more experience.</p>
+</blockquote>
+<p>done</p>
+
+
+
+<a name="250898562"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250898562" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> mw <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250898562">(Aug 27 2021 at 08:17)</a>:</h4>
+<p>Thanks <span class="user-mention" data-user-id="116883">@tmandry</span>! Let me try to decode that to see if I understand:</p>
+<ul>
+<li><code>Task 123</code> is rooted in <code>foo()</code> (i.e. it was created by something like <code>task::spawn(foo())</code>)</li>
+<li><code>foo()</code> called <code>bar().await</code></li>
+<li><code>bar()</code> called <code>baz().await</code></li>
+<li><code>baz()</code> called something like <code>tokio::join!(fee(), foe(), fum())</code></li>
+<li><code>fee()</code> somehow created a <code>std::io::AsyncWriteFut</code> and did an <code>.await</code> on it.</li>
+</ul>
+<p>Is that correct? And it is a tree because things like <code>join!</code> and <code>select!</code>, which have multiple children, right?</p>
+
+
+
+<a name="250961386"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Crash%20dump%20debugging%20of%20async%20programs/near/250961386" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Crash.20dump.20debugging.20of.20async.20programs.html#250961386">(Aug 27 2021 at 16:59)</a>:</h4>
+<p><span class="user-mention" data-user-id="124287">@mw</span> yep!</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

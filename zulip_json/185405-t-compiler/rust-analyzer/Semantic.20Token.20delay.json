@@ -1,0 +1,176 @@
+[
+    {
+        "content": "<p>Hi everyone. I hope it's fine to pop in here without working on r-a (I asked Borger about it and he said it'd be fine, feel free to tell me if it's not). For those who don't know me, I briefly appeared previously in <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/PSA.3A.20rowan.20might.20be.20a.20severe.20case.20of.20over.20engineering\">https://rust-lang.zulipchat.com/#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/PSA.3A.20rowan.20might.20be.20a.20severe.20case.20of.20over.20engineering</a> as someone who made <span class=\"user-mention\" data-user-id=\"133169\">@matklad</span> think about <code>rowan</code> even more than he already did.</p>\n<p>Recently, I started writing a language server for the thing I also use <code>cstree</code> for, and the other day I ran into <a href=\"https://github.com/microsoft/vscode/issues/89640\">https://github.com/microsoft/vscode/issues/89640</a> : because of using semantic highlighting, and the LSP request for the token taking some small amount of time, there is a noticeable delay until highlighting updates, for example when you comment out a line. This has since started to annoy me tremendously (and probably more than it really should), because</p>\n<p>- changes like commenting out a single line are so small and \"simple\" that it just _feels_ like the update should be instant, and<br>\n  - the entire file is _syntactically_ highlighted basically on the spot upon opening it from the textMate language grammar.</p>\n<p>The delay scales with file length, but I can see it even in small files (r-a does slightly better than I do currently for these sizes, though I'm unsure why exactly). So I'm looking for a way to have some visual update happen more quickly, through either the language server or the extension. The latter side I am criminally unfamiliar with and have just cobbled together enough to make the whole thing work. </p>\n<p>Have you guys implemented anything specifically to help with this for r-a, or looked at this previously, or does r-a do something more general to speed up turnaround times on \"important\" updates? I do realize this is a minor issue in the grand scheme of things and I am kinda obsessing over this a bit, but such obsessing is a strong suite of mine and I'm taking a longer shot to try to convert that into something useful <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 234582261,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618437001
+    },
+    {
+        "content": "<p>Again, I don't want to disrupt your work-related Zulipping ('s that a word?), so do tell me if I do</p>",
+        "id": 234582474,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618437099
+    },
+    {
+        "content": "<p>Asking this on zulip is completely fine.<br>\nThe same delayed highlighting behavior appears in RA when commenting out a line, at least for me and I don't think that came ever up as an issue somewhere.<br>\nThe only thing I can think of that might reduce the time a bit is handling delta highlighting via <code>textDocument/semanticTokens/full/delta</code> but as RA also already does that I don't believe much can be gained from that.</p>",
+        "id": 234583632,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1618437686
+    },
+    {
+        "content": "<p>Though I don't have extensive knowledge about the spec or implementations either</p>",
+        "id": 234583768,
+        "sender_full_name": "Lukas Wirth",
+        "timestamp": 1618437741
+    },
+    {
+        "content": "<p>Yeah, I did implement token deltas, but in a way which is close to the VSCode typescript implementation (if I'm not mistaken RA's implementation is also similar). So the delta request will recompute all file tokens anyways, and only save on the tokens sent to the editor.</p>",
+        "id": 234585211,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618438478
+    },
+    {
+        "content": "<p>So far I've noticed RA to be a bit faster for the smaller files, while I catch up as files sizes increase. But that comparison is in no way fair, since for one RA does a lot more other work, and also I believe you use a sync base + thread pool (?) while I set up with <code>lspower</code> for now, which is async</p>",
+        "id": 234585482,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618438631
+    },
+    {
+        "content": "<p>We didn't do anything specifically to improve hightlightting latency, but let me dump general facts I know</p>",
+        "id": 234625098,
+        "sender_full_name": "matklad",
+        "timestamp": 1618469340
+    },
+    {
+        "content": "<p>First, LSP spec is not really suitable for fast and precise coloring.</p>",
+        "id": 234625121,
+        "sender_full_name": "matklad",
+        "timestamp": 1618469360
+    },
+    {
+        "content": "<p>For precise coloring, you need to use type-inference results, and, in general, type inference can be slow, so this part needs to be async in terms of user experience (ie, when opening a file, the users will see more correct syntax highlighting kicking in milliseconds later)</p>",
+        "id": 234625272,
+        "sender_full_name": "matklad",
+        "timestamp": 1618469442
+    },
+    {
+        "content": "<p>What you can real-time guarantees for is lexer-based hightlighting. Lexing is done using finite state machines, and, unlike parsing or type-checking, it's easy to re-start the lexer from a specific point, so you can re-lex incrementally in  bounded time.</p>",
+        "id": 234625426,
+        "sender_full_name": "matklad",
+        "timestamp": 1618469555
+    },
+    {
+        "content": "<p>So, the proper API for syntax hightlghting (like the one in IntelliJ obviously) would have <em>two</em> methods, one for synchroneous lexer-based highlighting (so that you can compute  the correct colors before the next display flip) and one for asynchronouse type-inference based hightlighting.</p>",
+        "id": 234625529,
+        "sender_full_name": "matklad",
+        "timestamp": 1618469642
+    },
+    {
+        "content": "<p>The other thing which is important for latency is proper management of read/write requests.</p>",
+        "id": 234625731,
+        "sender_full_name": "matklad",
+        "timestamp": 1618469764
+    },
+    {
+        "content": "<p>Let's say user typed <code>foobar</code>. What your server might see in the protocol is</p>\n<ul>\n<li>insert <code>\"foo\"</code> into main. rs</li>\n<li>hightlight <a href=\"http://main.rs\">main.rs</a></li>\n<li>insert <code>\"bar\"</code> into <a href=\"http://main.rs\">main.rs</a></li>\n<li>hightlight <a href=\"http://main.rs\">main.rs</a></li>\n</ul>",
+        "id": 234625847,
+        "sender_full_name": "matklad",
+        "timestamp": 1618469854
+    },
+    {
+        "content": "<p>in this situation, it's important to make sure  that you can react to insert <code>bar</code> immediately, without waiting for hightlighting to finish. </p>\n<p>The approach we use for this in rust-analyzer is that we have a manually-coded event loop which accepts the messages. With this loop, we can schedule latency-critical operations (all edits, but some of the read operations as well) onto the loop's thread directly, and offload async operations to the background (\"should this OP be synchroneous/block the main loop?\" is a useful framing question). See <a href=\"https://github.com/rust-analyzer/rust-analyzer/blob/e131bfc747df1b21ae6ea04eb9c55001e06b7bf0/crates/rust-analyzer/src/main_loop.rs#L494-L515\">https://github.com/rust-analyzer/rust-analyzer/blob/e131bfc747df1b21ae6ea04eb9c55001e06b7bf0/crates/rust-analyzer/src/main_loop.rs#L494-L515</a> <code>on_sync</code> and <code>on</code> are the two flavors. </p>\n<p>Separately from scheduling, you need \"async op can't block a sync one\" property. I think there are two solutions here: either you make the state to be a purely functional data structure, so that async and sync can execute on two different versions of state at the same time, or you add cancellation for async operations, so that you can cancel pending jobs.</p>",
+        "id": 234627307,
+        "sender_full_name": "matklad",
+        "timestamp": 1618470328
+    },
+    {
+        "content": "<blockquote>\n<p>you use a sync base + thread pool (?) while I set up with lspower for now, which is async</p>\n</blockquote>\n<p>I am in general async-sceptic, so I might be biased, but I don't think per se async buys anything for LSP server use-case :)</p>",
+        "id": 234627563,
+        "sender_full_name": "matklad",
+        "timestamp": 1618470420
+    },
+    {
+        "content": "<p>Thank you! I very much appreciate the dump!</p>",
+        "id": 234642581,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618478296
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"133169\">matklad</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/Semantic.20Token.20delay/near/234625529\">said</a>:</p>\n<blockquote>\n<p>So, the proper API for syntax hightlghting (like the one in IntelliJ obviously) would have <em>two</em> methods, one for synchroneous lexer-based highlighting (so that you can compute  the correct colors before the next display flip) and one for asynchronouse type-inference based hightlighting.</p>\n</blockquote>\n<p>I am inclined to agree, hence me trying to find a way to react to such changes more quickly with a coarser approximation, while full results are pending. Based on what all of you said here so far, it seems to me like if there is a way to make this work, that way is likely it would involve some custom code in the editor extension. Is there an (or a combination of) API access point(s) that one could use to trigger re-highlighting a part of a document with the textMate grammar, or maybe just remove the semantic highlighting scopes? If I understand correctly they just get put \"on top\" of the textMate ones, so if they are gone highlighting would fall back to syntactic?</p>",
+        "id": 234645328,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618479558
+    },
+    {
+        "content": "<p><a href=\"https://code.visualstudio.com/api/references/vscode-api#DocumentRangeSemanticTokensProvider\">https://code.visualstudio.com/api/references/vscode-api#DocumentRangeSemanticTokensProvider</a></p>",
+        "id": 234645573,
+        "sender_full_name": "matklad",
+        "timestamp": 1618479675
+    },
+    {
+        "content": "<p>As I said I'm still getting into the TS side of things. But it appears to be possible to register for additional notifications in the extension for things like <code>DocumentChangeEvent</code>s. So you could know those and check if they represent a change for which you want \"intermediate\" highlighting. But you'd have to be able to trigger that then happening</p>",
+        "id": 234645627,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618479698
+    },
+    {
+        "content": "<p>it has <code>didChangeSemanticTokens</code>, so it should be possible to hack something working here</p>",
+        "id": 234645629,
+        "sender_full_name": "matklad",
+        "timestamp": 1618479701
+    },
+    {
+        "content": "<p>(your other points are also very helpful, but are something I will deal with later)</p>",
+        "id": 234645831,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618479814
+    },
+    {
+        "content": "<p>But, in terms of system engineering, I'd personally would:</p>\n<ul>\n<li><span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span> at the issue and shake the fist in the general direction of broken software</li>\n<li>made sure that <em>internals</em> of the thing I am writing are prefect, such that, if anyone comes up with a better API than VS Code, I could just plug this in</li>\n<li>raise the issue in the VS Code repository, which describes the situation like \"hey, we <em>could</em> have a perfect UX here, look how my server does this, but we currently cant, because of the clients limitations\". VS Code folks are moderately responsive -- it takes some years to move the status quo forward, but today's API are much better that what we've started with in 2018. Like, we <strong>have</strong> hightlighting at all :-)</li>\n</ul>",
+        "id": 234646070,
+        "sender_full_name": "matklad",
+        "timestamp": 1618479923
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"133169\">matklad</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/Semantic.20Token.20delay/near/234627563\">said</a>:</p>\n<blockquote>\n<p>I am in general async-sceptic, so I might be biased, but I don't think per se async buys anything for LSP server use-case :)</p>\n</blockquote>\n<p>Though I will say I am also unsure about this, since a lot of the LSP operations do in some way rely on each other, and you are not that much bound by awaiting something longer like IO. I primarily felt this was very easy to get going</p>",
+        "id": 234646125,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618479949
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"133169\">matklad</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/Semantic.20Token.20delay/near/234645629\">said</a>:</p>\n<blockquote>\n<p>it has <code>didChangeSemanticTokens</code>, so it should be possible to hack something working here</p>\n</blockquote>\n<p>Hm, so you're thinking something like</p>\n<ul>\n<li>register a token provider (I think in the VSC case <code>Range</code> is only used once when opening the file to initialize the viewport, and then everything else is delta requests) that mainly forwards to the lsp</li>\n<li>register for document change events, if it's something where I want to change highlighting, store that somewhere and <code>didChangeSemanticTokens</code> from the provider</li>\n<li>if provider is called with some \"override\" info present, provide an edit with the intermediate change<br>\n?</li>\n</ul>",
+        "id": 234647025,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618480383
+    },
+    {
+        "content": "<p>Would the editor not issue a request for a token update anyways because the file is updated? Also does the TS method correspond to <code>semanticTokens/refresh</code> in terms of the LSP spec? Cause then one would probably need to provide a full set of tokens <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>",
+        "id": 234647479,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618480595
+    },
+    {
+        "content": "<blockquote>\n<p><span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span> at the issue and shake the fist in the general direction of broken software</p>\n</blockquote>\n<p>this <em>does</em> seem to be at least part of the way to go ^^</p>",
+        "id": 234647509,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618480613
+    },
+    {
+        "content": "<p>I was hoping there was some <a href=\"https://code.visualstudio.com/api/references/commands\">https://code.visualstudio.com/api/references/commands</a> that allows to interact with VSC on the topic of highlighting, but it seems you can only ask it to ask the LS about something for you</p>",
+        "id": 234648900,
+        "sender_full_name": "Domenic Quirl",
+        "timestamp": 1618481249
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"337115\">Domenic Quirl</span> <a href=\"#narrow/stream/185405-t-compiler.2Frust-analyzer/topic/Semantic.20Token.20delay/near/234647479\">said</a>:</p>\n<blockquote>\n<p>Would the editor not issue a request for a token update anyways because the file is updated? Also does the TS method correspond to <code>semanticTokens/refresh</code> in terms of the LSP spec? Cause then one would probably need to provide a full set of tokens <span aria-label=\"thinking\" class=\"emoji emoji-1f914\" role=\"img\" title=\"thinking\">:thinking:</span></p>\n</blockquote>\n<p><code>semanticTokens/refresh</code> is sent from the server to the client. We do that on a workspace reload if I remember correctly.</p>",
+        "id": 234696181,
+        "sender_full_name": "Jeremy Kolb",
+        "timestamp": 1618499802
+    },
+    {
+        "content": "<p>In terms of the delta we compute the full set of tokens and just send the delta back but it's a pretty naive algorithm that I took from <code>clangd</code></p>",
+        "id": 234696454,
+        "sender_full_name": "Jeremy Kolb",
+        "timestamp": 1618499898
+    }
+]

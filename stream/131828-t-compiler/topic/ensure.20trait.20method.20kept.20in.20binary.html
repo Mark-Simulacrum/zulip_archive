@@ -1,0 +1,111 @@
+<html>
+<head><meta charset="utf-8"><title>ensure trait method kept in binary · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html">ensure trait method kept in binary</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="272737947"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272737947" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake Hughes <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272737947">(Feb 21 2022 at 21:45)</a>:</h4>
+<p>Hi, I am code-genning a custom intrinsic that when called, will call a trait method on its argument. E.g.:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">trait</span><span class="w"> </span><span class="n">MyTrait</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w"> </span><span class="k">fn</span> <span class="nf">foo</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// inside core::intrinsics</span>
+<span class="k">fn</span> <span class="nf">my_intrinsic</span>::<span class="o">&lt;</span><span class="n">T</span>: <span class="nc">MyTrait</span><span class="o">&gt;</span><span class="p">(</span><span class="n">value</span>: <span class="kp">&amp;</span><span class="nc">T</span><span class="p">);</span><span class="w">   </span><span class="c1">// intrinsic def</span>
+</code></pre></div>
+<p>Unfortunately, because <code>MyTrait::foo</code> is only called by generated code in <code>my_intrinsic</code> the linker can't find the definition because I think rustc thinks the trait method is unused. How can I prevent this and make sure that it is always kept in the binary?</p>
+
+
+
+<a name="272738197"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272738197" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272738197">(Feb 21 2022 at 21:49)</a>:</h4>
+<p>Such decisions are made in the monomorphization collector. You'll need to add some custom logic for your intrinsic there. Though at that point, maybe we're trying to solve your problem the wrong way. Can you tell me more about your intrinsic and why it's needed?</p>
+
+
+
+<a name="272738777"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272738777" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake Hughes <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272738777">(Feb 21 2022 at 21:58)</a>:</h4>
+<p>thanks <span class="user-mention" data-user-id="124288">@oli</span> . This stuff is definitely in the weeds of my problem so I'm struggling a bit to give the higher level context, but i'll do my best:</p>
+<p>I have a rustc fork where I'm experimenting with GC designs. One approach I am excited to try is to be able to dynamically change allocated blocks from managed/unmanaged. So imagine a trait like:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">trait</span><span class="w"> </span><span class="n">Collectable</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">set_managed</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">set_unmanaged</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>My intrinsic would be something like:</p>
+<div class="codehilite"><pre><span></span><code>fn make_collectable::&lt;T&gt;(value: &amp;T);
+</code></pre></div>
+<p>And in codegen, I'm iterating over the component types of <code>T</code>,  looking for impls of my <code>Collectable</code> trait, and projecting into them and calling <code>set_managed</code> or <code>set_unmanaged</code>. I hope that makes some kind of sense :)</p>
+
+
+
+<a name="272784211"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272784211" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272784211">(Feb 22 2022 at 10:27)</a>:</h4>
+<p>Hmm, why does this need an intrinsic? Would it be possible to implement this trait to require that the two methods recurse into the type's fields? Or is that not actionable because it would require deriving the trait everywhere?</p>
+
+
+
+<a name="272784318"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272784318" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272784318">(Feb 22 2022 at 10:28)</a>:</h4>
+<p>Instead of using an intrinsic you could make your trait autogenerated as a shim, just like we generate drop glue or similar</p>
+
+
+
+<a name="272784344"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272784344" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272784344">(Feb 22 2022 at 10:28)</a>:</h4>
+<p>Drop glue also automatically drops the fields of a type, so this seems rather similar</p>
+
+
+
+<a name="272793916"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272793916" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bstrie <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272793916">(Feb 22 2022 at 12:10)</a>:</h4>
+<p>there is a #[used] attribute (<a href="https://doc.rust-lang.org/reference/abi.html#the-used-attribute">https://doc.rust-lang.org/reference/abi.html#the-used-attribute</a>), but it's only for static items</p>
+
+
+
+<a name="272796019"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272796019" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake Hughes <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272796019">(Feb 22 2022 at 12:33)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@oli</span> I understand. I used an intrinsic as it seemed like a straightforward way to hook into codegen at the place I wanted and start writing my own logic for the function. IIRC the drop glue stuff is implemented as a terminator kind in the MIR, this seemed like a fair bit of work.</p>
+
+
+
+<a name="272796217"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272796217" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake Hughes <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272796217">(Feb 22 2022 at 12:35)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="256342">bstrie</span> <a href="#narrow/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary/near/272793916">said</a>:</p>
+<blockquote>
+<p>there is a #[used] attribute (<a href="https://doc.rust-lang.org/reference/abi.html#the-used-attribute">https://doc.rust-lang.org/reference/abi.html#the-used-attribute</a>), but it's only for static items</p>
+</blockquote>
+<p>Thanks, I saw this. I'm not sure it works for my purposes though.</p>
+
+
+
+<a name="272800129"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272800129" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272800129">(Feb 22 2022 at 13:13)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="223286">Jake Hughes</span> <a href="#narrow/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary/near/272796019">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> I understand. I used an intrinsic as it seemed like a straightforward way to hook into codegen at the place I wanted and start writing my own logic for the function. IIRC the drop glue stuff is implemented as a terminator kind in the MIR, this seemed like a fair bit of work.</p>
+</blockquote>
+<p>ah yea it is quite a bit of work. doesn't need a mir terminator, but still... well... you'll need to touch the collector, and basically do the type-walk you do in the intrinsic impl, but instead of calling functions, you need to register them for collection</p>
+
+
+
+<a name="272805809"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272805809" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake Hughes <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272805809">(Feb 22 2022 at 13:59)</a>:</h4>
+<p>thanks <span class="user-mention" data-user-id="124288">@oli</span> . Out of interest, if I didn't make my <code>make_collectable&lt;T&gt;</code> intrinsic an intrinsic, how would you see me generating it?  edge case-ing it in MIR generation of fn calls  like exchange_malloc? One of the reasons I chose to do it at <code>codegen_llvm</code> stage was because I was pretty sure I'd have the monomorphized version of <code>T</code>. This is most likely a misunderstanding on my part. Maybe you can also get monomorphized version of <code>T</code> during MIR building?</p>
+
+
+
+<a name="272809836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/ensure%20trait%20method%20kept%20in%20binary/near/272809836" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/ensure.20trait.20method.20kept.20in.20binary.html#272809836">(Feb 22 2022 at 14:28)</a>:</h4>
+<p>no you're right on that end, but you're also breaking abstractions in interesting ways (like drop glue). As an example: I don't see how your idea works for <code>Box</code> or <code>Vec</code>, as these just have pointer fields, they don't contain any fields that would implement your trait, even if they contain values of types that implement your trait</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

@@ -1,0 +1,440 @@
+<html>
+<head><meta charset="utf-8"><title>Loop Unrolling · project-portable-simd · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/index.html">project-portable-simd</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html">Loop Unrolling</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="272567672"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272567672" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272567672">(Feb 20 2022 at 05:20)</a>:</h4>
+<p>Hi all, thanks again for the help yesterday.  I've made some progress on the algorithm I'm translating to std::simd, and I'm hitting some issues with coaxing rustc/llvm to consistently unroll a key loop.  I understand unrolling is orthogonal to std::simd, however, I imagine I won't be the only one who hits this issue when converting what are traditionally hand unrolled SIMD algorithms into generic std::simd code.</p>
+<p>In my case, I'm translating the SIMD-BP128 integer compression algorithm to use std::simd.  This algorithm works on blocks of integers of a certain max bit-width (ie <code>value.leading_zeros() &gt; 32 - bit_width</code> for all values in the block).  To compress a block of integers you remove all of the leading 0 bits from each value.</p>
+<p>The canonical version of this algorithm is <a href="https://github.com/lemire/simdcomp/blob/master/src/avx512bitpacking.c#L42-L123">lemire/simdcomp</a>, which contains a hand unrolled function for packing/unpacking blocks of integers for all 32 bit-widths. As you can imagine, I'm not keen on translating each 64 pack/unpack methods to std::simd.  Thus, I set out to write one function which could pack blocks of integers, and which is generic on the bit-width and number of SIMD lanes to use.</p>
+<p>I've succeeded in writing the <a href="https://godbolt.org/z/fsdzs6qYs">generic pack function</a>, but rustc/llvm is very inconsistent about when it unrolls the primary loop.  There is a factor of 5 difference in performance for the function when unrolled vs not.  You can play around with the parameters in the linked Godbolt example  to see the difference - at bitwidth 5 or 7 the loop is unrolled and results in a single basic block of ~60 instructions, whereas bitwidth 6 is not unrolled.  Unrolling is key because there are two branches and an extra load from memory per iteration that are optimized out when unrolling occurs.  The only existing published Rust implementation of this algorithm I'm aware of uses the <code>crunchy</code> macro to force unrolling, however this isn't an option in a generic context, since proc-macros can't get access to the generic BIT_WIDTH value at compile time.</p>
+<p>Apologies in advance for the vague question/concern since I know this isn't directly actionable by <code>std::simd</code>, but I'm pretty curious if this is on y'alls radar, and whether there are any ideas for how to avoid such issues.</p>
+
+
+
+<a name="272568231"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568231" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568231">(Feb 20 2022 at 05:32)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="457711">Dan Burkert</span> <a href="#narrow/stream/257879-project-portable-simd/topic/Loop.20Unrolling/near/272567672">said</a>:</p>
+<blockquote>
+<p>I've succeeded in writing the <a href="https://godbolt.org/z/fsdzs6qYs">generic pack function</a>, but rustc/llvm is very inconsistent about when it unrolls the primary loop.  There is a factor of 5 difference in performance for the function when unrolled vs not.  You can play around with the parameters in the linked Godbolt example  to see the difference - at bitwidth 5 or 7 the loop is unrolled and results in a single basic block of ~60 instructions, whereas bitwidth 6 is not unrolled.  Unrolling is key because there are two branches and an extra load from memory per iteration that are optimized out when unrolling occurs.  The only existing published Rust implementation of this algorithm I'm aware of uses the <code>crunchy</code> macro to force unrolling, however this isn't an option in a generic context, since proc-macros can't get access to the generic BIT_WIDTH value at compile time.</p>
+<p>Apologies in advance for the vague question/concern since I know this isn't directly actionable by <code>std::simd</code>, but I'm pretty curious if this is on y'alls radar, and whether there are any ideas for how to avoid such issues.</p>
+</blockquote>
+<p>This may sound... weird.<br>
+but if you are working with truly large amounts of data?<br>
+consider actually just using a <strong>huge</strong> vector, more than the machine can handle.<br>
+No, really, LLVM will codegen it.</p>
+
+
+
+<a name="272568322"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568322" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568322">(Feb 20 2022 at 05:34)</a>:</h4>
+<p>This function always address blocks of 32 * NUM_LANES values, so maximum of 512 <code>u32</code>s.  I think you may be saying that since it's generic, <code>NUM_LANES</code> could be like 1M, in which case you really wouldn't want unrolling?  I agree, but that won't be the case in practice.</p>
+
+
+
+<a name="272568399"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568399" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568399">(Feb 20 2022 at 05:36)</a>:</h4>
+<p>I said that before taking a closer look at the code, but no, it's actually because using a larger vector than the machine can handle creates an unrolled loop of the appropriate instructions as a general rule.</p>
+
+
+
+<a name="272568485"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568485" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568485">(Feb 20 2022 at 05:38)</a>:</h4>
+<blockquote>
+<p>using a larger vector than the machine can handle</p>
+</blockquote>
+<p>A larger vector, meaning more SIMD lanes than are available, like 512 bit vector on haswell?  That's not the case here, I'm using avx512, but targeting and running on ice lake hardware.  Regardless, the unrolling behavior is the same for LANES=8 and LANES=16</p>
+
+
+
+<a name="272568493"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568493" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568493">(Feb 20 2022 at 05:38)</a>:</h4>
+<p>I mean like using a 1024 bit vector.</p>
+
+
+
+<a name="272568497"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568497" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568497">(Feb 20 2022 at 05:39)</a>:</h4>
+<p>I don't think std::simd even allows that?</p>
+
+
+
+<a name="272568505"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568505" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568505">(Feb 20 2022 at 05:39)</a>:</h4>
+<p>I believe f64x64 is valid code, actually.</p>
+
+
+
+<a name="272568584"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568584" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568584">(Feb 20 2022 at 05:41)</a>:</h4>
+<p>The linked godbolt is using <code>Simd&lt;u32, 16&gt;</code>, but the results are the same if it's changed to <code>Simd&lt;u32, 8&gt;</code>.  In either case it unrolls some bitwidths (1-5, 7-9, 16, 32), but not the others</p>
+
+
+
+<a name="272568599"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568599" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568599">(Feb 20 2022 at 05:41)</a>:</h4>
+<p>The loop is on a constant range</p>
+
+
+
+<a name="272568650"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568650" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568650">(Feb 20 2022 at 05:42)</a>:</h4>
+<p><code>for data_idx in 0..BIT_WIDTH { .. }</code></p>
+
+
+
+<a name="272568932"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272568932" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272568932">(Feb 20 2022 at 05:48)</a>:</h4>
+<p>yeah <code>Simd&lt;f64, 64&gt;</code> does compile, wild.  I had noticed that my algorithm using <code>Simd&lt;u32, 16&gt;</code> cross compiled to ARM successfuly, so I guess it's using the same trick under the covers.  That's very useful.</p>
+
+
+
+<a name="272569026"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569026" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569026">(Feb 20 2022 at 05:50)</a>:</h4>
+<p>Mhm.<br>
+It tries to faithfully use the "right" vector if you give it the right numbers, obviously, but using the "wrong" vector (right for the logic, wrong for the machine registers) can be useful for various reasons.</p>
+
+
+
+<a name="272569131"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569131" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569131">(Feb 20 2022 at 05:53)</a>:</h4>
+<p>It looks like in the non-unrolled version there's latent panic machinery.</p>
+
+
+
+<a name="272569227"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569227" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569227">(Feb 20 2022 at 05:55)</a>:</h4>
+<p>Yes, I think when the loop gets unrolled all of the index operations have constant/known indexes, so the checks are removed.  So my understanding is the causality arrow goes the other way: because it's unrolled, the panicking gets removed.  I don't really know how to test that assumption though.</p>
+
+
+
+<a name="272569326"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569326" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569326">(Feb 20 2022 at 05:56)</a>:</h4>
+<p>Maybe.<br>
+LLVM murmurs "unrolled loop by factor of 4 with run-time trip count".</p>
+
+
+
+<a name="272569575"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569575" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569575">(Feb 20 2022 at 06:00)</a>:</h4>
+<p>At least partly this has the problem that the implementation of Range in Rust seems to be blocking optimizations. If you could phrase this in a way that didn't rely on range and indexing, it might be easier to optimize.</p>
+
+
+
+<a name="272569727"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569727" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569727">(Feb 20 2022 at 06:03)</a>:</h4>
+<p>I dunno, because it optimizes for some of the ranges but not others.</p>
+<p>Here's a less generic version that does unroll for bit-width=6 (no range/loop): <a href="https://godbolt.org/z/shKoa7dE1">https://godbolt.org/z/shKoa7dE1</a></p>
+
+
+
+<a name="272569739"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569739" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569739">(Feb 20 2022 at 06:03)</a>:</h4>
+<p>that's the only way I know how to remove the loop, but obviously that'd require 32 separate function definitions</p>
+
+
+
+<a name="272569786"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569786" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569786">(Feb 20 2022 at 06:04)</a>:</h4>
+<p>I guess it's not really unrolling, there just isn't a loop</p>
+
+
+
+<a name="272569819"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569819" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569819">(Feb 20 2022 at 06:05)</a>:</h4>
+<p>yeah.</p>
+
+
+
+<a name="272569839"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569839" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569839">(Feb 20 2022 at 06:05)</a>:</h4>
+<p>Hmm I could probably macro-ize that and solve my problem.  I mostly started the thread because I have a hunch that this is going to be a common problem as people try and genericize what are traditionally very hand-rolled algorithms, and there's a strong intersection between <code>std::simd</code> and performance (and thus caring about loop unrolling), and traditional simd implementations being hand unrolled</p>
+
+
+
+<a name="272569879"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569879" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569879">(Feb 20 2022 at 06:06)</a>:</h4>
+<p>Yep.</p>
+
+
+
+<a name="272569893"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569893" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569893">(Feb 20 2022 at 06:06)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="457711">Dan Burkert</span> <a href="#narrow/stream/257879-project-portable-simd/topic/Loop.20Unrolling/near/272569727">said</a>:</p>
+<blockquote>
+<p>I dunno, because it optimizes for some of the ranges but not others.</p>
+<p>Here's a less generic version that does unroll for bit-width=6 (no range/loop): <a href="https://godbolt.org/z/shKoa7dE1">https://godbolt.org/z/shKoa7dE1</a></p>
+</blockquote>
+<p>And yes, it does optimize for some ranges! I have no idea why LLVM whiffs on that. :D</p>
+
+
+
+<a name="272569910"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569910" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569910">(Feb 20 2022 at 06:07)</a>:</h4>
+<p>Like, I am not seeing anything <strong>obvious</strong> that suggests why 5 flies but 6 doesn't.</p>
+
+
+
+<a name="272569979"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272569979" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272569979">(Feb 20 2022 at 06:08)</a>:</h4>
+<p>yeah exactly</p>
+
+
+
+<a name="272570080"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570080" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570080">(Feb 20 2022 at 06:10)</a>:</h4>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">pack</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span>: <span class="kp">&amp;</span><span class="p">[</span><span class="n">Simd</span><span class="o">&lt;</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="mi">32</span><span class="p">],</span><span class="w"> </span><span class="n">data</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="n">Simd</span><span class="o">&lt;</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">5</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">packed</span><span class="p">(</span><span class="n">values</span>: <span class="kp">&amp;</span><span class="p">[</span><span class="n">Simd</span><span class="o">&lt;</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="mi">32</span><span class="p">],</span><span class="w"> </span><span class="n">data</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="n">Simd</span><span class="o">&lt;</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="mi">6</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">pack</span>::<span class="o">&lt;</span><span class="mi">6</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>uh apparently this one works</p>
+
+
+
+<a name="272570108"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570108" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570108">(Feb 20 2022 at 06:11)</a>:</h4>
+<p>yes, but <code>fn pack</code> is incorrect for anything but <code>N=6</code></p>
+
+
+
+<a name="272570121"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570121" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570121">(Feb 20 2022 at 06:11)</a>:</h4>
+<p>oh god I have a tedious answer for that.</p>
+
+
+
+<a name="272570261"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570261" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570261">(Feb 20 2022 at 06:14)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="457711">Dan Burkert</span> <a href="#narrow/stream/257879-project-portable-simd/topic/Loop.20Unrolling/near/272570108">said</a>:</p>
+<blockquote>
+<p>yes, but <code>fn pack</code> is incorrect for anything but <code>N=6</code></p>
+</blockquote>
+<p>guess what you can do for free if you do it based on a const value so it's resolved during compilation</p>
+
+
+
+<a name="272570293"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570293" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570293">(Feb 20 2022 at 06:15)</a>:</h4>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">pack</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span>: <span class="kp">&amp;</span><span class="p">[</span><span class="n">Simd</span><span class="o">&lt;</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="mi">32</span><span class="p">],</span><span class="w"> </span><span class="n">data</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="n">Simd</span><span class="o">&lt;</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">pack_inner</span>::<span class="o">&lt;</span><span class="mi">16</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="p">,</span><span class="w"> </span><span class="mi">5</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">packed</span><span class="p">(</span><span class="n">values</span>: <span class="kp">&amp;</span><span class="p">[</span><span class="n">Simd</span><span class="o">&lt;</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="mi">32</span><span class="p">],</span><span class="w"> </span><span class="n">data</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="n">Simd</span><span class="o">&lt;</span><span class="kt">u32</span><span class="p">,</span><span class="w"> </span><span class="mi">16</span><span class="o">&gt;</span><span class="p">;</span><span class="w"> </span><span class="mi">6</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">pack</span>::<span class="o">&lt;</span><span class="mi">6</span><span class="o">&gt;</span><span class="p">(</span><span class="n">values</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>I disavow all knowledge of this code <span aria-label="see no evil" class="emoji emoji-1f648" role="img" title="see no evil">:see_no_evil:</span></p>
+
+
+
+<a name="272570733"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570733" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570733">(Feb 20 2022 at 06:24)</a>:</h4>
+<p>I... don't hate that</p>
+
+
+
+<a name="272570739"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570739" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570739">(Feb 20 2022 at 06:25)</a>:</h4>
+<p>I mean the alternative is macros</p>
+
+
+
+<a name="272570755"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570755" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570755">(Feb 20 2022 at 06:25)</a>:</h4>
+<p>I suspect there is a yet-other alternative which works, but yes.</p>
+
+
+
+<a name="272570807"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570807" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570807">(Feb 20 2022 at 06:26)</a>:</h4>
+<p>it's kind of perfect for this situation where the max N is absolutely definitely 32</p>
+
+
+
+<a name="272570829"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272570829" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272570829">(Feb 20 2022 at 06:27)</a>:</h4>
+<p>mhm.</p>
+
+
+
+<a name="272571036"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272571036" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272571036">(Feb 20 2022 at 06:31)</a>:</h4>
+<p>I have not tested it for all lengths but seems to go up to 14.</p>
+
+
+
+<a name="272572004"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572004" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572004">(Feb 20 2022 at 06:53)</a>:</h4>
+<p>I'm really digging this, thanks for the solution <span class="user-mention" data-user-id="281757">@Jubilee</span> .</p>
+<p>I discovered another LLVM headscratcher (luckily easily worked around): when the loop innards are abstraced into a fn everything works as expected, but when they are extracted into a closure, LLVM re-orders the instructions to have somewhat randomized memory accesses and performance tanks</p>
+
+
+
+<a name="272572045"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572045" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572045">(Feb 20 2022 at 06:54)</a>:</h4>
+<p><a href="https://godbolt.org/z/hfsh491rh">https://godbolt.org/z/hfsh491rh</a></p>
+
+
+
+<a name="272572091"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572091" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572091">(Feb 20 2022 at 06:55)</a>:</h4>
+<p>you can tell because the shift amounts in <code>packed_fn</code> go up linearly, and in <code>packed_closure</code> they jump around <span aria-label="shrug" class="emoji emoji-1f937" role="img" title="shrug">:shrug:</span></p>
+
+
+
+<a name="272572136"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572136" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572136">(Feb 20 2022 at 06:56)</a>:</h4>
+<p>Hmm, maybe the catch here is that the inner loop, as a closure, is the "same" struct containing the inner state, but for the const generic version, it actually codegens the generic function each time.</p>
+
+
+
+<a name="272572248"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572248" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572248">(Feb 20 2022 at 06:59)</a>:</h4>
+<p>It's like a factor 2x performance difference, definitely measurable</p>
+
+
+
+<a name="272572256"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572256" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572256">(Feb 20 2022 at 06:59)</a>:</h4>
+<p>ah yeah, the LLVM-IR is more nice and orderly too.</p>
+
+
+
+<a name="272572314"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572314" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572314">(Feb 20 2022 at 07:00)</a>:</h4>
+<p>I love that LLVM rewrites the ORs into the ternary instructions and all that stuff but it's kinda crazy how brittle things like that are</p>
+
+
+
+<a name="272572352"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572352" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572352">(Feb 20 2022 at 07:00)</a>:</h4>
+<p>well I say that, I haven't actually validated the ternaries are better, but I think it's a safe assumption</p>
+
+
+
+<a name="272572401"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572401" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572401">(Feb 20 2022 at 07:01)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>pack/lwdc/lanes=16/bit-width=2
+                        time:   [9.4308 ns 9.4309 ns 9.4311 ns]
+                        thrpt:  [54.289 Gelem/s 54.289 Gelem/s 54.290 Gelem/s]
+                 change:
+                        time:   [-48.824% -48.746% -48.679%] (p = 0.00 &lt; 0.05)
+                        thrpt:  [+94.850% +95.107% +95.405%]
+                        Performance has improved.
+</code></pre></div>
+
+
+
+<a name="272572409"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572409" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572409">(Feb 20 2022 at 07:01)</a>:</h4>
+<p>just closure vs fn ^</p>
+
+
+
+<a name="272572484"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572484" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572484">(Feb 20 2022 at 07:03)</a>:</h4>
+<p>The ternaries are apparently nice, based on wot people say. Would not know, my main machine is AMD.</p>
+
+
+
+<a name="272572555"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572555" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572555">(Feb 20 2022 at 07:04)</a>:</h4>
+<p>Yeah on the MIR level these are much different.</p>
+
+
+
+<a name="272572576"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572576" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572576">(Feb 20 2022 at 07:05)</a>:</h4>
+<p>ah, so not LLVM then</p>
+
+
+
+<a name="272572577"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572577" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572577">(Feb 20 2022 at 07:05)</a>:</h4>
+<p>The closure has to call into the same thing each time, "logically", whereas the generic function call is actually a request to create a new function, ex nihilo, and then call it.</p>
+
+
+
+<a name="272572587"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572587" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572587">(Feb 20 2022 at 07:05)</a>:</h4>
+<p>I see, that's very interesting</p>
+
+
+
+<a name="272572644"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572644" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572644">(Feb 20 2022 at 07:06)</a>:</h4>
+<p>where do closures get inlined, is that in rust or LLVM?</p>
+
+
+
+<a name="272572676"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572676" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Dan Burkert <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572676">(Feb 20 2022 at 07:07)</a>:</h4>
+<p>I guess that'd be LLVM if I understood what you just said correctly</p>
+
+
+
+<a name="272572743"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572743" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572743">(Feb 20 2022 at 07:08)</a>:</h4>
+<p>unsure, LLVM does most of the actual inlining work but monomorphization is something we do, I believe?</p>
+
+
+
+<a name="272572775"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572775" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572775">(Feb 20 2022 at 07:09)</a>:</h4>
+<p>I wonder if generating a closure that generates closures would make them work the same.</p>
+
+
+
+<a name="272572955"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272572955" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jubilee <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272572955">(Feb 20 2022 at 07:13)</a>:</h4>
+<p>but yeah, the big catch with closures is that if they don't capture <strong>anything</strong>, they're morally equivalent to a function... most of the time...?<br>
+but if they do capture anything, they aren't identical to a function, they are a struct with state + a pointer.</p>
+
+
+
+<a name="272606553"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/257879-project-portable-simd/topic/Loop%20Unrolling/near/272606553" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/257879-project-portable-simd/topic/Loop.20Unrolling.html#272606553">(Feb 20 2022 at 17:53)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="457711">Dan Burkert</span> <a href="#narrow/stream/257879-project-portable-simd/topic/Loop.20Unrolling/near/272572644">said</a>:</p>
+<blockquote>
+<p>where do closures get inlined, is that in rust or LLVM?</p>
+</blockquote>
+<p>There's a MIR inliner checked in, but it's currently off-by-default everywhere, and thus only LLVM is doing inlining for you right now (unless you're passing <code>-Z mir-opt-level=3</code> or something)</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

@@ -1,0 +1,38 @@
+[
+    {
+        "content": "<p>Hey, I'm someone who is very interested in behavioral types / the typestate pattern. Rust is very cool, because you can make quite elegant typestate-based functions<br>\n<code>\nimpl Foo&lt;StateA&gt; {\n  a_to_b(self) -&gt; Foo&lt;StateB&gt; {\n    //...\n  }\n}\nimpl Foo&lt;StateB&gt; {\n  b_to_c(self) -&gt; Foo&lt;StateC&gt; {\n    //...\n  }\n}\n</code><br>\nThe call-site is a bit less elegant, but at least we can chain the calls<br>\n<code>\nlet foo = \n  foo.a_to_b()\n      .b_to_c();\n</code></p>\n<p>Sometimes we want a function that not only changes the state of foo, but also returns some other value. Defining that is still quite easy.<br>\n<code>\nimpl Foo&lt;StateA&gt; {\n  a_to_b_with_val(self) -&gt; (Foo&lt;StateB&gt;, Bar) {\n    //...\n  }\n}\n</code><br>\nHowever, calling such a function becomes quite a pain.<br>\n<code>\nlet (foo, bar) = foo.a_to_b_with_val();\nlet foo = foo.b_to_c();\n</code></p>\n<p>In my opinion this is quite a shame; all the hard stuff for typestates is already solved in Rust, it is just the syntax that is clunky.</p>\n<p>Thus, I was thinking it would be nice to have a \"self-return\" type (better name pending) for methods that consume <code>self</code>, with the intent that this value is not returned in the traditional sense, but instead <code>foo.a_to_b();</code> is desugared to <code>let foo = foo.a_to_b();</code>. Crucially, such functions can still have a regular return type. E.g., <code>let bar = foo.a_to_b_with_val();</code> would desugar to <code>let (foo, bar) = foo.a_to_b_with_val();</code>.</p>\n<p>Obviously, this idea still needs a lot of working out (most importantly, how would chained calls desugar?).<br>\nI wondered if the folks here think this is interesting and might merit more polish, or if it seems like too much magic for an obscure problem?<br>\nWhichever direction, I'd be glad to hear what you think of it.</p>",
+        "id": 260321090,
+        "sender_full_name": "Alex Keizer",
+        "timestamp": 1636053682
+    },
+    {
+        "content": "<p>The idea of being able to have <code>(Self) -&gt; (Self, ReturnType)</code> functions with better ergonomics at the call site sounds interesting to me. The particular example of having <code>let bar = foo.a_to_b_with_val();</code> desugar to <code>let (foo, bar) = ...</code> seems too magical to me though.</p>",
+        "id": 260328022,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1636056882
+    },
+    {
+        "content": "<p>Note that you can approximate the syntactic sugar you're describing using a macro. In fact, the Rust compiler already uses such a macro internally: <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_mir_build/build/macro.unpack.html\"><code>unpack!</code></a>.</p>",
+        "id": 260328153,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1636056938
+    },
+    {
+        "content": "<p>With a version of that macro generalized to tuples (should be pretty easy; just remove the <code>BlockAnd</code>), your example call would look like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">bar</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">unpack</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">foo</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">foo</span><span class=\"p\">.</span><span class=\"n\">a_to_b_with_val</span><span class=\"p\">());</span><span class=\"w\"></span>\n</code></pre></div>\n<p>(<code>foo</code> would have to be mutable because this uses assignment.)</p>",
+        "id": 260328327,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1636057022
+    },
+    {
+        "content": "<p>Thanks for mentioning <code>unpack!</code>, it seems like I could use that to work out my ideas.</p>\n<p>The motivation behind desugaring to <code>let (foo, bar) = ...</code> is that seems redundant to mention <code>foo</code> twice.<br>\nThe original value is consumed, so I couldn't think of a scenario where you'd want to bind the returned Foo&lt;...&gt; to another name. <br>\nParticularly in contexts with a lot of <code>Self -&gt; (Self, ReturnType)</code> functions, it creates a lot of noise. </p>\n<p>I do agree that it could be confusing if there is no indication at the call-site that this desugaring is happening, I guess that's something for me to work out more.</p>",
+        "id": 260339234,
+        "sender_full_name": "Alex Keizer",
+        "timestamp": 1636062372
+    },
+    {
+        "content": "<p>Hi,</p>\n<p>In our code we have a <code>struct State</code>. Since the library we're using requires a cheap <code>Clone</code> implementation (so that the state can be given to multiple workers), we're using <code>Arc&lt;RwLock&lt;...&gt;&gt;</code> for the interior fields, like </p>\n<div class=\"codehilite\"><pre><span></span><code>struct State {\n    user_data: Arc&lt;RwLock&lt;HashMap&lt;String, u64&gt;&gt;&gt;,\n}\n</code></pre></div>\n<p>We also have convenience method for modifying the state, something like </p>\n<div class=\"codehilite\"><pre><span></span><code>impl State {\n    pub async fn update_data(&amp;self, user: &amp;str) {\n        let entry = self.user_data.write().await.entry();\n        /* modify the entry */\n    }\n}\n</code></pre></div>\n<p>We currently disagree whether the methods should rather be </p>\n<div class=\"codehilite\"><pre><span></span><code>pub async fn update_data(&amp;mut self, user: &amp;str)\n</code></pre></div>\n<p>since the method clearly changes the interior state. On the other hand, many rust projects only require an immutable borrow of self whenever <code>RwLock</code>, for instance <a href=\"https://github.com/smallnest/rpcx-rs/blob/master/rpcx_client/src/discovery.rs\">this one</a>. This probably stems from the fact that, once <code>RwLock</code> is employed, there are no memory safety issues coming from the use of <code>&amp;self</code>.</p>\n<p>Which way is more preferable in Rust?</p>",
+        "id": 260395815,
+        "sender_full_name": "Marcin Mielniczuk",
+        "timestamp": 1636113577
+    }
+]

@@ -1,0 +1,287 @@
+<html>
+<head><meta charset="utf-8"><title>Atomic loads from a `*const u8` pointer into shared memory · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html">Atomic loads from a `*const u8` pointer into shared memory</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="234054829"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234054829" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234054829">(Apr 11 2021 at 15:33)</a>:</h4>
+<p>Hi! I'm trying to perform an atomic load from 2 different Rust processes to the same shared memory location in order to avoid triggering undefined behavior during a race condition. Here 1 process has read-write access and the other process only has read access.  Since Rust <a href="https://doc.rust-lang.org/nomicon/atomics.html">follows</a> the C++20 specification for atomics, this should still be safe to do between processes on architectures where atomics are <a href="https://stackoverflow.com/a/51463590">lock-free</a>. Now I'm facing the following, my intention was to use <a href="https://doc.rust-lang.org/core/sync/atomic/struct.AtomicU8.html">AtomicU8</a> to perform the atomic load on the shared memory location, but it can only be constructed from a <code>&amp;mut u8</code> using <code>AtomicU8::from_mut</code>. The read-only process only as a <code>ptr: *const u8</code> to the shared memory location which is instant UB to cast to <code>&amp;mut u8</code>, so that excludes that route (even taking a reference <code>&amp;u8</code> by dereferencing the <code>&amp;*ptr</code> is also UB, because the other process might mutate the byte). I then tried to cast the <code>ptr</code> via <code>&amp;*(ptr as *const AtomicU8)</code> in order to call <code>AtomicU8::load</code> on it, but because <code>AtomicU8</code> contains an <a href="https://doc.rust-lang.org/core/cell/struct.UnsafeCell.html">UnsafeCell</a>, this triggers undefined behavior in Miri  (with <code>-Zmiri-track-raw-pointers</code> flag) when an <a href="https://doc.rust-lang.org/src/core/sync/atomic.rs.html#1469-1492">internal call</a> is made to <code>UnsafeCell::get()</code> which casts the <code>*const u8</code> to a <code>*mut u8</code>, which results in the error "trying to reborrow for SharedReadWrite at alloc119186, but parent tag &lt;301544&gt; does not have an appropriate item in the borrow stack", which makes total sense to me because it is trying to upgrade a SharedRead memory location to a SharedReadWrite location, which is UB under the Stacked Borrows model. Digging a little further, I noticed the <a href="https://doc.rust-lang.org/core/intrinsics/fn.atomic_load.html">core::intrinsics::atomic_load</a> function that does take a <code>*const T</code>, but this requires an unstable feature <code>#![feature(core_intrinsics)]</code> and in the module <a href="https://doc.rust-lang.org/src/core/intrinsics.rs.html#48-54">source code</a> it warns "intrinsics are unlikely to ever be stabilized, instead they should be used through stabilized interfaces in the rest of the standard library". This is really unfortunate, because there is no alternative public API which accepts a <code>*const u8</code> and I'm searching for a way that is (eventually) stable in Rust. There seems to be a <a href="https://doc.rust-lang.org/src/core/sync/atomic.rs.html#2347-2359">function in <code>core::sync::atomic</code></a> that does exactly that, but it is not public (method signature <code>unsafe fn atomic_load&lt;T: Copy&gt;(dst: *const T, order: Ordering) -&gt; T</code>). Is it intentional (e.g. by design) that no core function exposes atomic loads by a <code>*const u8</code> pointer? Or are there any other angles that I could try?  <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="234058110"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234058110" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234058110">(Apr 11 2021 at 16:23)</a>:</h4>
+<p>Probably an oversight, I asked for something similar  in <a href="https://github.com/rust-lang/rust/issues/76314">#76314</a></p>
+<p>You could try transmuting the pointer to a reference of that atomic, but you should be careful to not create a mutable reference to it, otherwise you could call <code>get_mut()</code></p>
+
+
+
+<a name="234059360"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234059360" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234059360">(Apr 11 2021 at 16:44)</a>:</h4>
+<p>Thanks <span class="user-mention" data-user-id="330154">@The 8472</span> . Here is an example of such a transmute/cast: <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=2624f54fd126c19d272613f678f57586">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=2624f54fd126c19d272613f678f57586</a> The problem here is that it takes a reference to <code>&amp;AtomicU8</code> (which also creates a <code>&amp;UnsafeCell&lt;u8&gt;</code> internally) for which Miri then tries to upgrade the permission for the backing <code>u8</code> from <code>SharedReadOnly</code> to <code>SharedReadWrite</code>, which is undefined behavior (you can trigger it on the playground by the button Tools &gt; Miri). Even without creating a mutable reference, this is currently UB.</p>
+
+
+
+<a name="234060430"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234060430" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234060430">(Apr 11 2021 at 17:00)</a>:</h4>
+<p>One work-around I could think of, would be to give all the processes read-write access to the shared memory and then actually be careful not to write to the shared memory from the read-only processes, but that seems a bit of a steep work-around considering the <code>unsafe fn atomic_load&lt;T: Copy&gt;(dst: *const T, order: Ordering) -&gt; T</code> that's <a href="https://doc.rust-lang.org/src/core/sync/atomic.rs.html#2347-2359">sitting and hiding</a> in <code>core::sync::atomic</code> <span aria-label="stuck out tongue closed eyes" class="emoji emoji-1f61d" role="img" title="stuck out tongue closed eyes">:stuck_out_tongue_closed_eyes:</span>  (and it would change the semantics of my API significantly also, which I would like to avoid if somehow possible).</p>
+
+
+
+<a name="234061776"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234061776" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234061776">(Apr 11 2021 at 17:23)</a>:</h4>
+<p>Oh, the other process only has readonly access, I missed that part.</p>
+
+
+
+<a name="234061968"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234061968" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234061968">(Apr 11 2021 at 17:27)</a>:</h4>
+<p>Then I suspect the use-case simply wasn't considered and the intrinsics are the only way to do this properly at the moment.</p>
+
+
+
+<a name="234064238"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234064238" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234064238">(Apr 11 2021 at 18:03)</a>:</h4>
+<p><span class="user-mention" data-user-id="400735">@Pointerbender</span> the issue stems from your usage of <code>ptr::addr_of!</code> instead of <code>ptr::addr_of_mut!</code>. If you make that change, the cast from <code>*const u8</code> to <code>* AtomicU8</code> to then perform the load works just fine <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="234064367"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234064367" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234064367">(Apr 11 2021 at 18:05)</a>:</h4>
+<ul>
+<li><a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=5e876e64eeef2eb5cd295251e32768bb">Playground</a></li>
+</ul>
+
+
+
+<a name="234064825"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234064825" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234064825">(Apr 11 2021 at 18:12)</a>:</h4>
+<p>Thanks <span class="user-mention" data-user-id="232018">@Daniel Henry-Mantilla</span> ! That indeed fixes the example, but for my current use case I don't have access to a <code>mut shared_memory</code> (<code>core::ptr::addr_of_mut!</code> asserts mutable access at compile time, <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f8e442de7c1a6ab6ddb206e6efd7cb2e">this fails to compile</a> for example), I only have a <code>*const u8</code> from the start in the read-only process. Taking your modified example, I could work-around that by giving all the processes access to a <code>*mut u8</code> (even if these processes only read), but I was hoping for a way to avoid that <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="234065087"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234065087" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234065087">(Apr 11 2021 at 18:17)</a>:</h4>
+<p><code>UnsafeCell</code> actually has an <a href="https://doc.rust-lang.org/core/cell/struct.UnsafeCell.html#method.raw_get">UnsafeCell::raw_get</a> (associative) method which could be used to avoid creating a reference <code>&amp;UnsafeCell&lt;u8&gt;</code>, but since <code>AtomicU8</code> wraps <code>UnsafeCell&lt;u8&gt;</code> and does not have a similar <code>raw_get()</code> method, the only way to atomically load the byte is by creating a reference to <code>&amp;AtomicU8</code> which then  also creates a reference to <code>&amp;UnsafeCell</code>, which triggers the UB in this case.</p>
+
+
+
+<a name="234065814"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234065814" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234065814">(Apr 11 2021 at 18:30)</a>:</h4>
+<p>Perhaps this use case could justify a new associative method such as <code>AtomicU8::raw_load(ptr: *const Self, order: Ordering) -&gt; u8 {  }</code>, analogous to <code>UnsafeCell</code>? E.g.:</p>
+<div class="codehilite"><pre><span></span><code>impl AtomicU8 { // other atomics implemented similarly
+            pub fn raw_load(ptr: *const Self, order: Ordering) -&gt; u8 {
+                // SAFETY: data races are prevented by atomic intrinsics.
+                unsafe { atomic_load(self.v.raw_get(ptr as *const UnsafeCell&lt;u8&gt;), order) }
+            }
+}
+</code></pre></div>
+<p>Or possibly making <code>core::sync::atomic::atomic_load</code> public instead of private, but maybe there was a reason it was kept private, I don't know.</p>
+
+
+
+<a name="234067164"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234067164" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234067164">(Apr 11 2021 at 18:53)</a>:</h4>
+<p><span class="user-mention" data-user-id="400735">@Pointerbender</span> yeah, you will need to avoid giving <code>ReadOnly</code> provenance to the pointer if the memory may be mutated by some other mechanism. If memory is mutable, even if just by a third party, then the pointers need <code>SharedReadWrite</code> provenance. Afterwards you can use other type-level mechanisms to try and ensure that the receiver of such a pointer does not perform mutations themselves, but the compiler at least should know that with such a pointers mutation may be, at the very least, <em>observed</em>.</p>
+
+
+
+<a name="234068583"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234068583" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234068583">(Apr 11 2021 at 19:14)</a>:</h4>
+<p>I see, so even though not explicitly documented in the private method <code>core::sync::atomic::atomic_load(*const T)</code> or in the public method <code>core::intrinsics::atomic_load(*const T)</code>, both still need <code>SharedReadWrite</code> provenance? That is somewhat surprising/confusing, because Miri does not complain about the latter, even with <code>SharedReadOnly</code> provenance: <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=986d9f24b4f5af9b5911ae76c0204599">https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=986d9f24b4f5af9b5911ae76c0204599</a> (and AtomicU8 indirectly calls <code>core::intrinsics::atomic_load</code> internally). I think I get your point about external forces mutating the same byte and needing <code>SharedReadWrite</code> provenance for that, but I was under the impression that atomics are some kind of special type that guarantee that won't happen at exactly the same time, hence <code>SharedReadOnly</code> provenance should be fine since we're guaranteed not to race with other writers (as long as the load is atomic). If we still need <code>SharedReadWrite</code> provenance either way, why does Miri not complain about this playground example?</p>
+
+
+
+<a name="234069323"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234069323" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234069323">(Apr 11 2021 at 19:26)</a>:</h4>
+<p>My running theory is that atomic loads don't require <code>SharedReadWrite</code> provenance, it is the reference to <code>&amp;UnsafeCell&lt;u8&gt;</code> (inside the <code>&amp;AtomicU8</code>) that requires the <code>SharedReadWrite</code> provenance, which could be bypassed if there existed an <code>AtomicU8::raw_load(*const AtomicU8)</code> associated method (see above) which would not create a reference <code>&amp;UnsafeCell&lt;u8&gt;</code>.</p>
+
+
+
+<a name="234072859"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234072859" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234072859">(Apr 11 2021 at 20:21)</a>:</h4>
+<p>While I can imagine an atomic <em>load</em> only requiring ReadOnly provenance, I could also imagine the compiler then replacing the op with a non-atomic one, precisely because the pointer is assumed to point to read-only memory. The difference would lie in the exact semantics of atomic operations (<em>e.g</em>., if they are considered as having side-effects despite operating on read-only memory, then the compiler would not be able to downgrade the load). I personally don't know; it may indeed be that the intrinsic op is thus less strict than the going-though-a-pointer-cast polyfill, or ot may be that Miri has a false positive. Let's see what <span class="user-mention" data-user-id="120791">@RalfJ</span>  knows about this</p>
+
+
+
+<a name="234074112"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234074112" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234074112">(Apr 11 2021 at 20:40)</a>:</h4>
+<p><span class="user-mention" data-user-id="400735">@Pointerbender</span> how'd you get that original <code>*const u8</code> ptr? looks like it is <code>SharedReadOnly</code>, which makes little sense for memory you expect to be mutated by others</p>
+
+
+
+<a name="234074133"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234074133" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234074133">(Apr 11 2021 at 20:40)</a>:</h4>
+<p><code>SharedReadOnly</code> means "this points to memory that <em>nobody</em> may mutate"</p>
+
+
+
+<a name="234074152"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234074152" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234074152">(Apr 11 2021 at 20:41)</a>:</h4>
+<p>like, no mutation at all. not even correctly synchronized atomic mutation</p>
+
+
+
+<a name="234074165"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234074165" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234074165">(Apr 11 2021 at 20:41)</a>:</h4>
+<p>basically it means "if you do mutliple loads from this pointer they will all definitely produce the same result"</p>
+
+
+
+<a name="234074266"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234074266" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234074266">(Apr 11 2021 at 20:43)</a>:</h4>
+<blockquote>
+<p>I was under the impression that atomics are some kind of special type that guarantee that won't happen at exactly the same time, hence SharedReadOnly provenance should be fine since we're guaranteed not to race with other writers (as long as the load is atomic)</p>
+</blockquote>
+<p>I am not entirely sure what you mean here, but notice the following terminoogy:</p>
+<ul>
+<li>race condition: two accesses to the same memory at the same time, at least one of which is a write.</li>
+<li>data race: a race condition where at least one access is non-atomic. data races are UB.</li>
+</ul>
+<p>If I understand your example, you are definitely racing (as in, there is a race condition). but if you use atomics, there's no data race, i.e. no UB, and all is fine.</p>
+
+
+
+<a name="234074339"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234074339" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234074339">(Apr 11 2021 at 20:44)</a>:</h4>
+<blockquote>
+<p>If we still need SharedReadWrite provenance either way, why does Miri not complain about this playground example?</p>
+</blockquote>
+<p>which one? <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=2624f54fd126c19d272613f678f57586">it complains here</a></p>
+
+
+
+<a name="234074465"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234074465" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234074465">(Apr 11 2021 at 20:46)</a>:</h4>
+<p>your example code is "doomed" the moment you do <code>addr_of!</code>.  this is an operation that "crosses the boundary" between the safe world of references and directly accessed local variables/statics, and the unsafe world of raw pointers. <em>when you cross that boundary</em>, you seal the fate of the ptr you are creating. if it is a <code>const</code> ptr, it is read-only (except for interior mutability). if it is a <code>mut</code> ptr, it is read-write.<br>
+later casting between <code>*const</code> and <code>*mut</code> has no further effect.</p>
+
+
+
+<a name="234074511"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234074511" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234074511">(Apr 11 2021 at 20:47)</a>:</h4>
+<p>shared memory <em>definitely</em> should be in an <code>UnsafeCell</code> if you are using shared references (<code>&amp;</code>), since it's aliased mutable state and that is exactly what <code>UnsafeCell</code> is required for</p>
+
+
+
+<a name="234074631"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234074631" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234074631">(Apr 11 2021 at 20:49)</a>:</h4>
+<p>to create a <code>&amp;AtomucU8</code> to shared memory I'd honestly use a transmute from <code>*mut u8</code> (which I assume is what you have initially when you call <code>mmap</code>). you are right that going through <code>AtomucU8::from_mut</code> is wrong, that function can only be used when you start with uniquely owned data. alternatively, you can consider <code>mmap</code> to have return type <code>*const Atomic&lt;U8&gt;</code> and then do <code>&amp;*</code> to get a reference.</p>
+
+
+
+<a name="234077527"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234077527" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Steven Fackler <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234077527">(Apr 11 2021 at 21:25)</a>:</h4>
+<p>Yeah, the <code>AtomicT</code> types are guaranteed to have the same memory layout as their primitive equivalents (though some like AtomicU64 can have higher alignment requirements) so constructing a reference to one from the pointer is the way to go. We should probably have a constructor that does this...</p>
+
+
+
+<a name="234124515"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234124515" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234124515">(Apr 12 2021 at 08:52)</a>:</h4>
+<p>Thanks for your inputs <span class="user-mention" data-user-id="120791">@RalfJ</span> and <span class="user-mention" data-user-id="232018">@Daniel Henry-Mantilla</span>  <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span> I've been pondering about it this morning and I think it is clearer now. Let me start by answering your questions:<br>
+<span class="user-mention silent" data-user-id="232018">Daniel Henry-Mantilla</span> <a href="#narrow/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory/near/234072859">said</a>:</p>
+<blockquote>
+<p>I personally don't know; it may indeed be that the intrinsic op is thus less strict than the going-though-a-pointer-cast polyfill, or it may be that Miri has a false positive. Let's see what <span class="user-mention silent" data-user-id="120791">RalfJ</span>  knows about this</p>
+</blockquote>
+<p>That certainly is an interesting question regarding the intrinsics, how could I go about finding an answer to that? In <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=986d9f24b4f5af9b5911ae76c0204599">this case</a> I was trying to make Miri to catch an error while calling the atomic intrinsics with a <code>*const u8</code>, but Miri didn't complain, so I guess that would make it a potential false negative, rather than a false positive (but more on this below).<br>
+<span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory/near/234074112">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="400735">Pointerbender</span> how'd you get that original <code>*const u8</code> ptr? looks like it is <code>SharedReadOnly</code>, which makes little sense for memory you expect to be mutated by others</p>
+</blockquote>
+<p>The particular scenario where I ran into the Miri error was in a <code>#[test]</code> for my API (for which I updated the semantics this morning, see more below).</p>
+<blockquote>
+<p>If I understand your example, you are definitely racing (as in, there is a race condition). but if you use atomics, there's no data race, i.e. no UB, and all is fine.</p>
+</blockquote>
+<p>This is correct.<br>
+<span class="user-mention silent" data-user-id="120791">RalfJ</span> <a href="#narrow/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory/near/234074339">said</a>:</p>
+<blockquote>
+<blockquote>
+<p>If we still need SharedReadWrite provenance either way, why does Miri not complain about this playground example?</p>
+</blockquote>
+<p>which one? <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=2624f54fd126c19d272613f678f57586">it complains here</a></p>
+</blockquote>
+<p>I meant <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=986d9f24b4f5af9b5911ae76c0204599">this example</a> from the same message.</p>
+<p>With the help of your feedback, I realized I need to update my API to accept a <code>*mut u8</code> or an <code>&amp;UnsafeCell&lt;u8&gt;</code> in order to enforce <code>SharedReadWrite</code> semantics. I want to make this explicit, so that this particular detail will not confuse programmers that may try to call this API with a <code>*const u8</code>.  I think where I got throw own off, is by seeing the method signature of <a href="https://doc.rust-lang.org/core/intrinsics/fn.atomic_load.html">core::intrinsics::atomic_load</a> which takes a <code>*const T</code> as its input parameter. Semantically speaking <code>intrinsics::atomic_load</code> should take a <code>*mut T</code> if I understand correctly now, because under <code>SharedReadOnly / *const T</code> semantics the compiler <em>might</em> already assume there is no race condition due to the absence of external mutations and this makes less sense for atomic loads. (Do there exist use cases for using <code>*const T</code> with the intrinsics version of atomic loads still? I'm curious now <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span> <code>AtomicU8</code> is not bothered by this, because it ensures the <code>*const</code> pointer is tagged with <code>SharedReadWrite</code> through the inner <code>UnsafeCell&lt;u8&gt;</code>). I guess that's why Miri could also not catch an error in the <a href="https://play.rust-lang.org/?version=nightly&amp;mode=debug&amp;edition=2018&amp;gist=986d9f24b4f5af9b5911ae76c0204599">example</a> using intrinsics directly, because Miri specifically relies on the semantics of <code>*const T</code> versus <code>*mut T</code>. Your comments have been very helpful in the process of properly understanding this, thank you <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="234130463"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234130463" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234130463">(Apr 12 2021 at 09:45)</a>:</h4>
+<blockquote>
+<p>That certainly is an interesting question regarding the intrinsics, how could I go about finding an answer to that? In this case I was trying to make Miri to catch an error while calling the atomic intrinsics with a *const u8, but Miri didn't complain, so I guess that would make it a potential false negative, rather than a false positive (but more on this below).</p>
+</blockquote>
+<p>this is a true negative. you are not mutating, after all, nor creating a reference that would assert mutability.</p>
+
+
+
+<a name="234130667"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234130667" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234130667">(Apr 12 2021 at 09:46)</a>:</h4>
+<p>so in that sense, <code>*const</code> on the intrinsic is at least not the wrong choice</p>
+
+
+
+<a name="234130758"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234130758" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234130758">(Apr 12 2021 at 09:47)</a>:</h4>
+<p>the UB in <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=2624f54fd126c19d272613f678f57586">this example</a> has nothing to do with <code>atomic_load</code> and everything to do with <code>&amp;UnsafeCell</code> -- note that Miri complains even if you remove lines 10 and 11! the error is in line 9</p>
+<div class="codehilite"><pre><span></span><code>error: Undefined Behavior: trying to reborrow for SharedReadWrite at alloc1372, but parent tag &lt;untagged&gt; does not have an appropriate item in the borrow stack
+ --&gt; src/main.rs:9:41
+  |
+9 |     let atomic_u8: &amp;AtomicU8 = unsafe { &amp;*(ptr as *const AtomicU8) };
+  |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^ trying to reborrow for SharedReadWrite at alloc1372, but parent tag &lt;untagged&gt; does not have an appropriate item in the borrow stack
+  |
+</code></pre></div>
+<p>So I think the confusion here also stems fro mixing up "what <code>atomic_load</code> needs (to not be UB)" and "what <code>&amp;AtomicU8</code> needs". <code>atomic_load</code> just needs "a ptr you can read from", but to create an <code>&amp;AtomicU8</code> you need "a ptr you can write to". (under the current rules. this might be overly restrictive.)</p>
+
+
+
+<a name="234131147"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234131147" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234131147">(Apr 12 2021 at 09:50)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="243558">Steven Fackler</span> <a href="#narrow/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory/near/234077527">said</a>:</p>
+<blockquote>
+<p>Yeah, the <code>AtomicT</code> types are guaranteed to have the same memory layout as their primitive equivalents (though some like AtomicU64 can have higher alignment requirements) so constructing a reference to one from the pointer is the way to go. We should probably have a constructor that does this...</p>
+</blockquote>
+<p>to be clear, we are talking about a constructor from <code>*mut</code>, right? this can currently be done via ptr casts</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">fn</span> <span class="nf">atomic_from_ptr</span><span class="p">(</span><span class="n">ptr</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="kt">u8</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kp">&amp;</span><span class="nc">AtomicU8</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="o">&amp;*</span><span class="p">(</span><span class="n">ptr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">AtomicU8</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p><span class="user-mention" data-user-id="400735">@Pointerbender</span> this is probably along the lines of what you need</p>
+
+
+
+<a name="234133907"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234133907" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Pointerbender <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234133907">(Apr 12 2021 at 10:15)</a>:</h4>
+<p>Indeed, that's what I ended up using <span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>
+
+
+
+<a name="234141104"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234141104" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Steven Fackler <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234141104">(Apr 12 2021 at 11:22)</a>:</h4>
+<blockquote>
+<p>to be clear, we are talking about a constructor from <code>*mut</code>, right? this can currently be done via ptr casts</p>
+</blockquote>
+<p>Yep - an unsafe constructor from a raw pointer, since people tend to not be aware that this is a thing you're allowed to do.</p>
+
+
+
+<a name="234520160"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Atomic%20loads%20from%20a%20%60%2Aconst%20u8%60%20pointer%20into%20shared%20memory/near/234520160" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> RalfJ <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory.html#234520160">(Apr 14 2021 at 15:26)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="243558">Steven Fackler</span> <a href="#narrow/stream/122651-general/topic/Atomic.20loads.20from.20a.20.60*const.20u8.60.20pointer.20into.20shared.20memory/near/234141104">said</a>:</p>
+<blockquote>
+<blockquote>
+<p>to be clear, we are talking about a constructor from <code>*mut</code>, right? this can currently be done via ptr casts</p>
+</blockquote>
+<p>Yep - an unsafe constructor from a raw pointer, since people tend to not be aware that this is a thing you're allowed to do.</p>
+</blockquote>
+<p>and from a <em>mutable</em> raw pointer to also nudge them in the right direction there</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

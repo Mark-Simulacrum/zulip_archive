@@ -1,0 +1,139 @@
+<html>
+<head><meta charset="utf-8"><title>Aliasing pessimizations · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html">Aliasing pessimizations</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="209905173"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209905173" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209905173">(Sep 12 2020 at 23:46)</a>:</h4>
+<p>I've been trying to optimize some code that has proven to be sensitive to aliasing pessimizations. I'm finding that the compiler is more pessimistic than I would have thought (i.e. thinks things can alias which cannot). But I'm new to this, so I'm not sure how much of that is faulty reasoning on my part.</p>
+<p>I was trying to see just how pessimistic it was, and wrote some test code which I thought the compiler would not possibly think contained aliasing.</p>
+<div class="codehilite"><pre><span></span><code>// Context omitted for brevity.
+
+fn bar(s: &amp;mut S) {
+    let y = s.y;
+
+    if y &lt; 10 {
+        s.x = foo();
+    }
+
+    if y &lt; 5 {
+        s.x = foo();
+    }
+}
+
+fn baz(s: &amp;mut S) {
+    if s.y &lt; 10 {
+        s.x = foo();
+    }
+
+    if s.y &lt; 5 {
+        s.x = foo();
+    }
+}
+</code></pre></div>
+
+
+<p>The assembly generated for <code>bar</code> and <code>baz</code> at opt-level=3:</p>
+<div class="codehilite"><pre><span></span><code>0000000000007440 &lt;main::bar&gt;:
+    7440:       pushq  %r14
+    7442:       pushq  %rbx
+    7443:       pushq  %rax
+    7444:       movb   0x1(%rdi),%bl            // bl &lt;- s.y
+    7447:       cmpb   $0x9,%bl                 // cmp with bl
+    744a:   /-- ja     7464 &lt;main::bar+0x24&gt;
+    744c:   |   movq   %rdi,%r14
+    744f:   |   callq  73b0 &lt;main::foo&gt;
+    7454:   |   movb   %al,(%r14)
+    7457:   |   cmpb   $0x4,%bl                 // cmp with bl
+    745a:   +-- ja     7464 &lt;main::bar+0x24&gt;
+    745c:   |   callq  73b0 &lt;main::foo&gt;
+    7461:   |   movb   %al,(%r14)
+    7464:   \-&gt; addq   $0x8,%rsp
+    7468:       popq   %rbx
+    7469:       popq   %r14
+    746b:       retq
+    746c:       nopl   0x0(%rax)
+
+0000000000007470 &lt;main::baz&gt;:
+    7470:       pushq  %rbx
+    7471:       cmpb   $0x9,0x1(%rdi)           // cmp with s.y in memory...
+    7475:   /-- ja     748e &lt;main::baz+0x1e&gt;
+    7477:   |   movq   %rdi,%rbx
+    747a:   |   callq  73b0 &lt;main::foo&gt;
+    747f:   |   movb   %al,(%rbx)
+    7481:   |   cmpb   $0x4,0x1(%rbx)           //  cmp with s.y in memory...
+    7485:   +-- ja     748e &lt;main::baz+0x1e&gt;
+    7487:   |   callq  73b0 &lt;main::foo&gt;
+    748c:   |   movb   %al,(%rbx)
+    748e:   \-&gt; popq   %rbx
+    748f:       retq
+</code></pre></div>
+
+
+<p>The assembly differs--<code>baz</code> does <code>cmp</code> against a memory operand twice instead of keeping it in a register as in <code>bar</code>. The only reason I can imagine for this is that the compiler thinks that the write to <code>s.x</code> could have changed <code>s.y</code>. But that can't be, right? I mean, it knows that the fields are at different locations and knows they don't overlap--it calculates the pointers to access them.</p>
+<p>Is there a massive pessimization going on or am I missing something?</p>
+
+
+
+<a name="209905537"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209905537" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209905537">(Sep 12 2020 at 23:57)</a>:</h4>
+<p>Might be <a href="https://github.com/rust-lang/rust/issues/54878">https://github.com/rust-lang/rust/issues/54878</a></p>
+
+
+
+<a name="209905611"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209905611" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209905611">(Sep 12 2020 at 23:59)</a>:</h4>
+<p>If you add <code>-Z mutable-noalias=yes</code> does it help?</p>
+
+
+
+<a name="209905854"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209905854" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209905854">(Sep 13 2020 at 00:04)</a>:</h4>
+<p>It does. But oof... I'm surprised at how conservative it is without that option.</p>
+
+
+
+<a name="209905863"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209905863" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209905863">(Sep 13 2020 at 00:05)</a>:</h4>
+<p>Kind of a bummer. Does rustc build without that?</p>
+
+
+
+<a name="209905913"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209905913" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209905913">(Sep 13 2020 at 00:06)</a>:</h4>
+<p>I mean, is it configured to build with that flag or without? I assume without?</p>
+
+
+
+<a name="209906040"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209906040" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209906040">(Sep 13 2020 at 00:10)</a>:</h4>
+<p>I'm seeing the ambiguity of that question now. I meant, "is the compiler compiled using that option".  Looks like not, from what I can tell.</p>
+
+
+
+<a name="209906075"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209906075" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Joshua Nelson <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209906075">(Sep 13 2020 at 00:11)</a>:</h4>
+<p>Do you mean, can you patch rustc so that option is on by default? Sure, but I wouldn't recommend it - it was turned on to fix unsoundness</p>
+
+
+
+<a name="209906193"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209906193" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209906193">(Sep 13 2020 at 00:14)</a>:</h4>
+<p>I meant does <code>x.py</code> supply that option to rustc to build the next stage. But I realize it was a silly question, on account of the unsoundness.</p>
+
+
+
+<a name="209911867"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Aliasing%20pessimizations/near/209911867" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Tyson Nottingham <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Aliasing.20pessimizations.html#209911867">(Sep 13 2020 at 03:39)</a>:</h4>
+<p>FWIW, it looks like not all interleaved field reads/writes through <code>&amp;mut</code> cause this issue to occur. Not sure what's going on in this example.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

@@ -1,0 +1,206 @@
+[
+    {
+        "content": "<p>Back with more MIR questions. For a type like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">E</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">A</span><span class=\"p\">(</span><span class=\"kt\">i32</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">B</span><span class=\"p\">(</span><span class=\"kt\">i32</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>is MIR like this intended to be valid (assuming the obvious layout is chosen)?</p>\n<div class=\"codehilite\"><pre><span></span><code>setDiscriminant(_1) = E::A\n(_1 as E::A).0 = 5;\n// things in between\nsetDiscrimant(_1) = E::B\n// `_1` is now `B(5)` and completely initialized\n</code></pre></div>",
+        "id": 273749927,
+        "sender_full_name": "Jake",
+        "timestamp": 1646192130
+    },
+    {
+        "content": "<p>Also as a procedural point: <span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> , is this the kind of question that the traits team (or whatever it ends up being called) would be involved in answering?</p>",
+        "id": 273750142,
+        "sender_full_name": "Jake",
+        "timestamp": 1646192280
+    },
+    {
+        "content": "<p>I wouldn't expect that to be valid. Both variants may put the field at a different offset.</p>",
+        "id": 273762022,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1646202716
+    },
+    {
+        "content": "<p>Indeed, I'm asking specifically about the scenario where that's not the case</p>",
+        "id": 273764188,
+        "sender_full_name": "Jake",
+        "timestamp": 1646204662
+    },
+    {
+        "content": "<p>(it's unfortunately bed time for me, but I can explain my thoughts around this more completely tomorrow)</p>",
+        "id": 273764230,
+        "sender_full_name": "Jake",
+        "timestamp": 1646204728
+    },
+    {
+        "content": "<p>I think it would be fine, but we shouldn't do it either. It just makes analyzing MIR harder than it needs to be without a clear benefit in my eyes. It may be interesting for state machines though.</p>",
+        "id": 273764750,
+        "sender_full_name": "oli",
+        "timestamp": 1646205096
+    },
+    {
+        "content": "<p>I believe that this will not be UB, in the sense that the R-AM would have to carry around some as-yet unenvisioned state in order to detect this as an error and the cost of adding something like that to the model is not worth the \"gain\" of making this UB. But it should not be valid according to the MIR type system, and the compiler should not attempt to generate such code</p>",
+        "id": 273764812,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646205142
+    },
+    {
+        "content": "<p>(And yes, this seems like a great question for the traits team)</p>",
+        "id": 273764855,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646205201
+    },
+    {
+        "content": "<p>It's a bit weird to talk about MIR functions being \"safe\" or \"unsafe\" in isolation but I think that there is a reasonable reading in which operations like <code>(_1 as E::A).0 = 5;</code> are safe according to the type system as long as the discriminant was set to <code>E::A</code> previously in the control flow. On that reading, changing the discriminant would produce all uninitialized variant fields, so reading <code>(_1 as E::B).0</code> would be a compile error (reading from an uninitialized place) but converting that place to a pointer and reading from it would be sound but <code>unsafe</code></p>",
+        "id": 273765142,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646205542
+    },
+    {
+        "content": "<p>The discriminant is set <strong>after</strong> the fields. As soon as the discriminant is set the entire value is considered initialized.</p>",
+        "id": 273766283,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1646206353
+    },
+    {
+        "content": "<p>Ah, I was worried about that. To support that, I guess you can have a type-state of the form \"the enum is not fully initialized, it is preparing for the <code>E::A</code> discriminant, and the initialized fields are .0, .1\", and <code>(_1 as E::A).0 = 5</code> would put it in this \"pre <code>E::A</code> state, <code>.0</code> initialized\" state, and <code>setDiscriminant(_1) = E::A</code> only fully initializes the enum if it either has no <code>E::A</code> fields or it was in pre-<code>E::A</code> state with all fields initialized</p>",
+        "id": 273766701,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646206702
+    },
+    {
+        "content": "<p>How elaborate can the optimizations on the result of a <code>discriminant(_1)</code> call get? For basic matches, it looks like it is sufficient to track that if we see  <code>_2 = discriminant(_1)</code> followed by <code>switchInt(_2) -&gt; [0_usize: bb2, ...]</code> then we know that <code>discriminant(_1) == 0</code> inside <code>bb2</code> (well, modulo other dataflow considerations), which is enough to license uses of the <code>Downcast</code> operation in <code>bb2</code>. But perhaps instead of a <code>switchInt</code> it becomes an equality test, or an AND or some completely different kind of check that happens to be equivalent, at which point it will be hard to continue to typecheck the resulting MIR</p>",
+        "id": 273771188,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646209603
+    },
+    {
+        "content": "<p>Once we get into optimization territory, we lose the ability to run mir borrowck (and mir typeck, which is part of that). We should uphold certain rules, but it is not clear to me whether we need to be able to statically prove that a <code>Downcast</code> is correct, or whether a <code>SetDiscriminant</code> is only done on a fully initialized variant.</p>",
+        "id": 273774283,
+        "sender_full_name": "oli",
+        "timestamp": 1646211434
+    },
+    {
+        "content": "<p>If <code>SetDiscriminant</code> is done on a partially initialized niche filling enum, it may cause the read discriminant to be incorrect. For example setting the <code>Some</code> discriminant of an <code>Option&lt;&amp;()&gt;</code> would be a no-op, but if the field is not initialized, the value could be a 0 which would be read as <code>None</code> discriminant.</p>",
+        "id": 273785545,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1646217269
+    },
+    {
+        "content": "<p>I hope that (at least pre-optimization) the <code>SetDiscriminant</code> is still there anyway, even if it is a no-op to be optimized out later? MIR typeck will be a lot more complicated if these things are missing</p>",
+        "id": 273786171,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646217583
+    },
+    {
+        "content": "<p>That example doesn't show that <code>SetDiscriminant</code> followed by setting the fields would be wrong though, since it would end up nonzero in the end when the field is set. (Not that I'm advocating for this, and probably there is a more complex example where setting the discriminant first doesn't make sense. From a typeck point of view we need to know that we are in a specific variant-filling mode though in order to describe the precondition of <code>SetDiscriminant</code>.)</p>",
+        "id": 273786599,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646217784
+    },
+    {
+        "content": "<p>The reason that I ask about this is because the current use of <code>SetDiscriminant</code> makes analysis somewhat difficult. For example, the MaybeLiveLocals analysis has a note in it about misbehaving on these kinds of things, and thus not being useful for DSE. In order to fix this, we would basically need an analysis that reports the local as killed when the first field is set, as long as it has checked that all the other fields and the discriminant are set afterward. Even then though, I worry that this might be somewhat footgunny</p>",
+        "id": 273834650,
+        "sender_full_name": "Jake",
+        "timestamp": 1646238721
+    },
+    {
+        "content": "<p>It also seems sort of awkward to only define the semantics of <code>SetDiscriminant</code> in conjunction with the statements that are expected to come immediately before</p>",
+        "id": 273835152,
+        "sender_full_name": "Jake",
+        "timestamp": 1646238887
+    },
+    {
+        "content": "<p>I guess one way to possibly fix this (although it's probably not worth it) is to reverse the order, ie put the <code>SetDiscriminant(_2) = E::A</code> first, and then define it to mean <code>_2 = E::A(uninit)</code>. This would justify making the local as killed in the analysis, while having very clear semantics on its own</p>",
+        "id": 273835849,
+        "sender_full_name": "Jake",
+        "timestamp": 1646239125
+    },
+    {
+        "content": "<p>This also has the advantage of not allowing weird MIR like I wrote above to express things that you can't express in Rust</p>",
+        "id": 273836194,
+        "sender_full_name": "Jake",
+        "timestamp": 1646239243
+    },
+    {
+        "content": "<p>Actually, this has more advantages I can think of: for my <code>SimplifyArmIdentity</code> PR, i restricted the optimization to run when the statements it considered appeared at the beginning of a BB. Doing it differently in a way that doesn't lead to quadratic runtime is a bit tricky. If the order were the other way around, this would be a non-issue</p>",
+        "id": 273838396,
+        "sender_full_name": "Jake",
+        "timestamp": 1646240061
+    },
+    {
+        "content": "<p>You would still need a marker to indicate the location where the value is fully initialized.</p>",
+        "id": 273840960,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1646240903
+    },
+    {
+        "content": "<p>Putting the <code>SetDiscriminant</code> first may also break if we get support for fields to which you can't take a reference as in that case we may stash a variant tag in unused bits of a value that would be overwritten when assigning to a field.</p>",
+        "id": 273841167,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1646240973
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"133247\">bjorn3</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Semantics.20of.20.60SetDiscriminant.60.20in.20MIR/near/273841167\">said</a>:</p>\n<blockquote>\n<p>Putting the <code>SetDiscriminant</code> first may also break if we get support for fields to which you can't take a reference as in that case we may stash a variant tag in unused bits of a value that would be overwritten when assigning to a field.</p>\n</blockquote>\n<p>I don't see how <code>SetDiscriminant</code> is special here. If we get MIR support for memory operations that don't operate on whole bits at once, lots of things will break (although see <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Practical.20Approach.20to.20Reusing.20Padding/near/269419084\">here</a> where I showed how to reclaim padding without causing problems of this sort)</p>",
+        "id": 273849410,
+        "sender_full_name": "Jake",
+        "timestamp": 1646243830
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"133247\">bjorn3</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Semantics.20of.20.60SetDiscriminant.60.20in.20MIR/near/273840960\">said</a>:</p>\n<blockquote>\n<p>You would still need a marker to indicate the location where the value is fully initialized.</p>\n</blockquote>\n<p>You mean in borrowck or somewhere? I'm not too familiar with MIR at that stage, so I don't know about that. But at least during optimizations, the analysis for \"is this value fully initialized\" will be simpler, because enums would work exactly like structs</p>",
+        "id": 273849982,
+        "sender_full_name": "Jake",
+        "timestamp": 1646244017
+    },
+    {
+        "content": "<p>During borrowck.</p>",
+        "id": 273853131,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1646245148
+    },
+    {
+        "content": "<p>Borrowck runs before deaggregation, doesn't it? It shouldn't encounter any SetDiscriminant statements.</p>",
+        "id": 273853591,
+        "sender_full_name": "tm",
+        "timestamp": 1646245366
+    },
+    {
+        "content": "<p>Indeed. I thought SetDiscriminant was also used before the deaggregator. Maybe it changed since?</p>",
+        "id": 273854261,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1646245624
+    },
+    {
+        "content": "<p>oh hmm, I wonder if this is feasible to change then. Let me see how much stuff breaks with this change</p>",
+        "id": 273886116,
+        "sender_full_name": "Jake",
+        "timestamp": 1646259408
+    },
+    {
+        "content": "<p>This breaks very few tests. If I want to propose changing this, is it better to describe my exact proposal here and get feedback first, or put up a PR and just discuss there?</p>",
+        "id": 273889996,
+        "sender_full_name": "Jake",
+        "timestamp": 1646261339
+    },
+    {
+        "content": "<p>(very few is 0 ui, 1 codegen, and 16 mir-opt - that last one is sort of to be expected, and I'm honestly surprised it's not more)</p>",
+        "id": 273890067,
+        "sender_full_name": "Jake",
+        "timestamp": 1646261383
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/131828-t-compiler/topic/Semantics.20of.20.60SetDiscriminant.60.20in.20MIR/near/273750142\">said</a>:</p>\n<blockquote>\n<p>Also as a procedural point: <span class=\"user-mention silent\" data-user-id=\"116009\">nikomatsakis</span> , is this the kind of question that the traits team (or whatever it ends up being called) would be involved in answering?</p>\n</blockquote>\n<p>in the long run, yes.</p>",
+        "id": 273895033,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1646263493
+    },
+    {
+        "content": "<p>I would think that would fall out from the operational semantics</p>",
+        "id": 273895079,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1646263522
+    },
+    {
+        "content": "<p>Filed <a href=\"https://github.com/rust-lang/rust/issues/94590\">#94590</a></p>",
+        "id": 274067056,
+        "sender_full_name": "Jake",
+        "timestamp": 1646357773
+    }
+]

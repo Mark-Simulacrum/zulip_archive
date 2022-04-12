@@ -1,0 +1,371 @@
+<html>
+<head><meta charset="utf-8"><title>alternate implied bounds lowering · wg-traits · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/index.html">wg-traits</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html">alternate implied bounds lowering</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="147260506"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260506" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260506">(Nov 07 2018 at 22:13)</a>:</h4>
+<p>So, <span class="user-mention" data-user-id="131694">@scalexm</span>, I am curious to get your thoughts about this alternate idea for implied bounds lowering.</p>
+<p>The idea is to introduce two things:</p>
+<ul>
+<li><code>Implemented(T: Trait)</code> -- produced by the trait, roughly equivalent to <code>WellFormed(T: Trait)</code> today</li>
+<li><code>Declared(T: Trait)</code> -- produced by an impl</li>
+</ul>
+<p>So for something like</p>
+<div class="codehilite"><pre><span></span><span class="k">trait</span><span class="w"> </span><span class="nb">Ord</span>: <span class="nb">Eq</span> <span class="p">{</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+<p>you would produce</p>
+<div class="codehilite"><pre><span></span>Implemented(T: Ord) :- Declared(T: Ord), Implemented(T: Eq).
+Implemented(T: Eq) :- Implemented(T: Ord).
+</pre></div>
+
+
+<p>and then if you have <code>impl Ord for Foo</code> that would produce</p>
+<div class="codehilite"><pre><span></span>Declared(Foo: Ord).
+</pre></div>
+
+
+<p>along with the proof obligation that <code>Implemented(Foo: Ord)</code>.</p>
+<p>Without a <code>impl Eq for Foo</code> impl, though, this proof obligation cannot be satisfied. </p>
+<p>One nice property of this is that <code>fn foo&lt;T: Ord&gt;()</code> can simply convert <code>T: Ord</code> into <code>Implemented(T: Ord)</code> in all cases, we don't have this "sometimes convert to <code>FromEnv</code>, sometimes to <code>Implemented</code>" thing going on.</p>
+<p>I've not tried to go through all the examples though -- maybe it falls apart somewhere?</p>
+<p>I am particularly interested in coinduction. Presumably <code>Implemented</code>, like <code>WellFormed</code>, is coinductive (but <code>Declared</code> is not).</p>
+
+
+
+<a name="147260605"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260605" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260605">(Nov 07 2018 at 22:15)</a>:</h4>
+<p>To expand on the <code>fn foo&lt;T: Ord&gt;</code> thing, if the "goal" for <code>foo</code> to be well-formed is <code>G</code>, the idea is that we would produce a proof-obligation like</p>
+<div class="codehilite"><pre><span></span>forall&lt;G&gt; { Implemented(T: Ord) =&gt; G }
+</pre></div>
+
+
+
+<a name="147260615"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260615" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260615">(Nov 07 2018 at 22:15)</a>:</h4>
+<p>and similarly if someone were to reference <code>foo::&lt;X&gt;</code>, we would produce a proof obligation like <code>Implemented(X: Ord)</code></p>
+
+
+
+<a name="147260684"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260684" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260684">(Nov 07 2018 at 22:16)</a>:</h4>
+<p>One <em>downside</em> is that you are "re-proving" <code>T: Eq</code> each time you prove <code>T: Ord</code> (via the impl, anyway). However, we should be caching, so probably that's ok.</p>
+
+
+
+<a name="147260813"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260813" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260813">(Nov 07 2018 at 22:18)</a>:</h4>
+<p>mmh, I'll try to test this setting on my usual battery of tricky examples</p>
+
+
+
+<a name="147260820"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260820" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260820">(Nov 07 2018 at 22:18)</a>:</h4>
+<p>at first sight, it seems similar to our setting where we only had <code>WellFormed</code> and <code>Implemented</code>, and used <code>WellFormed</code> for both well-formedness checks and implied bounds</p>
+
+
+
+<a name="147260841"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260841" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260841">(Nov 07 2018 at 22:19)</a>:</h4>
+<p>Indeed I <em>think</em> it is equivalent?</p>
+
+
+
+<a name="147260856"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260856" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260856">(Nov 07 2018 at 22:19)</a>:</h4>
+<p>It seems to be the same basic idea, but shifting the proof obligation from the <em>impl</em> to the <em>places that reference the impl</em></p>
+
+
+
+<a name="147260858"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260858" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260858">(Nov 07 2018 at 22:19)</a>:</h4>
+<p>we did not have the <code>Implemented(...)</code> in the same places so maybe not equivalent</p>
+
+
+
+<a name="147260860"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260860" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260860">(Nov 07 2018 at 22:19)</a>:</h4>
+<p>(although you also prove it at the impl)</p>
+
+
+
+<a name="147260881"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260881" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260881">(Nov 07 2018 at 22:19)</a>:</h4>
+<p>in our current scheme, we are basically saying that impl proves the transitive case once (<code>WellFormed</code>), and everybody else relies on that</p>
+
+
+
+<a name="147260882"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260882" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260882">(Nov 07 2018 at 22:20)</a>:</h4>
+<p>(I meant maybe not equivalent to the <code>WF/Implemented</code>-only setting)</p>
+
+
+
+<a name="147260937"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260937" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260937">(Nov 07 2018 at 22:20)</a>:</h4>
+<p>oh ok I see, yes, yes</p>
+
+
+
+<a name="147260946"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260946" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260946">(Nov 07 2018 at 22:20)</a>:</h4>
+<p>and I agree it felt very "familiar"</p>
+
+
+
+<a name="147260951"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260951" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260951">(Nov 07 2018 at 22:20)</a>:</h4>
+<p>so that was part of why I wanted to run it by you</p>
+
+
+
+<a name="147260955"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260955" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260955">(Nov 07 2018 at 22:20)</a>:</h4>
+<p>and see if we had rejected it already for some reason</p>
+
+
+
+<a name="147260960"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147260960" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147260960">(Nov 07 2018 at 22:20)</a>:</h4>
+<p>or if it differed in some particular</p>
+
+
+
+<a name="147261003"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147261003" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147261003">(Nov 07 2018 at 22:21)</a>:</h4>
+<p>yes at first sight I can't tell :) I'll look into it tomorrow morning, I'm going to sleep now :p</p>
+
+
+
+<a name="147261127"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147261127" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alexander Regueiro <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147261127">(Nov 07 2018 at 22:23)</a>:</h4>
+<p><span class="user-mention" data-user-id="131694">@scalexm</span> want to r+ if you're happy then? it will fail to go through in the case a test fails of course (which is unlikely given we've verified locally)</p>
+
+
+
+<a name="147261432"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147261432" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alexander Regueiro <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147261432">(Nov 07 2018 at 22:28)</a>:</h4>
+<p><span class="user-mention" data-user-id="131694">@scalexm</span> thanks. and for the advice as well. good night :-)</p>
+
+
+
+<a name="147292810"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147292810" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147292810">(Nov 08 2018 at 11:26)</a>:</h4>
+<p>Ok <span class="user-mention" data-user-id="116009">@nikomatsakis</span> some thoughts about this alternate encoding</p>
+
+
+
+<a name="147292823"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147292823" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147292823">(Nov 08 2018 at 11:27)</a>:</h4>
+<div class="codehilite"><pre><span></span><span class="c1">// `Implemented(T: Foo) :- Declared(T: Foo), Implemented(&lt;T as Foo&gt;::Item: Foo).`</span>
+<span class="c1">// `Implemented(&lt;T as Foo&gt;::Item: Foo) :- Implemented(T: Foo).`</span>
+<span class="k">trait</span><span class="w"> </span><span class="n">Foo</span><span class="w"> </span><span class="k">where</span><span class="w"> </span><span class="o">&lt;</span><span class="n">Self</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">Foo</span><span class="o">&gt;</span>::<span class="n">Item</span>: <span class="nc">Foo</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span> <span class="nc">Item</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// `Declared(i32: Foo).`</span>
+<span class="k">impl</span><span class="w"> </span><span class="n">Foo</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="kt">i32</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span> <span class="nc">Item</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">i32</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Prove `Implemented(i32: Foo)` --&gt; ok if `Implemented` is co-inductive</span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+
+<a name="147292838"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147292838" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147292838">(Nov 08 2018 at 11:27)</a>:</h4>
+<p>first, I think that because of this example, we need <code>Implemented</code> to be co-inductive, do you agree?</p>
+
+
+
+<a name="147309094"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147309094" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147309094">(Nov 08 2018 at 16:01)</a>:</h4>
+<p>I agree</p>
+
+
+
+<a name="147309113"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147309113" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147309113">(Nov 08 2018 at 16:01)</a>:</h4>
+<p>However, <code>Declared</code> would presumably not be (except for auto traits, perhaps)</p>
+
+
+
+<a name="147309362"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147309362" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147309362">(Nov 08 2018 at 16:05)</a>:</h4>
+<p>Yes but then I have an example that fails :p</p>
+
+
+
+<a name="147309373"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147309373" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147309373">(Nov 08 2018 at 16:05)</a>:</h4>
+<p>I’m on my phone right now, showing you in a few minutes</p>
+
+
+
+<a name="147309401"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147309401" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147309401">(Nov 08 2018 at 16:05)</a>:</h4>
+<p>I think this setup is basically equivalent to our first one <code>WF/Implemented</code>-only</p>
+
+
+
+<a name="147309461"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147309461" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147309461">(Nov 08 2018 at 16:06)</a>:</h4>
+<p>Either <code>WF</code> is inductive and you have to reject some useful impls, or it is unsound</p>
+
+
+
+<a name="147312339"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147312339" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147312339">(Nov 08 2018 at 16:46)</a>:</h4>
+<p>ok <span class="user-mention" data-user-id="116009">@nikomatsakis</span>, what do you think of this example:</p>
+<div class="codehilite"><pre><span></span><span class="c1">// `Implemented(T: Copy) :- Declared(T: Copy).`</span>
+<span class="k">trait</span><span class="w"> </span><span class="nb">Copy</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+
+<span class="c1">// `Implemented(T: Partial) :- Declared(T: Partial), Implemented(T: Copy).`</span>
+<span class="c1">// `Implemented(T: Copy) :- Implemented(T: Partial).` (*)</span>
+<span class="k">trait</span><span class="w"> </span><span class="n">Partial</span><span class="w"> </span><span class="k">where</span><span class="w"> </span><span class="n">Self</span>: <span class="nb">Copy</span> <span class="p">{</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+
+<span class="c1">// `Declared(T: Partial)`.</span>
+<span class="k">impl</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Partial</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">T</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Prove `Implemented(T: Partial)`:</span>
+<span class="w">    </span><span class="c1">//     true if `Declared(T: Partial)`, --&gt; ok</span>
+<span class="w">    </span><span class="c1">//             `Implemented(T: Copy)</span>
+<span class="w">    </span><span class="c1">//</span>
+<span class="w">    </span><span class="c1">// Prove `Implemented(T: Copy)`:</span>
+<span class="w">    </span><span class="c1">//     true if `Implemented(T: Partial)` because of (*)</span>
+<span class="w">    </span><span class="c1">//     --&gt; co-inductive cycle</span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+
+<a name="147382074"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147382074" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147382074">(Nov 09 2018 at 16:22)</a>:</h4>
+<p><span class="user-mention" data-user-id="131694">@scalexm</span> hmm. So this is precisely the example I was thinking of. I'm trying to remember why I thought it would be ok. It may be that in relaying the idea I errored somewhere. </p>
+<p>The plan was that <code>trait Partial: Copy</code> lowes to this:</p>
+<div class="codehilite"><pre><span></span>Implemented(T: Partial) iff Declared(T: Partial), Implemented(T: Copy).
+</pre></div>
+
+
+<p>which of course means that</p>
+<div class="codehilite"><pre><span></span>Implemented(T: Partial) :- Declared(T: Partial), Implemented(T: Copy).
+</pre></div>
+
+
+<p>but I have to think about the reverse rule... honestly my brain does not seem to be functioning right now. It seems though that from this <code>iff</code> we <em>should</em> be able to conclude that <code>Implemented(T: Copy) =&gt; Implemented(T: Partial)</code>, as I wrote, right? I'll think about it when I'm a bit less worn out perhaps though (or look up the standard handling for <code>iff</code> :P)</p>
+
+
+
+<a name="147382279"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147382279" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147382279">(Nov 09 2018 at 16:24)</a>:</h4>
+<p>If this is an <code>iff</code>, there should definitely be two reverse rules<br>
+<code>Declared(T: Partial) :- Implemented(T: Partial)</code> and <code>Implemented(T: Copy) :- Implemented(T: Partial)</code></p>
+
+
+
+<a name="147382321"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/147382321" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#147382321">(Nov 09 2018 at 16:25)</a>:</h4>
+<p>Which in that case is exactly our very first setting</p>
+
+
+
+<a name="156646223"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156646223" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156646223">(Jan 22 2019 at 22:32)</a>:</h4>
+<p>Revisiting this, it's really a fascinating failure. =)</p>
+
+
+
+<a name="156672412"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156672412" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156672412">(Jan 23 2019 at 08:37)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> for me, the problem with this approach is that it is the same approach as our first one from summer 2017</p>
+
+
+
+<a name="156672477"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156672477" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156672477">(Jan 23 2019 at 08:38)</a>:</h4>
+<p>And we concluded that, we could not soundly handle cyclic things</p>
+
+
+
+<a name="156672521"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156672521" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156672521">(Jan 23 2019 at 08:39)</a>:</h4>
+<p>Basically, if <code>Implemented</code> in this setup is not co-inductive, you cannot handle decls like:</p>
+<div class="codehilite"><pre><span></span><span class="k">trait</span><span class="w"> </span><span class="n">Foo</span><span class="w"> </span><span class="k">where</span><span class="w"> </span><span class="n">Self</span>::<span class="n">Item</span>: <span class="nc">Foo</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span> <span class="nc">Item</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="w"> </span><span class="n">Foo</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span> <span class="nc">Item</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+
+<a name="156672595"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156672595" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156672595">(Jan 23 2019 at 08:41)</a>:</h4>
+<p>So I don’t know</p>
+
+
+
+<a name="156693100"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156693100" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156693100">(Jan 23 2019 at 14:35)</a>:</h4>
+<p>yeah I mean I agree it's wrong, <span class="user-mention" data-user-id="131694">@scalexm</span>, I'm just trying to kind of dig a bit into <em>why</em> it's wrong. The core problem I think is that the co-inductive <code>Implemented</code> predicate is used as more than a "carrier"</p>
+
+
+
+<a name="156693283"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156693283" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156693283">(Jan 23 2019 at 14:37)</a>:</h4>
+<p>and co-induction without some guarantee of "productivity" (I think this is the term, iirc) is problematic -- (basically, the existence of cycles without some "step" in between)</p>
+
+
+
+<a name="156693306"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156693306" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156693306">(Jan 23 2019 at 14:37)</a>:</h4>
+<p>anyway, I'm going to try and sketch some sort of "diagram-like thing" for the implied bounds to see if I can capture my intuition for what it was aiming at</p>
+
+
+
+<a name="156693319"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156693319" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156693319">(Jan 23 2019 at 14:37)</a>:</h4>
+<p>I have to revit that soundness failure from <code>WF(Type)</code> that you mentioned though</p>
+
+
+
+<a name="156703482"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156703482" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156703482">(Jan 23 2019 at 16:39)</a>:</h4>
+<p><span class="user-mention" data-user-id="116009">@nikomatsakis</span> my own intuition for implied bounds is that they happen in two steps:</p>
+<ul>
+<li>
+<p>first we compute the full « graph » of impls, this is where we translate all the impls into rules of the form <code>Implemented(...) :- Implemented(...)</code><br>
+** here we only have <code>Implemented</code> goals and no <code>WF</code> at all because we are just stating relations between impls</p>
+</li>
+<li>
+<p>only when the impls graph is built, we check that all impls are legal: this is where we do generate <code>WF</code> goals and try to prove them</p>
+</li>
+</ul>
+<p>Of course in practice these two steps happen in parallel, where we « discover » the impls graph lazily while checking legality: this works because <code>WellFormed(TraitRef)</code> is co-inductive and hence can handle cycles</p>
+
+
+
+<a name="156703578"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156703578" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156703578">(Jan 23 2019 at 16:40)</a>:</h4>
+<p>Then the difference between <code>FromEnv</code> and <code>WellFormed</code> is that <code>WellFormed</code> serves as a graph traversal; while <code>FromEnv</code> serves as finding a path in an oriented graph (going from one goal to prove to a possible clause in our environment)</p>
+
+
+
+<a name="156703612"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/144729-wg-traits/topic/alternate%20implied%20bounds%20lowering/near/156703612" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scalexm <a href="https://zulip-archive.rust-lang.org/stream/144729-wg-traits/topic/alternate.20implied.20bounds.20lowering.html#156703612">(Jan 23 2019 at 16:40)</a>:</h4>
+<p>So this is why the two are somehow unrelated, and also why <code>WellFormed</code> should not have any reverse rules: it is somehow incompatible with its « graph traversal » semantics</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

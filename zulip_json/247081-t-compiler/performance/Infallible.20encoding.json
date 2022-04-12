@@ -1,0 +1,98 @@
+[
+    {
+        "content": "<p><a href=\"https://github.com/rust-lang/rust/issues/94732\">#94732</a> is a draft PR to make \"opaque\" encoding infallible. This was inspired by <a href=\"https://github.com/rust-lang/rust/issues/93066\">#93066</a>, which did the same for decoding and was a nice performance win. But the perf effect of infallible encoding was underwhelming, some sub-1% instruction count improvements on a range of incremental scenarios. I guess we just do a lot more decoding (for <code>std</code> metatada, mostly) than encoding.</p>",
+        "id": 274612837,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1646776389
+    },
+    {
+        "content": "<p>This comment describes how I did the error handling, because I didn't actually make encoding infallible:</p>\n<div class=\"codehilite\"><pre><span></span><code>+/// Encoders are often fallible, but in practice failure is rare and there are\n+/// so many nested calls that typical Rust error handling (via `Result`) is\n+/// annoyingly expensive. Instead, impls of this trait must implement a delayed\n+/// error handling strategy. If a failure occurs, they should record this\n+/// internally, and all subsequent encoding operations can be processed or\n+/// ignored, whichever is appropriate. Then when `finish()` is called, an error\n+/// result should be returned to indicate the failure. If no failures occurred,\n+/// then `finish()` should return a success result.\n</code></pre></div>",
+        "id": 274613078,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1646776508
+    },
+    {
+        "content": "<p>The existing encoding code mostly used standard error handling, with <code>Result</code> and <code>?</code>. But a few places just used <code>unwrap</code>. And then one or two other places did some local delayed error handling like I did in the PR. So overall, the PR makes the encoding error handling more uniform, even though it is non-standard.</p>",
+        "id": 274613199,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1646776565
+    },
+    {
+        "content": "<p>Now I'm wondering if I should just abandon this, given that the perf effects are so mild.</p>",
+        "id": 274613248,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1646776595
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116122\">@simulacrum</span> you might have thoughts</p>",
+        "id": 274613949,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1646776917
+    },
+    {
+        "content": "<p>I agree this doesn't look worthwhile by default, though I wonder if it would have further impact if &amp; when we drop the JSON logic -- I could imagine that LLVM is less able to optimize with it still all interleaved in</p>",
+        "id": 274614258,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1646777051
+    },
+    {
+        "content": "<p>@lqd: On a related note, I was reading <a href=\"https://arxiv.org/abs/1709.08990\">this paper</a> and wondering about alternatives to LEB128 encoding. The separation of control bytes and data bytes is cool, but it's very much oriented towards the case where you are encoding a long <code>Vec&lt;u32&gt;</code>. In contrast, we are encoding a heterogenous sequence containing <code>u8</code>, <code>u16</code>, <code>u32</code>, <code>u64</code>, <code>u128</code>, <code>usize</code>, with <code>u8</code> being easily the most common (for which we don't need to LEB128 encode).</p>",
+        "id": 274623592,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1646782610
+    },
+    {
+        "content": "<p>So I am struggling to apply any of the ideas from the paper to our situation.</p>",
+        "id": 274623611,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1646782624
+    },
+    {
+        "content": "<p>There's a few cases of <code>Vec&lt;u32&gt;</code> in e.g. incremental state encoding/decoding, at least, I think</p>",
+        "id": 274624616,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1646783308
+    },
+    {
+        "content": "<p>But they're quite hard to pull through our current traits</p>",
+        "id": 274624638,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1646783328
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120989\">@nnethercote</span> In theory you could have the control stream be bounded-powers-of-two expressed as an exponent: <code>2**0</code> (<code>u8</code>), <code>2**1</code> (<code>u16</code>), <code>2**2</code> (<code>u32</code>), <code>2**3</code> (<code>u64</code>), <code>2**4</code> (<code>u128</code>). You'd need 3 bits per value, and that gives you a couple of spare values for things like <code>usize</code> if you want to distinguish it from the sized type of the same size.</p>",
+        "id": 274624822,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1646783481
+    },
+    {
+        "content": "<p>That doesn't scale to bigger values, but if you don't <em>need</em> to scale to bigger values (or you can break format compatibility when you do) then it'd work.</p>",
+        "id": 274624844,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1646783503
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"116122\">simulacrum</span> <a href=\"#narrow/stream/247081-t-compiler.2Fperformance/topic/Infallible.20encoding/near/274624638\">said</a>:</p>\n<blockquote>\n<p>But they're quite hard to pull through our current traits</p>\n</blockquote>\n<p>One of the 'easy' problems we run into is that <code>Vec&lt;u32&gt;</code> is pretty typically <code>Vec&lt;SomeNewType&gt;</code> where the new type has some bits carved out at the top, but since there's lots of those new types we would need some, uh, more interesting specialization work to make this feasible. I'm not sure it's possible with min_specialization.</p>",
+        "id": 274625966,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1646784181
+    },
+    {
+        "content": "<p>do we btw have have an idea of the tradeoffs in our use of LEB128 encoding/decoding itself ? The gains in size and reduction in IO costs, compared to the encoding and decoding costs ? (It’s known to be quite fast but maybe alternatives with slightly higher cpu costs could be recouped in IO savings, if the compression is worth it)</p>",
+        "id": 274626662,
+        "sender_full_name": "lqd",
+        "timestamp": 1646784614
+    },
+    {
+        "content": "<p>Not to my knowledge, at least not recently.</p>",
+        "id": 274632712,
+        "sender_full_name": "simulacrum",
+        "timestamp": 1646789334
+    },
+    {
+        "content": "<p>I can tell from looking at some data today that LEB128 is very effective, compression-wise -- <em>many</em> of the u32/u64/usize values we encode/decode are &lt; 128</p>",
+        "id": 274633818,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1646790518
+    }
+]

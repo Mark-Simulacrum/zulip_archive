@@ -1,0 +1,32 @@
+[
+    {
+        "content": "<p>Hi,</p>\n<p>Right now, some passes over the HIR (e.g. rustc_passes::dead) operate on an entire crate.  Based on a suggestion from <span class=\"user-mention\" data-user-id=\"248906\">@cjgillot</span> , I've been looking at how to split this up to work on individual definitions instead.</p>\n<p>In particular, we'd like to implement a way to create \"queries\" that would not need to be declared in query/mod.rs, but would still be persisted for use in incremental computation.  The interface would likely be something like <code>tcx.make_local_task(def_id, |id| { ... })</code>.  (Perhaps the name/id of the pass would be included as well, if we can't automatically use the call site or something.)</p>\n<p>The difficulty is in creating the dependency graph node for this task.  To identify the node, we'd need to include both which <code>make_local_task</code> call it was created by (i.e. which pass this is) and the def_id that it was called with.  I could create such a node by adding another value to <a href=\"https://doc.rust-lang.org/beta/nightly-rustc/src/rustc_middle/dep_graph/dep_node.rs.html#256-268\"><code>DepKind</code></a>, with something like <code>(PassId, DefPath)</code> as the key type.  However, if I understand correctly it would be hashed as a single value, and I'm not sure I could recover that information: I can see how to lookup DepNode -&gt; DefPathHash -&gt; DefId, but I don't see a Hash -&gt; DepNode lookup.</p>\n<p>Would it make sense to add that and implement something like the following?</p>\n<ol>\n<li>Pass <code>DefId</code> to <code>make_local_task</code>(possibly together with some <code>PassId</code>)</li>\n<li>Convert the <code>DefId</code> to a <code>DefPathId</code></li>\n<li>Hash <code>(PassId, DefIdPath)</code></li>\n<li>If the node with this hash exists in the old graph and all its dependencies are green, no action needed.(*)</li>\n<li>Otherwise, recompute.</li>\n</ol>\n<p>I'm not sure how invasive such a change would be and how complicated it would be to key the nodes by their hash.</p>\n<p>(*) Actually, since this is for lint passes and such, we'd also like to store whether there were any lints, and force a re-run if there were.</p>",
+        "id": 250351826,
+        "sender_full_name": "Anton Golov",
+        "timestamp": 1629725641
+    },
+    {
+        "content": "<p>You can create a custom DepKind in <code>rustc_middle::dep_graph::dep_node</code>. Just after CompileCodegenUnit, you can add a line: <code>[anon] Custom((PassId, LocalDefId))</code> with an associated <code>make_custom_dep_node(TyCtxt&lt;'_&gt;, PassId, LocalDefId) -&gt; DepNode</code> like <code>make_compile_codegen_unit</code> does. The <code>anon</code> flag means the query system cannot call any code with just the <code>DepNode</code>, which is what we want.</p>",
+        "id": 250390098,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1629742685
+    },
+    {
+        "content": "<p>I may be mistaken, but my impression is that this wouldn't work for the incremental behaviour we want, though?  <a href=\"https://doc.rust-lang.org/beta/nightly-rustc/rustc_middle/dep_graph/dep_node/struct.DepKindStruct.html#structfield.is_anon\"><code>rustc_middle::dep_graph::dep_node</code> says that anonymous queries are always recomputed</a>.  My impression is that in order to be able to see the results from the previous computation, there currently needs to be some way of recovering the key from its hash, which is done for DefPath via a hashtable, but it wouldn't be feasible to decode a (PassId, LocalDefId) hash in the same way (I think)</p>",
+        "id": 250401583,
+        "sender_full_name": "Anton Golov",
+        "timestamp": 1629747803
+    },
+    {
+        "content": "<p>A key difference is that you know the key: it is passed as an argument to <code>make_local_task</code>. From there, you can compute its hash, and compare it to known hashes. In that sense, the dep-graph works as a hash table that you can query from a key's hash.</p>",
+        "id": 250410133,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1629752061
+    },
+    {
+        "content": "<p>Ah, okay; then I guess there is a hash -&gt; DepNode map and I just missed it.  Thanks, I'll take another look :)</p>",
+        "id": 250410741,
+        "sender_full_name": "Anton Golov [they/them]",
+        "timestamp": 1629752348
+    }
+]

@@ -1,0 +1,56 @@
+<html>
+<head><meta charset="utf-8"><title>Trying to understand compiler optimizations · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Trying.20to.20understand.20compiler.20optimizations.html">Trying to understand compiler optimizations</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="244253651"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Trying%20to%20understand%20compiler%20optimizations/near/244253651" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Trying.20to.20understand.20compiler.20optimizations.html#244253651">(Jun 29 2021 at 09:23)</a>:</h4>
+<p>This is just to satisfy my ciriousity, why when I write the following code:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">test</span><span class="p">(</span><span class="n">s</span>: <span class="kp">&amp;</span><span class="p">(</span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="kt">u8</span><span class="p">,</span><span class="w"> </span><span class="kt">u16</span><span class="p">))</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">*</span><span class="n">s</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="mi">7</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>The compiler generates x86 code that reads the fields one by one and compare, instead of reading the whole value as a dword and comparing with 460033?<br>
+I can even write portable code in rust that does this more efficiently (altough it makes the assumption that all <code>(u8,u8,u16)</code> have the same layout) <a href="https://godbolt.org/z/eMK49dzeb">https://godbolt.org/z/eMK49dzeb</a></p>
+<p>After writing this, I realized that if I remvoe the reference from the <code>s</code> input in <code>test</code> the generated code is as I expected! why is that?<br>
+Thanks :)</p>
+
+
+
+<a name="244316836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Trying%20to%20understand%20compiler%20optimizations/near/244316836" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Trying.20to.20understand.20compiler.20optimizations.html#244316836">(Jun 29 2021 at 17:23)</a>:</h4>
+<p>The problem there is that it needs a 4-byte read with align 2, and historically LLVM is bad at combining reads like that.</p>
+<p>The reason it works without the <code>&amp;</code> is that rust will currently (not guaranteed) pass it as an <code>i32</code>: <code>define zeroext i1 @_ZN10playground4test17h6c2e85b2367424b9E(i32 %0) unnamed_addr #0 {</code></p>
+<p>Vs the reference version is <code>define zeroext i1 @_ZN10playground4test17hf56b90057253de0bE({ [0 x i8], i8, [0 x i8], i8, [0 x i8], i16, [0 x i16] }* noalias nocapture readonly align 2 dereferenceable(4) %s) unnamed_addr #0 {</code></p>
+
+
+
+<a name="244393546"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Trying%20to%20understand%20compiler%20optimizations/near/244393546" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Elichai Turkel <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Trying.20to.20understand.20compiler.20optimizations.html#244393546">(Jun 30 2021 at 08:48)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125270">scottmcm</span> <a href="#narrow/stream/122651-general/topic/Trying.20to.20understand.20compiler.20optimizations/near/244316836">said</a>:</p>
+<blockquote>
+<p>The problem there is that it needs a 4-byte read with align 2, and historically LLVM is bad at combining reads like that.</p>
+<p>The reason it works without the <code>&amp;</code> is that rust will currently (not guaranteed) pass it as an <code>i32</code>: <code>define zeroext i1 @_ZN10playground4test17h6c2e85b2367424b9E(i32 %0) unnamed_addr #0 {</code></p>
+<p>Vs the reference version is <code>define zeroext i1 @_ZN10playground4test17hf56b90057253de0bE({ [0 x i8], i8, [0 x i8], i8, [0 x i8], i16, [0 x i16] }* noalias nocapture readonly align 2 dereferenceable(4) %s) unnamed_addr #0 {</code></p>
+</blockquote>
+<p>Ohh interesting, so rust does the combination when passed by value, but LLVM isn't great at combining objects with different alignment.<br>
+Next time I'll try to read the LLVM IR before posting here :)<br>
+Thanks!</p>
+
+
+
+<a name="244456777"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Trying%20to%20understand%20compiler%20optimizations/near/244456777" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Trying.20to.20understand.20compiler.20optimizations.html#244456777">(Jun 30 2021 at 17:08)</a>:</h4>
+<p>I think in both cases it's LLVM merging the equality calls.  But it's more willing to do that on subsets of something it already has in a register -- because of what <code>extern "Rust"</code>'s ABI happened to pick -- than on things that are the result of loads.</p>
+<p>(I wonder, also, if it's less willing to remove the short circuiting because of the <code>load</code>s.  <code>dereferencable(4)</code> should be enough for it to not worry about the loads being potentially UB, but maybe the passes don't look at that.)</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

@@ -1,0 +1,867 @@
+<html>
+<head><meta charset="utf-8"><title>MIR transformations · t-compiler/help · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/index.html">t-compiler/help</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html">MIR transformations</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="198432955"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/198432955" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#198432955">(May 22 2020 at 11:58)</a>:</h4>
+<p>Hi all,</p>
+<p>I'm doing research on static analysis and optimization in Rust for my Master's thesis and I'm interested in how MIR optimization / transformation works.</p>
+<p>In particular for my project I want to perform static analysis across the entire crate, then perform some transformations.  I've read some of the existing transform passes and compiler queries but I don't see an example of this. I've written my own transform passes as well, but I'm stuck on how to get some sort of entire-crate analysis result.</p>
+<p>I've read most of sections 2 and 3 of the Rustc dev book but haven't figured out how to solve my problem.</p>
+<p>I was wondering if someone has time to answer some questions -- it would be great to discuss this at a high level.</p>
+<p>Thanks!</p>
+
+
+
+<a name="198434493"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/198434493" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#198434493">(May 22 2020 at 12:16)</a>:</h4>
+<blockquote>
+<p>but I'm stuck on how to get some sort of entire-crate analysis result.</p>
+</blockquote>
+<p>That is a hard problem to solve using the current architecture. I can see several problems:</p>
+<ol>
+<li>How do you collect all functions? Some functions like shims only pop into existence during the collector, which requests already optimized MIR. While other functions are never used at all.</li>
+<li>How do you handle incremental compilation? If you analyse all functions and then make the optimized MIR depend on that analysis any change to any function would likely cause all codegened object files to be codegened again.</li>
+<li>There is currently only one optimization that supports non-local transformations: inlining. Unfortunately it has several problems. One of which is that it doesn't handle recursive functions very well. It works by requesting the already optimized mir for the callee. Doing so would cause cycles, so there is a hack to prevent inlining back edges by only inlining functions that come before the current function in the source code.</li>
+</ol>
+<p>If you solve the first problem you may be able to add a new query to request the analysis and make that query depend on <code>tcx.mir_validated</code>. Just make sure to depend on the query for all <code>tcx.optimized_mir</code> calls, as any <code>tcx.optimized_mir</code> call before the query has analysed anything will make <code>tcx.mir_validated</code> for that specific function impossible.</p>
+<p>Also may I ask what kind of analysis you want to perform?</p>
+
+
+
+<a name="198434518"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/198434518" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#198434518">(May 22 2020 at 12:17)</a>:</h4>
+<p><span class="user-mention" data-user-id="304165">@Claire Nord</span> ^</p>
+
+
+
+<a name="199382360"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199382360" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199382360">(Jun 01 2020 at 15:24)</a>:</h4>
+<p><span class="user-mention" data-user-id="133247">@bjorn3</span> Thank you for your response!</p>
+<blockquote>
+<ol>
+<li>How do you collect all functions?</li>
+</ol>
+</blockquote>
+<p>What is an example of a shim? This might not be a problem for our initial MVP. We only care about developer-defined functions in source code.</p>
+<blockquote>
+<ol start="2">
+<li>How do you handle incremental compilation?</li>
+</ol>
+</blockquote>
+<p>We're not really concerned about compile time, so I think it's okay to just re-compile with any change to any function.</p>
+<blockquote>
+<ol start="3">
+<li>inlining</li>
+</ol>
+</blockquote>
+<p>Yeah, it was helpful to read through the inlining code.</p>
+<blockquote>
+<p>Just make sure to depend on the query for all tcx.optimized_mir calls, as any tcx.optimized_mir call before the query has analysed anything will make tcx.mir_validated for that specific function impossible.</p>
+</blockquote>
+<p>When you say "depend on the query for all <code>tcx.optimized_mir</code> calls, do you mean that <code>fn optimized_mir\(...\)</code> source code should contain a call to my query, or that I should call my query before each time <code>tcx.optimized_mir</code> is called in the compiler code? Right now I'm running into a cycle by depending on <code>tcx.mir_validated</code> for every <code>def_id</code> in <code>tcx.mir_keys(LOCAL_CRATE)</code>.</p>
+<p>For more context, my project involves def-use analysis for every object of a certain type in a crate. I want to check every time an object of that type is allocated and used across functions, closures, etc. Once I have that global def-use information, I use that for an optimization step.</p>
+<p>Thank you for your responses so far. Can you further explain what you had in mind for query dependencies? I'd love to get your perspective on this either in chat or voice call, if that's easier.</p>
+
+
+
+<a name="199386677"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199386677" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199386677">(Jun 01 2020 at 15:59)</a>:</h4>
+<p><span class="user-mention" data-user-id="304165">@Claire Nord</span> </p>
+<blockquote>
+<p>What is an example of a shim? This might not be a problem for our initial MVP. We only care about developer-defined functions in source code.</p>
+</blockquote>
+<p>A shim is a function generated by rustc to implement certain things. For example the <code>CloneShim</code> is used for the compiler implementation of <code>Clone</code> for <code>[T; n]</code>.</p>
+<p>See <a href="https://github.com/rust-lang/rust/blob/d3cba254e464303a6495942f3a831c2bbd7f1768/src/librustc_mir/shim.rs#L33-L112">https://github.com/rust-lang/rust/blob/d3cba254e464303a6495942f3a831c2bbd7f1768/src/librustc_mir/shim.rs#L33-L112</a> for the full list of shims.</p>
+<blockquote>
+<p>When you say "depend on the query for all tcx.optimized_mir calls, do you mean that fn optimized_mir\(...\) source code should contain a call to my query, or that I should call my query before each time tcx.optimized_mir is called in the compiler code? Right now I'm running into a cycle by depending on tcx.mir_validated for every def_id in tcx.mir_keys(LOCAL_CRATE).</p>
+</blockquote>
+<p>You have to run it from <code>fn optimized_mir(...)</code> before calling <code>body.steal()</code>: <a href="https://github.com/rust-lang/rust/blob/d3cba254e464303a6495942f3a831c2bbd7f1768/src/librustc_mir/transform/mod.rs#L401">https://github.com/rust-lang/rust/blob/d3cba254e464303a6495942f3a831c2bbd7f1768/src/librustc_mir/transform/mod.rs#L401</a></p>
+
+
+
+<a name="199390317"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199390317" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199390317">(Jun 01 2020 at 16:27)</a>:</h4>
+<blockquote>
+<p>You have to run it from <code>fn optimized_mir(...)</code> before calling <code>body.steal()</code></p>
+</blockquote>
+<p>Ah yes, I’m doing that. I’m running into a query cycle, though. <span aria-label="slight frown" class="emoji emoji-1f641" role="img" title="slight frown">:slight_frown:</span> </p>
+<p>My query basically does <code>for def_id in tcx.mir_keys(crate_num) { tcx.subquery(def_id); }</code>, where <code>subquery</code> calls <code>tcx.mir_validated</code> and performs def-use analysis.</p>
+<p>The compiler detects a cycle where my first query calls itself. I’m working on getting a more verbose trace of the cycle now, but do you have an idea of why this would happen? <span class="user-mention" data-user-id="133247">@bjorn3</span></p>
+
+
+
+<a name="199390637"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199390637" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199390637">(Jun 01 2020 at 16:29)</a>:</h4>
+<p><span class="user-mention" data-user-id="304165">@Claire Nord</span> What is the query stack during the cycle error? (Run rustc with <code>RUST_BACKTRACE=1</code> to show it)</p>
+
+
+
+<a name="199521604"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199521604" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199521604">(Jun 02 2020 at 16:55)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>error[E0391]: cycle detected when [ performing my query ]
+     |
+note: ...which requires processing `unix::linux_like::linux::CPU_EQUAL`...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/macros.rs:192:17
+     |
+192  | /                 pub unsafe extern fn $i($($arg: $argty),*
+193  | |                 ) -&gt; $ret {
+194  | |                     $($body);*
+195  | |                 }
+     | |_________________^
+     |
+    ::: /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:2307:1
+     |
+2307 | / f! {
+2308 | |     pub fn NLA_ALIGN(len: ::c_int) -&gt; ::c_int {
+2309 | |         return ((len) + NLA_ALIGNTO - 1) &amp; !(NLA_ALIGNTO - 1)
+2310 | |     }
+...    |
+2406 | |     }
+2407 | | }
+     | |_- in this macro invocation
+note: ...which requires getting validated MIR...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/macros.rs:192:17
+     |
+192  | /                 pub unsafe extern fn $i($($arg: $argty),*
+193  | |                 ) -&gt; $ret {
+194  | |                     $($body);*
+195  | |                 }
+     | |_________________^
+     |
+    ::: /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:2307:1
+     |
+2307 | / f! {
+2308 | |     pub fn NLA_ALIGN(len: ::c_int) -&gt; ::c_int {
+2309 | |         return ((len) + NLA_ALIGNTO - 1) &amp; !(NLA_ALIGNTO - 1)
+2310 | |     }
+...    |
+2406 | |     }
+2407 | | }
+     | |_- in this macro invocation
+note: ...which requires getting pre-const evaluation MIR...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/macros.rs:192:17
+     |
+192  | /                 pub unsafe extern fn $i($($arg: $argty),*
+193  | |                 ) -&gt; $ret {
+194  | |                     $($body);*
+195  | |                 }
+     | |_________________^
+     |
+    ::: /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:2307:1
+     |
+2307 | / f! {
+2308 | |     pub fn NLA_ALIGN(len: ::c_int) -&gt; ::c_int {
+2309 | |         return ((len) + NLA_ALIGNTO - 1) &amp; !(NLA_ALIGNTO - 1)
+2310 | |     }
+...    |
+2406 | |     }
+2407 | | }
+     | |_- in this macro invocation
+note: ...which requires processing `unix::linux_like::linux::CPU_EQUAL`...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/macros.rs:192:17
+     |
+192  | /                 pub unsafe extern fn $i($($arg: $argty),*
+193  | |                 ) -&gt; $ret {
+194  | |                     $($body);*
+195  | |                 }
+     | |_________________^
+     |
+    ::: /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:2307:1
+     |
+2307 | / f! {
+2308 | |     pub fn NLA_ALIGN(len: ::c_int) -&gt; ::c_int {
+2309 | |         return ((len) + NLA_ALIGNTO - 1) &amp; !(NLA_ALIGNTO - 1)
+2310 | |     }
+...    |
+2406 | |     }
+2407 | | }
+     | |_- in this macro invocation
+note: ...which requires processing `unix::linux_like::linux::CPU_EQUAL`...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/macros.rs:192:17
+     |
+192  | /                 pub unsafe extern fn $i($($arg: $argty),*
+193  | |                 ) -&gt; $ret {
+194  | |                     $($body);*
+195  | |                 }
+     | |_________________^
+     |
+    ::: /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:2307:1
+     |
+2307 | / f! {
+2308 | |     pub fn NLA_ALIGN(len: ::c_int) -&gt; ::c_int {
+2309 | |         return ((len) + NLA_ALIGNTO - 1) &amp; !(NLA_ALIGNTO - 1)
+2310 | |     }
+...    |
+2406 | |     }
+2407 | | }
+     | |_- in this macro invocation
+note: ...which requires processing `unix::linux_like::linux::CPU_EQUAL`...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/macros.rs:192:17
+     |
+192  | /                 pub unsafe extern fn $i($($arg: $argty),*
+193  | |                 ) -&gt; $ret {
+194  | |                     $($body);*
+195  | |                 }
+     | |_________________^
+     |
+    ::: /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:2307:1
+     |
+2307 | / f! {
+2308 | |     pub fn NLA_ALIGN(len: ::c_int) -&gt; ::c_int {
+2309 | |         return ((len) + NLA_ALIGNTO - 1) &amp; !(NLA_ALIGNTO - 1)
+2310 | |     }
+...    |
+2406 | |     }
+2407 | | }
+     | |_- in this macro invocation
+note: ...which requires const-evaluating + checking `unix::linux_like::linux::cpu_set_t::bits::{{constant}}#0`...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:148:21
+     |
+148  |         bits: [u64; 16],
+     |                     ^^
+note: ...which requires const-evaluating + checking `unix::linux_like::linux::cpu_set_t::bits::{{constant}}#0`...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:148:21
+     |
+148  |         bits: [u64; 16],
+     |                     ^^
+note: ...which requires const-evaluating `unix::linux_like::linux::cpu_set_t::bits::{{constant}}#0`...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:148:21
+     |
+148  |         bits: [u64; 16],
+     |                     ^^
+note: ...which requires getting optimized MIR...
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/linux/mod.rs:148:21
+     |
+148  |         bits: [u64; 16],
+     |                     ^^
+     = note: ...which again requires [ performing my query ], completing the cycle
+note: cycle used when getting optimized MIR
+    --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/libc-0.2.66/src/unix/linux_like/mod.rs:35:33
+     |
+35   |         pub sa_data: [::c_char; 14],
+     |                                 ^^
+
+error: aborting due to previous error
+
+For more information about this error, try `rustc --explain E0391`.
+error: could not compile `libc`.
+</code></pre></div>
+
+
+<p>@bjorn3 my query is <code>[ performing my query ]</code>, and the other descriptions should be intuitive (I modified them because I couldn't figure out how to set <code>tcx.sess.opts.debugging_opts.verbose</code> -- it's not <code>cargo -vv</code>, is it?).</p>
+
+
+
+<a name="199521745"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199521745" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199521745">(Jun 02 2020 at 16:56)</a>:</h4>
+<p>The query names are printed when using <code>RUST_BACKTRACE=1</code> afaik</p>
+
+
+
+<a name="199522090"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199522090" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199522090">(Jun 02 2020 at 16:59)</a>:</h4>
+<p>@lcnr hm, the command I ran was <code>RUSTC_LOG=rustc_mir::transform=debug RUST_BACKTRACE=1 cargo +stage1 build -vv |&amp; tee out.log</code></p>
+
+
+
+<a name="199522375"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199522375" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199522375">(Jun 02 2020 at 17:01)</a>:</h4>
+<p>What is the result of <code>RUSTC_LOG=rustc_mir::transform=debug RUST_BACKTRACE=1 cargo +stage1 build -vv --rustc-args -Ztreat-err-as-bug  |&amp; tee out.log</code></p>
+
+
+
+<a name="199522498"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199522498" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199522498">(Jun 02 2020 at 17:02)</a>:</h4>
+<p>I think the problem here is that const evaluated code is also optimized. This however can run during typechecking, which is required to generate MIR for other functions, thus causing a cycle.</p>
+
+
+
+<a name="199522650"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199522650" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199522650">(Jun 02 2020 at 17:03)</a>:</h4>
+<p><span class="user-mention" data-user-id="216206">@lcnr</span></p>
+<div class="codehilite"><pre><span></span><code>$ RUSTC_LOG=rustc_mir::transform=debug RUST_BACKTRACE=1 cargo +stage1 build -vv --rustc-args -Ztreat-err-as-bug  |&amp; tee out.log
+error: Found argument &#39;--rustc-args&#39; which wasn&#39;t expected, or isn&#39;t valid in this context
+
+USAGE:
+    cargo build --verbose
+
+For more information try --help
+</code></pre></div>
+
+
+
+<a name="199523082"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199523082" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199523082">(Jun 02 2020 at 17:06)</a>:</h4>
+<p><code>RUSTC_LOG=rustc_mir::transform=debug RUST_BACKTRACE=1 cargo +stage1 rustc -- -Ztreat-err-as-bug |&amp; tee out.log</code></p>
+
+
+
+<a name="199523111"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199523111" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199523111">(Jun 02 2020 at 17:07)</a>:</h4>
+<p>mixed up cargo and <code>x.py</code> arguments</p>
+
+
+
+<a name="199524995"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199524995" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199524995">(Jun 02 2020 at 17:22)</a>:</h4>
+<p><span class="user-mention" data-user-id="216206">@lcnr</span> </p>
+<div class="codehilite"><pre><span></span><code>$ RUSTC_LOG=rustc_mir::transform=debug RUST_BACKTRACE=1 cargo +stage1 rustc -- -Ztreat-err-as-bug --bin txcell |&amp; tee out.log
+error: extra arguments to `rustc` can only be passed to one target, consider filtering
+the package by passing, e.g., `--lib` or `--bin NAME` to specify a single target
+$ RUSTC_LOG=rustc_mir::transform=debug RUST_BACKTRACE=1 cargo +stage1 rustc --lib libc -- -Ztreat-err-as-bug |&amp; tee out.log
+... same output as before, e.g.
+note: ...which requires processing `x86_64::&lt;impl at /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:188:1: 195:2&gt;::new128`...
+</code></pre></div>
+
+
+<p>As of 2 days ago this should be okay because of <a href="https://github.com/rust-lang/rust/commit/8894bd220b82de486f2a8aecec6753c1b416b1f2">8894bd220b82de486f2a8aecec6753c1b416b1f2</a>, though? I'm on an older version of rustc.</p>
+
+
+
+<a name="199525237"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199525237" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199525237">(Jun 02 2020 at 17:24)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20transformations/near/199522498">said</a>:</p>
+<blockquote>
+<p>I think the problem here is that const evaluated code is also optimized. This however can run during typechecking, which is required to generate MIR for other functions, thus causing a cycle.</p>
+</blockquote>
+<p>Ah, I see; thank you so much for pointing this out. Do you have advice on how to prevent this cycle?</p>
+
+
+
+<a name="199525422"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199525422" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199525422">(Jun 02 2020 at 17:26)</a>:</h4>
+<p>Not really, maybe <span class="user-mention" data-user-id="124288">@oli</span>?</p>
+
+
+
+<a name="199525752"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199525752" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199525752">(Jun 02 2020 at 17:28)</a>:</h4>
+<p>I don't think there's any way you can reasonably call a complex query on all items from another query without running into cycles</p>
+
+
+
+<a name="199525978"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199525978" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199525978">(Jun 02 2020 at 17:30)</a>:</h4>
+<p>why do you need to run it on all items? Can't you just call it on the item at hand and thus get it cached?</p>
+
+
+
+<a name="199525999"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199525999" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199525999">(Jun 02 2020 at 17:30)</a>:</h4>
+<p>and call it on all items from somwhere else?</p>
+
+
+
+<a name="199526030"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526030" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526030">(Jun 02 2020 at 17:31)</a>:</h4>
+<p>sorry I haven't read the entire thread here, doing that now</p>
+
+
+
+<a name="199526165"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526165" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526165">(Jun 02 2020 at 17:32)</a>:</h4>
+<p>ah</p>
+
+
+
+<a name="199526221"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526221" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526221">(Jun 02 2020 at 17:32)</a>:</h4>
+<p>you want to use the result of a whole program analysis to optimize specific functions</p>
+
+
+
+<a name="199526228"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526228" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526228">(Jun 02 2020 at 17:32)</a>:</h4>
+<p>uuuuh XD</p>
+
+
+
+<a name="199526248"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526248" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526248">(Jun 02 2020 at 17:32)</a>:</h4>
+<p>I don't think the query system is up for that</p>
+
+
+
+<a name="199526314"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526314" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526314">(Jun 02 2020 at 17:33)</a>:</h4>
+<p>think about it this way: you created a dependency for the optimization of a single function on all other functions in the crate</p>
+
+
+
+<a name="199526382"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526382" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526382">(Jun 02 2020 at 17:33)</a>:</h4>
+<p>but the query system expects only functions to have a dependency on other functions if they (transitively) use it</p>
+
+
+
+<a name="199526459"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526459" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526459">(Jun 02 2020 at 17:34)</a>:</h4>
+<p>so one of these other functions gets type checked. As already noted above, type checking involves array lengths and thus constants</p>
+
+
+
+<a name="199526486"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526486" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526486">(Jun 02 2020 at 17:34)</a>:</h4>
+<p>constants can do a lot of stuff, including: function calls</p>
+
+
+
+<a name="199526514"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526514" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526514">(Jun 02 2020 at 17:34)</a>:</h4>
+<p>so if that constant wants to call your function... kaboom</p>
+
+
+
+<a name="199526542"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526542" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526542">(Jun 02 2020 at 17:34)</a>:</h4>
+<p>Darn, I see. Yeah, that makes sense...</p>
+
+
+
+<a name="199526585"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526585" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526585">(Jun 02 2020 at 17:35)</a>:</h4>
+<p>now... let's go back to the drawing board and figure out whether you can have your cake and eat it, too</p>
+
+
+
+<a name="199526850"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526850" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526850">(Jun 02 2020 at 17:37)</a>:</h4>
+<p>the query system expects there to be no dependency edge between functions that have nothing to do with each other. so a query processing <code>fn foo() {}</code> and cannot by definition ever call a query that processes <code>fn bar() {}</code>. One super notable exception is <code>type Foo = impl Trait; fn foo() -&gt; Foo {...} fn bar() -&gt; foo {...}</code>.</p>
+
+
+
+<a name="199526912"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526912" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526912">(Jun 02 2020 at 17:37)</a>:</h4>
+<p>I don't remember the exact algorithm there, but it was taken a lot of care that we never create a dependency edge that would get us into trouble</p>
+
+
+
+<a name="199526961"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199526961" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199526961">(Jun 02 2020 at 17:37)</a>:</h4>
+<p>now... for the actual thing you want to analyze, will <code>fn foo() {}</code>'s MIR ever influence the optimization of <code>fn bar() {}</code>?</p>
+
+
+
+<a name="199527101"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199527101" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199527101">(Jun 02 2020 at 17:38)</a>:</h4>
+<p>or can you judge whether you need a dependency edge by looking at e.g. the signature of <code>fn foo()</code> while optimizing <code>fn bar()</code>?</p>
+
+
+
+<a name="199527177"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199527177" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199527177">(Jun 02 2020 at 17:39)</a>:</h4>
+<p>note: I'm on and off rn, no promises I'll respond until tomorrow</p>
+
+
+
+<a name="199528867"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199528867" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199528867">(Jun 02 2020 at 17:53)</a>:</h4>
+<p>Yes, <code>fn foo() {}</code>'s MIR can influence the optimization of <code>fn bar() {}</code>.</p>
+
+
+
+<a name="199529006"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199529006" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199529006">(Jun 02 2020 at 17:54)</a>:</h4>
+<p>Oh wait, let me think about whether the signature is sufficient with some assumptions...</p>
+
+
+
+<a name="199585562"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199585562" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199585562">(Jun 03 2020 at 07:05)</a>:</h4>
+<p>if it is, you can make the decision to fetch the more advanced data of the function by first fetching the signature</p>
+
+
+
+<a name="199585657"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199585657" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199585657">(Jun 03 2020 at 07:06)</a>:</h4>
+<p>if everything fails, you could also do all this work post-"mir-optimized" by adding another query "mir-codegen" which processes the optimized MIR for codegen and thus has no query edges from earlier steps to it</p>
+
+
+
+<a name="199635497"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199635497" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199635497">(Jun 03 2020 at 15:35)</a>:</h4>
+<p>Oh wow, the latter seems promising. I'd still be able to transform the MIR or LLVM IR in this query, right? Can you point me to any existing post-<code>tcx.optimized_mir</code> transformations?</p>
+<p>How does this break the cycle? Is it that everything has already been generated, so my query cannot create additional work that requires my query?</p>
+
+
+
+<a name="199636495"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199636495" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199636495">(Jun 03 2020 at 15:43)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20transformations/near/199585562">said</a>:</p>
+<blockquote>
+<p>if it is, you can make the decision to fetch the more advanced data of the function by first fetching the signature</p>
+</blockquote>
+<p>I thought about it more and concluded that the function signature alone is not sufficient.</p>
+
+
+
+<a name="199643032"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643032" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643032">(Jun 03 2020 at 16:32)</a>:</h4>
+<p>There aren't any post-<code>optimized_mir</code> transformations. You'd have to create all relevant changes for this and in a way that it won't impact the regular compiler negatively if you want to upstream those changes. You could create a query that returns a <code>Cow&lt;'tcx, mir::Body&lt;'tcx&gt;&gt;</code> and ensure that all sites that use it in <code>codegen</code> call that query instead of <code>optimized_mir</code>. Then, when you build your own compiler driver, you can override that query with one that clones all the MIRs that you want to modify, modifies them and returns the modified MIR. The regular compiler would just return a <code>Cow::Borrowed</code> so the additional query would be very cheap (especially since only codegen uses it). If you want to do such a change, I suggest you write an <code>MCP</code> (major change proposal) for the compiler team.</p>
+
+
+
+<a name="199643095"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643095" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643095">(Jun 03 2020 at 16:32)</a>:</h4>
+<p>There may be other/better ways, but I can't think of any off the top of my head</p>
+
+
+
+<a name="199643359"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643359" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> lcnr <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643359">(Jun 03 2020 at 16:34)</a>:</h4>
+<p>Only somewhat related, but how big are the perf costs of not using <code>Steal</code> for <code>mir_built</code>?</p>
+
+
+
+<a name="199643431"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643431" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643431">(Jun 03 2020 at 16:35)</a>:</h4>
+<p>probably very high</p>
+
+
+
+<a name="199643436"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643436" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643436">(Jun 03 2020 at 16:35)</a>:</h4>
+<p>ok</p>
+
+
+
+<a name="199643439"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643439" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643439">(Jun 03 2020 at 16:35)</a>:</h4>
+<p>hehe</p>
+
+
+
+<a name="199643443"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643443" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643443">(Jun 03 2020 at 16:35)</a>:</h4>
+<p>that's an idea</p>
+
+
+
+<a name="199643451"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643451" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643451">(Jun 03 2020 at 16:35)</a>:</h4>
+<p>you can not modify anything</p>
+
+
+
+<a name="199643491"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643491" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643491">(Jun 03 2020 at 16:35)</a>:</h4>
+<p>but make your driver replace <code>optimized_mir</code> and make it clone <code>mir_validated</code> instead of stealing it</p>
+
+
+
+<a name="199643513"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643513" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643513">(Jun 03 2020 at 16:35)</a>:</h4>
+<p>(and then invoke the original <code>optimized_mir</code>)</p>
+
+
+
+<a name="199643518"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643518" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643518">(Jun 03 2020 at 16:35)</a>:</h4>
+<p>You also have to take into account that that would increase max-rss due to more <code>mir::Body</code> instances being stored.</p>
+
+
+
+<a name="199643667"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643667" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643667">(Jun 03 2020 at 16:36)</a>:</h4>
+<p>I'm assuming all of this is just for research, the compiler will never be able to support such a scheme as far as I can tell</p>
+
+
+
+<a name="199643894"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643894" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643894">(Jun 03 2020 at 16:38)</a>:</h4>
+<p>hmm... at which point, you may just want to change your custom driver to run all <code>optimized_mir</code> queries, <em>then</em> replace the <code>optimized_mir</code> query with your own, which injects your optimization, and only then run codegen</p>
+
+
+
+<a name="199643962"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643962" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643962">(Jun 03 2020 at 16:39)</a>:</h4>
+<p>Then the queries won't run again. They are cached.</p>
+
+
+
+<a name="199643979"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199643979" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199643979">(Jun 03 2020 at 16:39)</a>:</h4>
+<p>oh right</p>
+
+
+
+<a name="199644009"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199644009" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199644009">(Jun 03 2020 at 16:39)</a>:</h4>
+<p>yea idk, this optimization goes so much against the query system...</p>
+
+
+
+<a name="199644015"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199644015" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199644015">(Jun 03 2020 at 16:39)</a>:</h4>
+<p>Also I don't think there is any public api to change the <code>Providers</code> struct after construction of <code>TyCtxt</code>.</p>
+
+
+
+<a name="199688734"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199688734" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199688734">(Jun 03 2020 at 23:14)</a>:</h4>
+<blockquote>
+<p>create all relevant changes for this and in a way that it won't impact the regular compiler negatively if you want to upstream those changes</p>
+<p>If you want to do such a change, I suggest you write an MCP (major change proposal) for the compiler team.</p>
+<p>the compiler will never be able to support such a scheme as far as I can tell</p>
+</blockquote>
+<p>Yeah, this is just for research, so I'm not planning on upstreaming.</p>
+
+
+
+<a name="199776159"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199776159" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199776159">(Jun 04 2020 at 16:50)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20transformations/near/199643491">said</a>:</p>
+<blockquote>
+<p>but make your driver replace <code>optimized_mir</code> and make it clone <code>mir_validated</code> instead of stealing it</p>
+</blockquote>
+<p>I'd like to do whatever's easiest to get working, so this approach seems most promising <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span> </p>
+<p>To clarify, do you mean removing <code>Steal</code> entirely from <code>mir_built</code>, <code>mir_const</code>, and <code>mir_validated</code> and using <code>clone()</code> instead? Would the return value for each of these queries then be <code>&amp;'tcx mir::Body&lt;'tcx&gt;</code> rather than <code>&amp;'tcx Steal&lt;mir::Body&lt;'tcx&gt;&gt;</code>?</p>
+
+
+
+<a name="199776696"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199776696" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199776696">(Jun 04 2020 at 16:53)</a>:</h4>
+<p>no, just keep the steal there</p>
+
+
+
+<a name="199776701"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199776701" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199776701">(Jun 04 2020 at 16:54)</a>:</h4>
+<p>modify as little as possible</p>
+
+
+
+<a name="199776761"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199776761" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199776761">(Jun 04 2020 at 16:54)</a>:</h4>
+<p>just remove the <code>.steal()</code> call in <code>optimized_mir</code></p>
+
+
+
+<a name="199776789"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199776789" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199776789">(Jun 04 2020 at 16:54)</a>:</h4>
+<p>and replace it with <code>.clone()</code> (may need some derefs)</p>
+
+
+
+<a name="199777450"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199777450" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199777450">(Jun 04 2020 at 16:59)</a>:</h4>
+<p>Hm, but <code>mir_validated</code> returns <code>&amp;'tcx Steal&lt;mir::Body&lt;'tcx&gt;&gt;</code>, so wouldn't the <code>.clone()</code>d value still be wrapped in the <code>Steal</code>? <code>run_optimization_passes</code> requires <code>&amp;mut Body</code> without the <code>Steal</code>.</p>
+
+
+
+<a name="199777544"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199777544" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199777544">(Jun 04 2020 at 16:59)</a>:</h4>
+<p><code>(**mir).clone()</code>?</p>
+
+
+
+<a name="199777992"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199777992" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199777992">(Jun 04 2020 at 17:02)</a>:</h4>
+<p>The specific line is <a href="https://github.com/rust-lang/rust/blob/e5335592e78354e33d798d20c04bcd677c1df62d/src/librustc_mir/transform/mod.rs#L401">here</a>.</p>
+<p>Hm, <span class="user-mention" data-user-id="133247">@bjorn3</span> it says "type <code>rustc::ty::steal::Steal&lt;rustc::mir::Body&lt;'_&gt;&gt;</code> cannot be dereferenced".</p>
+
+
+
+<a name="199778118"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199778118" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199778118">(Jun 04 2020 at 17:03)</a>:</h4>
+<p><code>(*mir.borrow()).clone()</code></p>
+<p>edit: one <code>*</code> too much</p>
+
+
+
+<a name="199778604"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199778604" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199778604">(Jun 04 2020 at 17:07)</a>:</h4>
+<p>Trying this out now. <code>(**body.borrow()).clone();</code> says "type <code>rustc::mir::Body&lt;'_&gt;</code> cannot be dereferenced", so I'm trying <code>(*body.borrow()).clone();</code>, which I think works.</p>
+<p>Just to clarify, how does this resolve the cycle?</p>
+
+
+
+<a name="199778627"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199778627" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199778627">(Jun 04 2020 at 17:07)</a>:</h4>
+<p>Ahaha, yes.</p>
+
+
+
+<a name="199780721"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199780721" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199780721">(Jun 04 2020 at 17:23)</a>:</h4>
+<p>Just rebuilt the compiler and still ran into the cycle error -- cloning alone won't solve this, right?</p>
+
+
+
+<a name="199780735"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199780735" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199780735">(Jun 04 2020 at 17:23)</a>:</h4>
+<p>Was there a separate recommendation that I missed?</p>
+
+
+
+<a name="199827590"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199827590" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199827590">(Jun 05 2020 at 01:15)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@oli</span> could you clarify how you meant cloning instead of stealing would prevent the cycle?</p>
+
+
+
+<a name="199839665"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199839665" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199839665">(Jun 05 2020 at 06:26)</a>:</h4>
+<p>You can now access <code>mir_validated</code> from anywhere, without worrying that it's result will disappear. So every single <code>mir_optimized</code> call cann now invoke all other <code>mir_validated</code>. This by itself will not break the cycle you are seeing, but since the only cycle you are seeing is through constants, you can now do an eager check before calling <code>mir_validated</code> on all items, and only do that if the current <code>optimized_mir</code> query's <code>DefId</code> is not a constant</p>
+
+
+
+<a name="199839748"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/199839748" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#199839748">(Jun 05 2020 at 06:28)</a>:</h4>
+<p>hmm... this may still invoke <code>const fn</code> cyclically, because the constants can call <code>const fn</code> and we may currently be in a const fn. So I guess you need to exclude <code>const fn</code>, from your optimizations, too</p>
+
+
+
+<a name="200247426"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200247426" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200247426">(Jun 09 2020 at 15:36)</a>:</h4>
+<p>Ah I see -- using <code>tcx.is_const_fn</code> to check that now</p>
+
+
+
+<a name="200253461"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200253461" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200253461">(Jun 09 2020 at 16:13)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/182449-t-compiler.2Fhelp/topic/MIR.20transformations/near/199839748">said</a>:</p>
+<blockquote>
+<p>hmm... this may still invoke <code>const fn</code> cyclically, because the constants can call <code>const fn</code> and we may currently be in a const fn. So I guess you need to exclude <code>const fn</code>, from your optimizations, too</p>
+</blockquote>
+<p>Hm, I see. Is this what's going on in the following cycle? Now I only call <code>tcx.mir_validated(def_id)</code> if <code>!tcx.is_const_fn(def_id)</code>, but still encounter this cycle.</p>
+<p>Thank you so much for all your help so far! It's really helpful to talk to someone who understands the existing query graph.</p>
+<div class="codehilite"><pre><span></span><code>error[E0391]: cycle detected when [ performing my query ]
+    |
+note: ...which requires processing `x86_64::&lt;impl at /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:188:1: 195:2&gt;::new128`...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:5
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: ...which requires getting validated MIR...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:5
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: ...which requires getting pre-const evaluation MIR...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:5
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: ...which requires processing `x86_64::&lt;impl at /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:188:1: 195:2&gt;::new128`...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:5
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: ...which requires processing `x86_64::&lt;impl at /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:188:1: 195:2&gt;::new128`...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:5
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: ...which requires processing `x86_64::&lt;impl at /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:188:1: 195:2&gt;::new128`...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:5
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: ...which requires const-evaluating + checking `x86_64::&lt;impl at /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:188:1: 195:2&gt;::new128::{{constant}}#0`...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:40
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |                                        ^
+note: ...which requires const-evaluating + checking `x86_64::&lt;impl at /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:188:1: 195:2&gt;::new128::{{constant}}#0`...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:40
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |                                        ^
+note: ...which requires const-evaluating `x86_64::&lt;impl at /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:188:1: 195:2&gt;::new128::{{constant}}#0`...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:40
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |                                        ^
+note: ...which requires getting optimized MIR...
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:189:40
+    |
+189 |     pub fn new128(xs: [vec128_storage; 4]) -&gt; Self {
+    |                                        ^
+    = note: ...which again requires [ performing my query ], completing the cycle
+note: cycle used when getting optimized MIR
+   --&gt; /home/ubuntu/.cargo/registry/src/github.com-1ecc6299db9ec823/ppv-lite86-0.2.6/src/x86_64/mod.rs:111:18
+    |
+111 |     u32x4: [u32; 4],
+    |                  ^
+</code></pre></div>
+
+
+
+<a name="200255935"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200255935" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200255935">(Jun 09 2020 at 16:29)</a>:</h4>
+<p>Also is <a href="https://doc.rust-lang.org/nightly/unstable-book/language-features/const-fn.html">this</a> what you mean by <code>const fn</code>? I think it's fine to exclude them from my analysis, then.</p>
+
+
+
+<a name="200257580"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200257580" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200257580">(Jun 09 2020 at 16:41)</a>:</h4>
+<p>Oh wait, if <code>tcx.is_const_fn</code> checks for <code>const fn</code>, how do you check if a <code>DefId</code> is a constant otherwise? I think I misunderstood your first message.</p>
+
+
+
+<a name="200258035"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200258035" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200258035">(Jun 09 2020 at 16:44)</a>:</h4>
+<p>I've seen <code>Operand::Constant</code> and <code>ty::Const</code>, but not sure what you mean by a <code>DefId</code> being a constant.</p>
+
+
+
+<a name="200260265"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200260265" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200260265">(Jun 09 2020 at 17:02)</a>:</h4>
+<p>Oh, I see now that the cycle starts with <code>DefId(0:1545 ~ ppv_lite86[f354]::x86_64[0]::vec128_storage[0]::u32x4[0]::{{constant}}[0])</code>, which has <code>{{constant}}</code> in it...</p>
+
+
+
+<a name="200260491"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200260491" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200260491">(Jun 09 2020 at 17:04)</a>:</h4>
+<p>And I see that the <code>{{constant}}</code> comes from <code>AnonConst</code> in <code>DefPathData</code></p>
+
+
+
+<a name="200260832"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200260832" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200260832">(Jun 09 2020 at 17:07)</a>:</h4>
+<p>You could match on <code>tcx.def_kind(def_id)</code> and then check for <code>DefKind::Const | DefKind::AssocConst</code>, like here:</p>
+<p><a href="https://doc.rust-lang.org/nightly/nightly-rustc/src/rustc_mir/const_eval/eval_queries.rs.html#337">https://doc.rust-lang.org/nightly/nightly-rustc/src/rustc_mir/const_eval/eval_queries.rs.html#337</a></p>
+
+
+
+<a name="200261855"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200261855" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200261855">(Jun 09 2020 at 17:15)</a>:</h4>
+<p>Ah great, thank you :)</p>
+
+
+
+<a name="200265548"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200265548" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200265548">(Jun 09 2020 at 17:44)</a>:</h4>
+<p>Oh, <code>tcx.def_kind</code> of <code>DefId(0:1545 ~ ppv_lite86[f354]::x86_64[0]::vec128_storage[0]::u32x4[0]::{{constant}}[0])</code> is actually <code>None</code>.</p>
+
+
+
+<a name="200265644"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200265644" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200265644">(Jun 09 2020 at 17:45)</a>:</h4>
+<p>I'll play around with eager checks using <code>tcx.def_kind</code> to decide when to actually run my query.</p>
+
+
+
+<a name="200272917"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/200272917" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#200272917">(Jun 09 2020 at 18:44)</a>:</h4>
+<p>Eager checking with <code>tcx.def_kind</code> prevents the cycle <span aria-label="grinning face with smiling eyes" class="emoji emoji-1f601" role="img" title="grinning face with smiling eyes">:grinning_face_with_smiling_eyes:</span></p>
+
+
+
+<a name="201170468"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/182449-t-compiler/help/topic/MIR%20transformations/near/201170468" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Claire Nord <a href="https://zulip-archive.rust-lang.org/stream/182449-t-compiler/help/topic/MIR.20transformations.html#201170468">(Jun 17 2020 at 17:02)</a>:</h4>
+<p>My research project is working now <span aria-label="grinning face with smiling eyes" class="emoji emoji-1f601" role="img" title="grinning face with smiling eyes">:grinning_face_with_smiling_eyes:</span> thank you so much @.oli @.bjorn3 @.lcnr for working with me so patiently!</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

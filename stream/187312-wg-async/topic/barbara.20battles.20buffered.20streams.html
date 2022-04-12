@@ -1,0 +1,299 @@
+<html>
+<head><meta charset="utf-8"><title>barbara battles buffered streams · wg-async · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/index.html">wg-async</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html">barbara battles buffered streams</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="244721104"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244721104" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244721104">(Jul 02 2021 at 15:45)</a>:</h4>
+<p>So I was thinking about the <a href="https://rust-lang.github.io/wg-async-foundations/vision/status_quo/barbara_battles_buffered_streams.html">BBBS</a> story. The culprit there is this loop:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">async</span><span class="w"> </span><span class="k">fn</span> <span class="nf">do_work</span><span class="p">(</span><span class="n">database</span>: <span class="kp">&amp;</span><span class="nc">Database</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">work</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">do_select</span><span class="p">(</span><span class="n">database</span><span class="p">,</span><span class="w"> </span><span class="n">FIND_WORK_QUERY</span><span class="p">)</span><span class="o">?</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">stream</span>::<span class="n">iter</span><span class="p">(</span><span class="n">work</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">map</span><span class="p">(</span><span class="o">|</span><span class="n">item</span><span class="o">|</span><span class="w"> </span><span class="n">do_select</span><span class="p">(</span><span class="n">database</span><span class="p">,</span><span class="w"> </span><span class="n">work_from_item</span><span class="p">(</span><span class="n">item</span><span class="p">)))</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">buffered</span><span class="p">(</span><span class="mi">5</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">for_each</span><span class="p">(</span><span class="o">|</span><span class="n">work_item</span><span class="o">|</span><span class="w"> </span><span class="n">process_work_item</span><span class="p">(</span><span class="n">database</span><span class="p">,</span><span class="w"> </span><span class="n">work_item</span><span class="p">))</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="k">await</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">async</span><span class="w"> </span><span class="k">fn</span> <span class="nf">process_work_item</span><span class="p">(</span><span class="o">..</span><span class="p">.)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>The problem is due to how <code>for_each</code> is defined ([definition(<a href="https://docs.rs/futures-util/0.3.15/src/futures_util/stream/stream/for_each.rs.html#9-19">https://docs.rs/futures-util/0.3.15/src/futures_util/stream/stream/for_each.rs.html#9-19</a>)):</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">impl</span><span class="o">&lt;</span><span class="n">St</span><span class="p">,</span><span class="w"> </span><span class="n">Fut</span><span class="p">,</span><span class="w"> </span><span class="n">F</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Future</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">ForEach</span><span class="o">&lt;</span><span class="n">St</span><span class="p">,</span><span class="w"> </span><span class="n">Fut</span><span class="p">,</span><span class="w"> </span><span class="n">F</span><span class="o">&gt;</span><span class="w"></span>
+<span class="k">where</span><span class="w"></span>
+<span class="w">    </span><span class="n">St</span>: <span class="nc">Stream</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">F</span>: <span class="nb">FnMut</span><span class="p">(</span><span class="n">St</span>::<span class="n">Item</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Fut</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Fut</span>: <span class="nc">Future</span><span class="o">&lt;</span><span class="n">Output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span> <span class="nc">Output</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">();</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span> <span class="nf">poll</span><span class="p">(</span><span class="bp">self</span>: <span class="nc">Pin</span><span class="o">&lt;&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">Self</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">cx</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="n">Context</span><span class="o">&lt;'</span><span class="nb">_</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Poll</span><span class="o">&lt;</span><span class="p">()</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">this</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">project</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="k">loop</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">fut</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">this</span><span class="p">.</span><span class="n">future</span><span class="p">.</span><span class="n">as_mut</span><span class="p">().</span><span class="n">as_pin_mut</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">ready</span><span class="o">!</span><span class="p">(</span><span class="n">fut</span><span class="p">.</span><span class="n">poll</span><span class="p">(</span><span class="n">cx</span><span class="p">));</span><span class="w"></span>
+<span class="w">                </span><span class="n">this</span><span class="p">.</span><span class="n">future</span><span class="p">.</span><span class="n">set</span><span class="p">(</span><span class="nb">None</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">item</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ready</span><span class="o">!</span><span class="p">(</span><span class="n">this</span><span class="p">.</span><span class="n">stream</span><span class="p">.</span><span class="n">as_mut</span><span class="p">().</span><span class="n">poll_next</span><span class="p">(</span><span class="n">cx</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">this</span><span class="p">.</span><span class="n">future</span><span class="p">.</span><span class="n">set</span><span class="p">(</span><span class="nb">Some</span><span class="p">((</span><span class="n">this</span><span class="p">.</span><span class="n">f</span><span class="p">)(</span><span class="n">item</span><span class="p">)));</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="n">Poll</span>::<span class="n">Ready</span><span class="p">(())</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="244721150"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244721150" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244721150">(Jul 02 2021 at 15:45)</a>:</h4>
+<p>Specifically, <code>for_each</code> will fully process the "body" of the loop for each item before requesting the next time.</p>
+
+
+
+<a name="244721179"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244721179" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244721179">(Jul 02 2021 at 15:45)</a>:</h4>
+<p>This means that the <code>buffered</code> combinator is not able to give any time to the buffered items.</p>
+
+
+
+<a name="244721231"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244721231" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244721231">(Jul 02 2021 at 15:46)</a>:</h4>
+<p>The same problem would arise any time that one does</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">while</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">f</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stream</span><span class="p">.</span><span class="n">next</span><span class="p">().</span><span class="k">await</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="244721327"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244721327" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244721327">(Jul 02 2021 at 15:46)</a>:</h4>
+<p>I guess that answers my question. I was pondering whether the problem was that <em>for-each</em> ought to have some logic to "request the next item" in the stream concurrently with the body executing.</p>
+
+
+
+<a name="244721354"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244721354" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244721354">(Jul 02 2021 at 15:46)</a>:</h4>
+<p>But even if you did so, the footgun would still exist with a <code>while let</code> method</p>
+
+
+
+<a name="244738662"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244738662" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Matthias247 <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244738662">(Jul 02 2021 at 18:08)</a>:</h4>
+<blockquote>
+<p>Specifically, for_each will fully process the "body" of the loop for each item before requesting the next time.</p>
+</blockquote>
+<p>This shouldn't matter, because <code>buffered()</code> manages concurrency and will spawn subtasks (inside a <code>FuturesUnordered</code>) instance. <code>for_each</code> is polling the <code>Buffered</code>, which polls <code>FuturesUnordered</code>, which should allow all 5 tasks to make progress. I'm wondering why this doesn't happen</p>
+
+
+
+<a name="244738695"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244738695" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Matthias247 <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244738695">(Jul 02 2021 at 18:09)</a>:</h4>
+<p>see <a href="https://docs.rs/futures-util/0.3.15/src/futures_util/stream/stream/buffered.rs.html#60-84">https://docs.rs/futures-util/0.3.15/src/futures_util/stream/stream/buffered.rs.html#60-84</a></p>
+
+
+
+<a name="244738970"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244738970" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Matthias247 <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244738970">(Jul 02 2021 at 18:11)</a>:</h4>
+<p>Oh - I see. This is about <code>for_each</code> not polling the next stream unless the previous operation has finished and thereby not driving the <code>FuturesUnordered</code>.</p>
+
+
+
+<a name="244739071"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244739071" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Matthias247 <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244739071">(Jul 02 2021 at 18:11)</a>:</h4>
+<p>I think this makes sense - you also wouldn't want any synchronous iterator/combinator to peek at the next item without explicit code. It might cause other kinds of side-effects.</p>
+
+
+
+<a name="244740644"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244740644" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244740644">(Jul 02 2021 at 18:24)</a>:</h4>
+<p>This definitely seems like a pattern that <em>some</em> combinator should support, though</p>
+
+
+
+<a name="244741320"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244741320" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Matthias247 <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244741320">(Jul 02 2021 at 18:30)</a>:</h4>
+<p>Overall I think those combinators are kind originated from a futures-0.1 world - but if you use them now they add more confusion than help.  If one writes the whole thing in a more direct async/await fashion by spawning subtasks, it gets a lot more obvious was is going on. E.g. with</p>
+<div class="codehilite"><pre><span></span><code>async fn do_work(database: &amp;Database) {
+    let work = do_select(database, FIND_WORK_QUERY)?;
+
+    let mut tasks = FuturesUnordered::new();
+
+    for item in work.take(5) {
+        tasks.push(do_select(database, work_from_item(item)));
+    }
+
+    while let Some(finished) = tasks.next().await {
+        process_work_item(database, finished).await;
+
+        // Allow another work item
+        if let Some(item) = work.next() {
+            tasks.push(do_select(database, work_from_item(item)));
+        }
+    }
+}
+</code></pre></div>
+<p>you can see that <code>tasks</code> is not interacted with while <code>process_work_item</code> is running. But then you still need to know how <code>FuturesUnordered</code> actually works, and that it does nothing while <code>.next()</code> isn't called.</p>
+
+
+
+<a name="244741520"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244741520" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Carl Lerche <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244741520">(Jul 02 2021 at 18:32)</a>:</h4>
+<p>I agree w/ Matthias re: combinators. I push devs away from Future combinators these days.</p>
+
+
+
+<a name="244741775"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244741775" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244741775">(Jul 02 2021 at 18:35)</a>:</h4>
+<p>okay. maybe the problem is that we have the wrong combinators :)</p>
+
+
+
+<a name="244741821"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244741821" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244741821">(Jul 02 2021 at 18:35)</a>:</h4>
+<p>a computation pipeline like this where you limit the "bandwidth" at certain stages, is a fairly common thing to express</p>
+
+
+
+<a name="244741999"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244741999" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244741999">(Jul 02 2021 at 18:37)</a>:</h4>
+<p>but it seems very awkward to do with async today</p>
+
+
+
+<a name="244742013"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244742013" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244742013">(Jul 02 2021 at 18:37)</a>:</h4>
+<p>scoped tasks would help</p>
+
+
+
+<a name="244742125"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244742125" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244742125">(Jul 02 2021 at 18:38)</a>:</h4>
+<p>but if you don't immediately realize you need to spawn, how do we push you in the right direction?</p>
+
+
+
+<a name="244745357"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244745357" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Matthias247 <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244745357">(Jul 02 2021 at 19:06)</a>:</h4>
+<p>When would you not realize it? I mean in Java or Go it's obvious -&gt; If you want parallelism, you need to <code>spawn/go</code>. Otherwise you never get parallelism. That seems more natural than "sometimes you get parallelism even without spawn".</p>
+
+
+
+<a name="244781497"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244781497" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244781497">(Jul 03 2021 at 05:17)</a>:</h4>
+<p>Sorry, I think we were talking past each other a bit.. what I’m trying to say is that this type of execution pattern should be relatively easy to express <em>and</em> that it should be simple to create a generic, ergonomic helper for it if it gets used often in a program.</p>
+
+
+
+<a name="244781868"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244781868" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244781868">(Jul 03 2021 at 05:27)</a>:</h4>
+<p>i.e. just that combinators (loosely defined) serve a purpose, even if the current ones we have aren’t helpful; we don’t want to repeat the same “by hand” coding pattern many times if it’s not trivial</p>
+
+
+
+<a name="244781980"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244781980" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244781980">(Jul 03 2021 at 05:30)</a>:</h4>
+<p>I’m not actually sure we disagree here :-)</p>
+
+
+
+<a name="244782084"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244782084" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244782084">(Jul 03 2021 at 05:33)</a>:</h4>
+<p>but we may have gone past the level of complexity that <em>general purpose</em> combinators can hold while reducing cognitive overhead instead of increasing it (and I suspect we may have)</p>
+
+
+
+<a name="244822223"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/244822223" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Matthias247 <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#244822223">(Jul 03 2021 at 20:12)</a>:</h4>
+<p>I agree on: Doing N concurrent operations, and M of them at a time, seems like a standard pattern, and it's something that should be supported out of the box by the ecosystem. However I disagree that it has to be long combinator chains - it could also be enabled by a different and more imperative API. </p>
+<p>My overall take on combinators is that they mostly seem preferred by people who are leaning more towards functional programming languages and patterns. But most people - and and especially newcomers to Rust which might have had more of a Java, C or C++ background have a hard time understanding what is going on with them. Seen that in dozens of code reviews and slack questions around "can you please explain me what is going on here?". Since I'm now doing this for a while I personally understand the combinator versions - but it still takes my brain more time to digest and interpret than other variants. With futures-0.1 there had not been any other options besides combinators, but that's fortunately no longer the case.</p>
+
+
+
+<a name="245358638"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/245358638" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#245358638">(Jul 08 2021 at 19:17)</a>:</h4>
+<p>Sorry, I'm catching up---</p>
+
+
+
+<a name="245358640"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/245358640" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#245358640">(Jul 08 2021 at 19:17)</a>:</h4>
+<p>A few thoughts:</p>
+
+
+
+<a name="245358748"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/245358748" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#245358748">(Jul 08 2021 at 19:18)</a>:</h4>
+<p>I don't think pushing people away from combinators and towards open-coding is the right solution. First off, it seems to me that the combinator just isn't doing the <em>right thing</em>. For that matter, the desugared version using <code>FuturesUnordered</code> also isn't doing the right thing! That is, it doesn't implement the desired semantics.</p>
+
+
+
+<a name="245358805"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/245358805" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#245358805">(Jul 08 2021 at 19:19)</a>:</h4>
+<p>I think we do want to make it possible to encapsulate common patterns into combinators. The fact that these produce footguns is the problem, not the fact that one can build abstractions.</p>
+
+
+
+<a name="245358919"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/245358919" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#245358919">(Jul 08 2021 at 19:20)</a>:</h4>
+<p>It may be that the name of <code>buffered</code> isn't ideal, but I definitely think one would want the ability to say "run up to N of these things concurently and give me data from them as it comes in". In fact, the ability to easily say things like that seems like something Rust is famous for? I love being able to write things like that in iterators.</p>
+
+
+
+<a name="245359002"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/245359002" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nikomatsakis <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#245359002">(Jul 08 2021 at 19:21)</a>:</h4>
+<p>But the high-order bit here isn't really about combinators vs not, it's about the fact that expressing the pattern <em>at all</em> isn't really possible without structured concurrency and some way to spawn tasks that access references.</p>
+
+
+
+<a name="245375067"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/245375067" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Gus Wynn <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#245375067">(Jul 08 2021 at 21:31)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="116009">nikomatsakis</span> <a href="#narrow/stream/187312-wg-async-foundations/topic/barbara.20battles.20buffered.20streams/near/245359002">said</a>:</p>
+<blockquote>
+<p>But the high-order bit here isn't really about combinators vs not, it's about the fact that expressing the pattern <em>at all</em> isn't really possible without structured concurrency and some way to spawn tasks that access references.</p>
+</blockquote>
+<p>This seems like a perfect summary</p>
+
+
+
+<a name="247797139"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/247797139" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Dahlbæk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#247797139">(Jul 31 2021 at 10:17)</a>:</h4>
+<p>hey, I'm late to the party here and may be writing in the wrong place, but anyway, here goes:</p>
+<p>I'm writing a simple cli tool to dump objects from s3 to stdout and want to make use of the buffered combinator so multiple objects can be downloaded (buffered) concurrently, while one object gets streamed directly to stdout at a time. Since objects can be big, I believe I can end up hitting this sharp edge.</p>
+<p>However, it seems that a work-around is to forward to a sink instead of using for_each. Since the Forward future that gets polled sits between the sink and stream, it should be possible to ensure that those futures keep making progress. For buffer_unordered, one could maybe use a mutex to delay future completion until the sink is ready. For buffer, I guess a semaphore in front of the Buffer and another buffer on the sink side could work.</p>
+<p>In akka streams there's this notion of an "async boundary" which seems related. Basically if you do .async on a stream, then you split the stream into two actors. This seems like a related notion, and I guess something similar can be done adhoc for rust streams by creating a channel, forwarding your stream to the sink end, spawning the Forward future on a runtime, and returning the stream end of the channel.</p>
+<p>I wasn't sure this would have any interest, or if this was the right place for my comment... but anyway here it is. If it turns out to be interesting in some way, I'm happy to help out turning it into something other people can use (docs or extra operator or maybe a crate), but I have limited Rust experience, having worked mostly on a few of my own small stand-alone projects</p>
+
+
+
+<a name="247797919"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/247797919" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Dahlbæk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#247797919">(Jul 31 2021 at 10:38)</a>:</h4>
+<p>(deleted)</p>
+
+
+
+<a name="247805712"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/247805712" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Andrew Chin (eminence) <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#247805712">(Jul 31 2021 at 14:02)</a>:</h4>
+<p>hi there <span aria-label="wave" class="emoji emoji-1f44b" role="img" title="wave">:wave:</span>  with the "status quo" stories (like the "barbara battles buffered streams" story), the goal is to capture "real life" painful experience one of our 4 characters and to describe what they tried, what worked, and what didn't work.  it sounds like you have a possible workaround/solution to what Barbara was experiencing in this story.   the current story is already pretty long, so i'm a bit wary to extending it with more things.  though maybe if you had a small snippet of example code, that could go at the end of the FAQ</p>
+
+
+
+<a name="247805727"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/247805727" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Andrew Chin (eminence) <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#247805727">(Jul 31 2021 at 14:03)</a>:</h4>
+<p>that said, i think the rust community at large (not just working group) is always eager to see more people thinking carefully about async problems, and seeing the results in blog posts or example code or crates</p>
+
+
+
+<a name="247815018"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/barbara%20battles%20buffered%20streams/near/247815018" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Dahlbæk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/barbara.20battles.20buffered.20streams.html#247815018">(Jul 31 2021 at 17:16)</a>:</h4>
+<p>that makes sense, then I'll write some code first and see if I can extract some reusable bits or snippets</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

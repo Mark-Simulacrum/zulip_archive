@@ -1,0 +1,380 @@
+<html>
+<head><meta charset="utf-8"><title>windows verbatim paths, normalization vs. canonicalize etc. · t-libs · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/index.html">t-libs</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html">windows verbatim paths, normalization vs. canonicalize etc.</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="255075819"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255075819" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255075819">(Sep 27 2021 at 16:15)</a>:</h4>
+<p>PR <a href="https://github.com/rust-lang/rust/issues/89270">#89270</a> by  would add magic behavior to path.push (and join) that would normalize <code>.</code> and <code>..</code> but only for verbatim paths in windows because there the kernel intentionally doesn't perform normalization.<br>
+<span class="user-mention" data-user-id="260325">@Chris Denton</span> suggested</p>
+<blockquote>
+<p>I think it would be great to have something that addresses this but there I there should perhaps be a holistic look at Windows path handling in Rust before adding adhoc methods as there are currently numerous open issues with paths.</p>
+</blockquote>
+
+
+
+<a name="255077122"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255077122" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255077122">(Sep 27 2021 at 16:24)</a>:</h4>
+<p>The PR in particular appears wrong to me for two reasons a) it tries to add "do what I mean" behavior to fairly low-level operations (pushing/joining) b) it does so <em>only</em> for verbatim paths which are more a "do as I say" and not a "do what I mean" thing.</p>
+<p>Dealing with verbatim paths is annoying of course. But I think it would be better to improve things so that their use can be avoided most of the time. E.g.</p>
+<ul>
+<li>add a <code>normalize</code> function so that <code>canonicalize</code> can be avoided</li>
+<li>teach cargo to add manifests which opt into long path aware behavior by default when building executables</li>
+<li><a href="https://github.com/rust-lang/rust/issues/89174">#89174</a></li>
+</ul>
+
+
+
+<a name="255078306"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255078306" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255078306">(Sep 27 2021 at 16:31)</a>:</h4>
+<p>For background, I'll try to provide a short(ish) summary.</p>
+<p>Traditional "Windows" paths are like <code>C:\Windows\notepad.exe</code>. These paths support <code>.</code> and <code>..</code> lexically; that is they resolve them based only on parsing the path string and not by asking the filesystem to resolve them.</p>
+<p>However, these Win32 paths are also a lie. Modern Windows is built on the NT kernel with the Win32 API as a subsystem on top. So the Win32 subsystem changes Win32 paths to NT paths. NT paths look like <code>\Device\HarddiskVolume1\Windows\notepad.exe</code>. They do not have any special support for <code>.</code> or <code>..</code> as these are just ordinary file names. And the kernel is "lazy". It will only resolve as much of the path as it has to, the rest it passes to whatever device will handle it. E.g. in <code>\Device\NamedPipe\name</code> the <code>name</code> part can include any nonsense like <code>\\\</code> and it's up to the <code>NamedPipe</code> device how it handles that.</p>
+<p>This detour into NT paths should just be an implementation detail. Except it's not. To avoid some of the limitations of the old Win32 paths (which are kept for backwards compatibility), there is a way to pass a path (almost) directly to and from the kernel through the Win32 APIs. This is done using the <code>\\?\</code> prefix. The Win32 compatibility layer will turn <code>\\?\</code> into <code>\??\</code> but otherwise leaves the path alone. This works because the NT <code>??</code> directory contains symlinks like <code>C:</code> which redirects to the right NT path.</p>
+<p>This is great because it can be used to avoid the old <code>MAX_PATH</code> limit. But it's also bad because it skips all the other parsing and magic handling of <code>.</code> and <code>..</code> components, which NT may treat as normal file names.</p>
+
+
+
+<a name="255079991"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255079991" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255079991">(Sep 27 2021 at 16:42)</a>:</h4>
+<p>Also from that PR</p>
+<blockquote>
+<p>So these NT paths are essentially impossible to handle sensibly with Rust's Path/PathBuf without special knowledge of the device being used. Maybe the device uses $ as the path separator? In that case push is already broken. Maybe . is a filename? In that case components is broken. Etc, etc.</p>
+</blockquote>
+<p>I think <code>Components</code> already does the right thing. It special-cases verbatim paths and doesn't treat <code>/</code> as separator in them, only <code>\</code>. And it doesn't skip over <code>..</code> or <code>.</code>.</p>
+
+
+
+<a name="255081664"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255081664" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255081664">(Sep 27 2021 at 16:53)</a>:</h4>
+<blockquote>
+<p>And it doesn't skip over <code>..</code> or <code>.</code>.</p>
+</blockquote>
+<p>Huh, you're right. I was relying on the docs for <code>.</code> behaviour, although to be technically correct it should probably return <code>Normal(".")</code> instead of <code>CurDir</code>. But still, my wider point was that once a component is a device sub-path it can't know anything about how that path will then be parsed. Say there's a device called <code>Foo</code> that interprets <code>$</code> as a path separator. Then it would have paths like  <code>\Device\Foo\This$is$a$path</code>. Or maybe the device doesn't have path separators at all. It's just a single namespace. It's all outside of Rust's knowledge.</p>
+
+
+
+<a name="255082192"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255082192" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255082192">(Sep 27 2021 at 16:56)</a>:</h4>
+<p>Sure, from the rust perspective <code>This$is$a$path</code> is one component. But it round-trips without mangling, that's important.</p>
+
+
+
+<a name="255082624"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255082624" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255082624">(Sep 27 2021 at 16:59)</a>:</h4>
+<p>What if <code>\</code> isn't a separator for that sub-path? Operations like <code>push</code> and <code>components</code> are inherently claiming to know how to handle a path. With raw NT paths, all bets are off.</p>
+
+
+
+<a name="255082865"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255082865" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255082865">(Sep 27 2021 at 17:00)</a>:</h4>
+<p>Doesn't that contradict your first section? <a href="https://gist.github.com/ChrisDenton/f432ca0003cf25520b448972e11f9097#nt-kernel-paths">https://gist.github.com/ChrisDenton/f432ca0003cf25520b448972e11f9097#nt-kernel-paths</a></p>
+
+
+
+<a name="255083195"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255083195" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255083195">(Sep 27 2021 at 17:02)</a>:</h4>
+<p>Yeah, I glossed over this a bit because I wrote that to explain Win32 paths. The NT object manager will treat paths that way. But I clarified in the PR:</p>
+<blockquote>
+<p>What I didn't mention there is that the NT kernel does only the minimum to resolve the relevant device, the rest of the path it simply passes to that device to resolve. The device can do anything with that sub-path.</p>
+</blockquote>
+
+
+
+<a name="255083636"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255083636" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255083636">(Sep 27 2021 at 17:05)</a>:</h4>
+<p>For example, I can create a named pipe called <code>\\?\pipe\test\\\name</code> and it would be distinct from <code>\\?\pipe\test\name</code>.</p>
+
+
+
+<a name="255083705"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255083705" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255083705">(Sep 27 2021 at 17:05)</a>:</h4>
+<p>Ok, so <code>\\\\</code> might be a problem if that doesn't round-trip through <code>Components</code>. But I think that's a bug that should be fixed (for verbatim paths).</p>
+
+
+
+<a name="255083863"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255083863" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255083863">(Sep 27 2021 at 17:06)</a>:</h4>
+<p>Rust's segmentation into components might be silly and meaningless for particular devices, but as long as it's not lossy that just makes the API unergonomic but not wrong.</p>
+
+
+
+<a name="255084271"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255084271" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255084271">(Sep 27 2021 at 17:09)</a>:</h4>
+<p>So what do I do if I want to use "normal" <code>push</code> and <code>components</code> semantics on the path?</p>
+
+
+
+<a name="255084691"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255084691" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255084691">(Sep 27 2021 at 17:12)</a>:</h4>
+<p>can you give an example? there are too many constellations.</p>
+
+
+
+<a name="255085017"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255085017" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255085017">(Sep 27 2021 at 17:14)</a>:</h4>
+<p>I mean being able to use <code>\\?\C:\Windows</code> as if it's <code>C:\Windows</code>. So pushing <code>/System32</code> works. Or using <code>.</code> or <code>..</code>. Do I have to wrap every operation like <code>normalize(path.push(subpath))</code>?</p>
+
+
+
+<a name="255085435"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255085435" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255085435">(Sep 27 2021 at 17:17)</a>:</h4>
+<p>Yes. But I think you shouldn't be in a position where you're starting with <code>\\?\C:\</code> and then doing path manipulation on top of that in the first place. Ideally they should only be used in situations where you're dealing with exotic files or other edge-cases where you wouldn't do relative lookups on top of them.</p>
+
+
+
+<a name="255085688"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255085688" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255085688">(Sep 27 2021 at 17:19)</a>:</h4>
+<p>So you're saying that <code>canonicalize</code>  should turn the OS provided path into its <code>C:\</code> (etc) equivalent if possible?</p>
+
+
+
+<a name="255086024"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255086024" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255086024">(Sep 27 2021 at 17:21)</a>:</h4>
+<p>I'm not sure. Either that or we should have a <code>normalize</code> in addition to <code>canonicalize</code>. But that could cause problems on linux.</p>
+
+
+
+<a name="255086143"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255086143" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255086143">(Sep 27 2021 at 17:22)</a>:</h4>
+<p>But canonicalize is needed for when you really do want to resolve any symlinks (or reparse points) in the path.</p>
+
+
+
+<a name="255086559"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255086559" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255086559">(Sep 27 2021 at 17:25)</a>:</h4>
+<p>Well, there's the <a href="https://docs.rs/dunce/1.0.2/dunce/">dunce</a> crate that does pretty much that.</p>
+
+
+
+<a name="255087419"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255087419" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255087419">(Sep 27 2021 at 17:31)</a>:</h4>
+<p>Yeah, it essentially wraps <code>fs::canonicalize</code> and converts the returned path. Which is what I think you're suggesting the std should do? But I'm uncertain if the standard library can prevent all leaking of such paths. especially if they come from the environment or third party crates.</p>
+
+
+
+<a name="255088001"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255088001" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255088001">(Sep 27 2021 at 17:34)</a>:</h4>
+<blockquote>
+<p>Which is what I think you're suggesting the std should do? </p>
+</blockquote>
+<p>Not strongly. It could be part of a "good enough" solution perhaps.</p>
+
+
+
+<a name="255088459"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255088459" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255088459">(Sep 27 2021 at 17:37)</a>:</h4>
+<p>My reasoning is that verbatim paths are too low-level access and there's no singular "do the right thing" for them. So instead of trying to make them ergonomic we should just fix all the reasons why someone might use them for normal stuff when they shouldn't be needed. The path length limit is one cause. Canonicalize another.</p>
+
+
+
+<a name="255088750"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255088750" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255088750">(Sep 27 2021 at 17:39)</a>:</h4>
+<p>If you got <code>\\?\pipe\test\\\name</code> then sure, keep using them. But in that situation trying to join <code>..</code> would be plain wrong.</p>
+
+
+
+<a name="255090799"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255090799" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255090799">(Sep 27 2021 at 17:53)</a>:</h4>
+<p>One possibility would be for us to add a new component type in paths, <code>VerbatimComponent</code>, that allows you to add unparsed arbitrary strings. That would allow for the <code>test\\\name</code> case and similar. Then, verbatim paths that we construct to avoid name length limitations could be treated as normal paths, while verbatim paths obtained from other places could be treated as unparsed.</p>
+
+
+
+<a name="255090927"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255090927" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255090927">(Sep 27 2021 at 17:54)</a>:</h4>
+<p>We could also have a method for "parse verbatim assuming it's a normal path", and let people use that if they want to switch modes.</p>
+
+
+
+<a name="255092695"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255092695" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255092695">(Sep 27 2021 at 18:03)</a>:</h4>
+<p>The enum is exhaustive, we can't add new variants. And its values are only constructed on the fly, the underlying path is stored as a bytes/wtf8</p>
+
+
+
+<a name="255097042"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255097042" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255097042">(Sep 27 2021 at 18:29)</a>:</h4>
+<p>My current thinking (but I'm not set on this and obviously others disagree) is that paths, by default, should be treated similar to Win32 paths because that's what's expected and wanted most of the time. And it makes it easier for non-Windows programmers to write cross-platform code without having to learn about any of this.</p>
+<p>Treating paths as actually verbatim is the special case. Some people may want to do special stuff with <code>\\\</code> or whatever. They should be assumed to know what they're doing and Rust can help them do that. But I'm not sure it should be the default way of interacting with the path APIs even if a verbatim path is provided. There should be other functions for doing other kinds of operations.</p>
+<p>This is possible because the <code>Path</code> type itself is just a container that passes on its contents. It doesn't do anything to the path unless the user explicitly invokes an operation. And those operations are both documented and intended to be cross-platform so that (for example) Mac programmers don't need to learn about Windows paths before compiling for Windows. And ideally they shouldn't have to learn to use <code>normalize</code> before calling a <code>fs</code> function just "because Windows".</p>
+
+
+
+<a name="255099135"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255099135" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255099135">(Sep 27 2021 at 18:43)</a>:</h4>
+<p>What happens if the user provides a NT path as e.g. the CLI argument?</p>
+
+
+
+<a name="255099939"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255099939" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255099939">(Sep 27 2021 at 18:48)</a>:</h4>
+<blockquote>
+<p>My current thinking (but I'm not set on this and obviously others disagree) is that paths, by default, should be treated similar to Win32 paths because that's what's expected and wanted most of the time. </p>
+</blockquote>
+<p>I can't name a specific case, but it seems like repeating the same mistake that developers before us have made. Legacy paths had weird edge-cases so they add a new, no-magic, processed-exactly-as-passed thing... and then we add "the user probably meant X, let's discard some parts and not pass them through" mangling on top. And then we need another layer of "no, I really meant that".</p>
+
+
+
+<a name="255100160"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255100160" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255100160">(Sep 27 2021 at 18:49)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="330154">The 8472</span> <a href="#narrow/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E/near/255092695">said</a>:</p>
+<blockquote>
+<p>The enum is exhaustive, we can't add new variants.</p>
+</blockquote>
+<p>Oh, right; forgot that it was public. :(</p>
+
+
+
+<a name="255102957"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255102957" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255102957">(Sep 27 2021 at 19:06)</a>:</h4>
+<blockquote>
+<p>I can't name a specific case, but it seems like repeating the same mistake that developers before us have made. Legacy paths had weird edge-cases so they add a new, no-magic, processed-exactly-as-passed thing... and then we add "the user probably meant X, let's discard some parts and not pass them through" mangling on top. And then we need another layer of "no, I really meant that".</p>
+</blockquote>
+<p>But <code>push</code> already makes some assumptions. It will completely discard the path if an absolute path is given. E.g. pushing <code>C:</code> to a verbatim path results in <code>C:</code>. And <code>\</code> at the start of a path being pushed has special behaviour too.</p>
+<p>IMHO, this is not about guessing what the user meant. This is about asking the user to be explicitly about what they mean. If they mean it to be treated as a "filesystem-like" path then use <code>push</code>. If they want to it to be an "anything goes" path then use <code>push_verbatim</code>. So the operations on the path define the kind of path. There isn't enough information in the <code>\\?\</code> alone for Rust to guess intent so it shouldn't even try.</p>
+
+
+
+<a name="255103243"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255103243" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255103243">(Sep 27 2021 at 19:09)</a>:</h4>
+<p>Presumably <code>push_verbatim</code> will only exist on Windows?</p>
+
+
+
+<a name="255103250"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255103250" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255103250">(Sep 27 2021 at 19:09)</a>:</h4>
+<p>Good point. If push already is lossy then it might be ok.</p>
+
+
+
+<a name="255103485"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255103485" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255103485">(Sep 27 2021 at 19:10)</a>:</h4>
+<blockquote>
+<p>Presumably <code>push_verbatim</code> will only exist on Windows?</p>
+</blockquote>
+<p>Yeah. Or at least I can't think of a reason to have it on other platforms.</p>
+
+
+
+<a name="255122027"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255122027" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Sean Young <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255122027">(Sep 27 2021 at 21:19)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="260325">Chris Denton</span> <a href="#narrow/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E/near/255102957">said</a>:</p>
+<blockquote>
+<p>IMHO, this is not about guessing what the user meant. This is about asking the user to be explicitly about what they mean. If they mean it to be treated as a "filesystem-like" path then use <code>push</code>. If they want to it to be an "anything goes" path then use <code>push_verbatim</code>. So the operations on the path define the kind of path. There isn't enough information in the <code>\\?\</code> alone for Rust to guess intent so it shouldn't even try.</p>
+</blockquote>
+<p>So if I understand you correctly, you are proposing:</p>
+<ul>
+<li>Keep <code>push</code> as-is</li>
+<li>Introduce new function <code>push_verbatim</code> which does special handling (i.e. remove <code>..</code> and <code>.</code>)</li>
+</ul>
+<p>This makes sense except for one the use of the word "verbatim". When handling verbatim paths:</p>
+<ul>
+<li><code>push</code> adds paths mostly verbatim, i.e. verbatim as in dictionary definition, word-for-word/literally</li>
+<li><code>push_verbatim</code> adds to verbatim paths, as in windows concept of verbatim paths, not verbatim as word-for-word/literally</li>
+</ul>
+<p>Also what does <code>push_verbatim</code> do on non-verbatim paths?</p>
+<p>This sounds confusing.</p>
+
+
+
+<a name="255123765"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255123765" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nick12 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255123765">(Sep 27 2021 at 21:32)</a>:</h4>
+<p>I would assume from the name that <code>push_verbatim</code> does the literal/word-for-word addition and push attempts to handle pushing . or .. on a verbatim path "magically"</p>
+
+
+
+<a name="255123845"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255123845" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nick12 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255123845">(Sep 27 2021 at 21:33)</a>:</h4>
+<p>If I understand correctly, Chris' description is that, which is the opposite of what Sean Young mentiond</p>
+<blockquote>
+<p>"filesystem-like" path then use push. If they want to it to be an "anything goes" path then use push_verbatim</p>
+</blockquote>
+
+
+
+<a name="255124098"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255124098" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nick12 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255124098">(Sep 27 2021 at 21:35)</a>:</h4>
+<blockquote>
+<p>Also what does push_verbatim do on non-verbatim paths?</p>
+</blockquote>
+<p>This is an interesting question. I don't think you can add a file/folder with NUL / . / .. on a regular win32 path. Could it return an error? Or just add it "verbatim" to the path string and assume the user knows what they're doing. The other option is converting the path to a \\??\ path I guess</p>
+
+
+
+<a name="255124505"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255124505" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nick12 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255124505">(Sep 27 2021 at 21:38)</a>:</h4>
+<p>I think if it's an "anything goes" windows-only method meant for people who "know what they're doing", just adding it byte-by-byte (Meaning if used on a regular path, it will have the regular behaviour for .. ) is probably the best idea</p>
+
+
+
+<a name="255124787"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255124787" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255124787">(Sep 27 2021 at 21:40)</a>:</h4>
+<p>Hm, thinking about it this function may not even be needed as using <code>OsString::push</code> basically has the same effect. The only reasons would be convenience and for documentation. If it is added then I agree, the name could use some work as it could be confusing.</p>
+
+
+
+<a name="255349586"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255349586" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Sean Young <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255349586">(Sep 29 2021 at 06:39)</a>:</h4>
+<p>If you want to work with paths in a literal fashion, i.e. paths that contain weird things like "\\?\C:\foo\.." then I'm not sure you should be using <code>Path</code>. Just use <code>OsString</code> which does support push. </p>
+<p>As for <code>fn push()</code>, I think what we're discussing is exactly what my PR <a href="https://github.com/rust-lang/rust/pull/89270">https://github.com/rust-lang/rust/pull/89270</a> implements, or did I miss something again?</p>
+
+
+
+<a name="255393252"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255393252" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255393252">(Sep 29 2021 at 12:55)</a>:</h4>
+<p><span class="user-mention" data-user-id="445327">@Sean Young</span>  Yes, I think your PR covers what's been discussed. Though you might want to update the title and description of your PR to better reflect its current state?</p>
+
+
+
+<a name="255430106"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255430106" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Sean Young <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255430106">(Sep 29 2021 at 16:32)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="260325">Chris Denton</span> <a href="#narrow/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E/near/255393252">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="445327">Sean Young</span>  Yes, I think your PR covers what's been discussed. Though you might want to update the title and description of your PR to better reflect its current state?</p>
+</blockquote>
+<p>I've updated the PR and I've added some tests as well.</p>
+
+
+
+<a name="255430872"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255430872" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255430872">(Sep 29 2021 at 16:37)</a>:</h4>
+<p>Hm <span class="user-mention" data-user-id="239881">@Josh Triplett</span> there doesn't seem to be anyone actually assigned to <a href="https://github.com/rust-lang/rust/issues/89270">#89270</a>?</p>
+
+
+
+<a name="255434274"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255434274" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255434274">(Sep 29 2021 at 16:56)</a>:</h4>
+<p>fixed</p>
+
+
+
+<a name="255434330"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/255434330" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Chris Denton <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#255434330">(Sep 29 2021 at 16:57)</a>:</h4>
+<p>Great!</p>
+
+
+
+<a name="256202957"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/256202957" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Sean Young <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#256202957">(Oct 05 2021 at 09:26)</a>:</h4>
+<p>Thank you everyone for a good discussion. It looks like the PR is merged. I'll test it some more once it hits nightly.</p>
+<p>I've been trying to think of any other pieces we need for verbatim paths. I can't think of anything.</p>
+<p>PS I think rust <code>std::path::Path</code> is powerful enough to handle VMS paths: <a href="https://wiki.vmssoftware.com/Directory">https://wiki.vmssoftware.com/Directory</a></p>
+
+
+
+<a name="257568468"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/219381-t-libs/topic/windows%20verbatim%20paths%2C%20normalization%20vs.%20canonicalize%20etc./near/257568468" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Eh2406 <a href="https://zulip-archive.rust-lang.org/stream/219381-t-libs/topic/windows.20verbatim.20paths.2C.20normalization.20vs.2E.20canonicalize.20etc.2E.html#257568468">(Oct 14 2021 at 16:56)</a>:</h4>
+<p>I am aware of these issues but not knowledgeable. Thank you for the good discussion! I think I am convinced that this is a positive change.</p>
+<p>But, I am <em>very surprised</em> about the process here! Given this is a subtle change to windows behavior I would have expected knowledgeable parties to be cc'ed, like <span class="user-mention" data-user-id="120518">@Eric Huss</span> or @retep998 maybe @kennykerr or @rylev.</p>
+<p>Given that this is a (invisible to crater) breaking change to a stable API I would expect some team to need to do a FCP. And for there to be a discussion of how we are going to let people know about the breaking change.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

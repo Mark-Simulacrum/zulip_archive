@@ -1,0 +1,1062 @@
+<html>
+<head><meta charset="utf-8"><title>panic handling in new target · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html">panic handling in new target</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="266495146"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266495146" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266495146">(Dec 31 2021 at 10:26)</a>:</h4>
+<p>I'm currently implementing the Rust std for a target spec I'm working on (armv6k-nintendo-3ds, it's already in the compiler targets). I need help and insight in Rust's std code for panicking, because there is  a very peculiar issue I can't solve. Once a panic (normally called by panic! or unwrap) is triggered, the code checking the panic and printing all of the normal backtrace info actually crashes, due to a subtraction overflow in std/panicking.rs:277 (thanks to gdb and lots of digging I know this info is absolutely correct, for how absurd it may seem). This is very unexpected, but by checking the global/thread_local panic count variables, i noticed that they were in fact at 0 even during the panic cleanup (panicking.rs:382) from which they were called from. I both watched and used breakpoints on rust_panic to check for the use of the <code>panic_count::increase</code> function, that would cause the count to work correctly, but by my surprise this function isn't even mentioned in the <code>(gdb) info functions</code> (unlike <code>panic_count::decrease</code> which is the source of the crash and is mentioned). I can't wrap my head around it at all, so I'm guessing there may be an issue with linking for a new target. Asking to someone with more experience in the <code>std</code> then me: is there any way those functions (expecially <code>rust_panic_with_hook</code>) could be linked or used differently based on the target/architecture?</p>
+<p>My repo is <a href="https://github.com/Meziu/rust-horizon">https://github.com/Meziu/rust-horizon</a>, though this won't be of much use since the  code in <code>panicking</code> and <code>panic</code> is basically unchanged.</p>
+
+
+
+<a name="266510341"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266510341" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266510341">(Dec 31 2021 at 15:49)</a>:</h4>
+<p><span class="user-mention" data-user-id="452421">@Meziu</span> <code>armv6k-nintendo-3ds</code> doesn't have object file tls according to the target spec. This means that os tls support has to be used. Are <code>pthread_setspecific</code> and <code>pthread_getspecific</code> correctly implemented by the libc used by this target?</p>
+
+
+
+<a name="266510642"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266510642" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266510642">(Dec 31 2021 at 15:55)</a>:</h4>
+<p><span class="user-mention" data-user-id="133247">@bjorn3</span>  Yes. It works (i tested it multiple times) and it also works in this specific case (since the LOCAL_PANIC_COUNT key is correctly retrieved and accessed). The issue is in some optimization of the code i think. The <code>panic_count::increase</code> call in <code>rust_panic_with_hook</code> is optimized away for some reason, even in a debug build. By editing the source and calling the function from another spot, the code actually links the function and works just as normal. Since my target is using gcc instead of llvm, do you have any suggestions for reducing optimization even in a debug build? Or maybe a flag to not optimize a function body in rust? I'd like to test these ipothesis, but I'm not experienced enough in either of those fields</p>
+
+
+
+<a name="266510794"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266510794" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266510794">(Dec 31 2021 at 15:58)</a>:</h4>
+<p>This idea is further suggested by the fact that debug symbols lack in <code>rust_panic_with_hook</code>  when compiling for my target, yet they are normally accessible in a linux x64 build</p>
+
+
+
+<a name="266510968"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266510968" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266510968">(Dec 31 2021 at 16:01)</a>:</h4>
+<blockquote>
+<p>Since my target is using gcc instead of llvm</p>
+</blockquote>
+<p>Are you using rustc_codegen_gcc?</p>
+
+
+
+<a name="266511044"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511044" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511044">(Dec 31 2021 at 16:02)</a>:</h4>
+<p>isn't it automatically used when specifying a gcc linker in the target spec?</p>
+
+
+
+<a name="266511080"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511080" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511080">(Dec 31 2021 at 16:03)</a>:</h4>
+<p>No, you have to explicitly build rustc with support for the gcc backend and select it using a commandline argument. The gcc backend is currently experimental. By default the llvm backend is always used.</p>
+
+
+
+<a name="266511131"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511131" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511131">(Dec 31 2021 at 16:04)</a>:</h4>
+<p>Ok, interesting. I'll look into it.</p>
+
+
+
+<a name="266511134"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511134" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511134">(Dec 31 2021 at 16:04)</a>:</h4>
+<p>Thank you</p>
+
+
+
+<a name="266511151"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511151" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511151">(Dec 31 2021 at 16:04)</a>:</h4>
+<p>You probably want to keep using the llvm backend. At least for now.</p>
+
+
+
+<a name="266511229"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511229" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511229">(Dec 31 2021 at 16:06)</a>:</h4>
+<p>Yeah i guessed so, but I prefer a hard-to-use target to a non-working one <span aria-label="big smile" class="emoji emoji-1f604" role="img" title="big smile">:big_smile:</span></p>
+
+
+
+<a name="266511236"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511236" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511236">(Dec 31 2021 at 16:06)</a>:</h4>
+<blockquote>
+<p>even in a debug build.</p>
+</blockquote>
+<p>If you are compiling rustc directly with support for a target, libstd will always be built in release mode.</p>
+
+
+
+<a name="266511251"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511251" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511251">(Dec 31 2021 at 16:06)</a>:</h4>
+<p>Even with build-std?</p>
+
+
+
+<a name="266511266"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511266" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511266">(Dec 31 2021 at 16:07)</a>:</h4>
+<p>With build-std I think it only builds in release mode if you build your own code in release mode, but I am not sure.</p>
+
+
+
+<a name="266511354"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511354" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511354">(Dec 31 2021 at 16:08)</a>:</h4>
+<p>Yeah, I'm using build-std since std support for my target hasn't yet been finalized (and also waiting for a libc PR to get merged)</p>
+
+
+
+<a name="266511356"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511356" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511356">(Dec 31 2021 at 16:08)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266511266">said</a>:</p>
+<blockquote>
+<p>With build-std I think it only builds in release mode if you build your own code in release mode, but I am not sure.</p>
+</blockquote>
+<p>Just tried it and <code>cargo build -Zbuild-std</code> without <code>--release</code> indeed builds the standard library in debug mode.</p>
+
+
+
+<a name="266511376"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511376" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511376">(Dec 31 2021 at 16:09)</a>:</h4>
+<p>Cool, i guessed so from my tests. You sure do help, you know way more about this than I could think of</p>
+
+
+
+<a name="266511513"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511513" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511513">(Dec 31 2021 at 16:12)</a>:</h4>
+<blockquote>
+<p>The panic_count::increase call in rust_panic_with_hook is optimized away for some reason</p>
+</blockquote>
+<p>It doesn't look like <code>increase</code> should even be inlined in debug mode. Can you build with the <code>RUSTFLAGS="--emit llvm-ir"</code> env var and then look at the llvm ir of the <code>rust_panic_without_hook</code> function in the llvm ir file for libstd? You should find it in <code>target/debug/deps/</code> I think. The file extension is <code>.ll</code>.</p>
+
+
+
+<a name="266511803"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511803" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511803">(Dec 31 2021 at 16:19)</a>:</h4>
+<p>I found the file, and also the function. Here <code>std::panicking::panic_count::increase</code> is mentioned:</p>
+<div class="codehilite"><pre><span></span><code>invoke std::panicking::panic_count::increase
+  %5 = invoke { i8, i32 } @_ZN3std9panicking11panic_count8increase17h1991a94111aaad74E()
+          to label %bb1 unwind label %cleanup, !dbg !147223
+</code></pre></div>
+
+
+
+<a name="266511891"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511891" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511891">(Dec 31 2021 at 16:21)</a>:</h4>
+<p>(deleted)</p>
+
+
+
+<a name="266511892"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511892" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511892">(Dec 31 2021 at 16:21)</a>:</h4>
+<p>And the disassembly of <code>rust_panic_with_hook</code> doesn't show the call?</p>
+
+
+
+<a name="266511947"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511947" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511947">(Dec 31 2021 at 16:22)</a>:</h4>
+<p>What disassembly?</p>
+
+
+
+<a name="266511966"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511966" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511966">(Dec 31 2021 at 16:22)</a>:</h4>
+<p>Disassembly of the produced executable that crashes.</p>
+
+
+
+<a name="266511999"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266511999" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266511999">(Dec 31 2021 at 16:23)</a>:</h4>
+<p>There aren't any debug symbols inside <code>rust_panic_with_hook</code>, if that's what you are asking.</p>
+
+
+
+<a name="266512016"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266512016" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266512016">(Dec 31 2021 at 16:23)</a>:</h4>
+<p>like any, at all</p>
+
+
+
+<a name="266512104"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266512104" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266512104">(Dec 31 2021 at 16:25)</a>:</h4>
+<p>No, I mean like <code>objdump -d /path/to/executable</code> (you probably need an <code>objdump</code> for arm executables)</p>
+
+
+
+<a name="266512425"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266512425" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266512425">(Dec 31 2021 at 16:31)</a>:</h4>
+<p><span class="user-mention" data-user-id="133247">@bjorn3</span>  Just checked, not even once.</p>
+
+
+
+<a name="266512442"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266512442" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266512442">(Dec 31 2021 at 16:31)</a>:</h4>
+<p><code>decrease</code>, <code>GLOBAL_PANIC_COUNT</code>,<code>LOCAL_PANIC_COUNT</code> and the other members of the module are all mentioned</p>
+
+
+
+<a name="266514322"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514322" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514322">(Dec 31 2021 at 17:12)</a>:</h4>
+<p><span class="user-mention" data-user-id="452421">@Meziu</span> Could you post the full disassembly of that function?</p>
+
+
+
+<a name="266514396"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514396" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514396">(Dec 31 2021 at 17:14)</a>:</h4>
+<p>Huh, weird. Could you upload the executable somewhere so others could take a look? Note though that the executable will likely contain the full path to the rust toolchain, the executable you built and the full path to <code>~/.cargo</code> in case you don't want to leak that.</p>
+
+
+
+<a name="266514500"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514500" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514500">(Dec 31 2021 at 17:17)</a>:</h4>
+<p><span class="user-mention" data-user-id="125294">@Aaron Hill</span> </p>
+<div class="codehilite"><pre><span></span><code>00162ff8 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E&gt;:
+  162ff8:   e92d4ff0    push    {r4, r5, r6, r7, r8, r9, sl, fp, lr}
+  162ffc:   e24dd03c    sub sp, sp, #60 ; 0x3c
+  163000:   e59f5314    ldr r5, [pc, #788]  ; 16331c &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x324&gt;
+  163004:   e1a07003    mov r7, r3
+  163008:   e1a06002    mov r6, r2
+  16300c:   e1a08001    mov r8, r1
+  163010:   e1a0a000    mov sl, r0
+  163014:   e1954f9f    ldrex   r4, [r5]
+  163018:   e2840001    add r0, r4, #1
+  16301c:   e1851f90    strex   r1, r0, [r5]
+  163020:   e3510000    cmp r1, #0
+  163024:   1afffffa    bne 163014 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x1c&gt;
+  163028:   eb00010f    bl  16346c &lt;_ZN3std9panicking11panic_count17LOCAL_PANIC_COUNT7__getit17h67982381b452f8daE.llvm.4592746386331816067&gt;
+  16302c:   e3500000    cmp r0, #0
+  163030:   1a000007    bne 163054 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x5c&gt;
+  163034:   e59f1314    ldr r1, [pc, #788]  ; 163350 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x358&gt;
+  163038:   e59f0308    ldr r0, [pc, #776]  ; 163348 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x350&gt;
+  16303c:   e59f3308    ldr r3, [pc, #776]  ; 16334c &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x354&gt;
+  163040:   e58d1000    str r1, [sp]
+  163044:   e28d2024    add r2, sp, #36 ; 0x24
+  163048:   e3a01046    mov r1, #70 ; 0x46
+  16304c:   ebff9862    bl  1491dc &lt;_ZN4core6result13unwrap_failed17h870f8ccd8aa02aecE&gt;
+  163050:   e7ffdefe    udf #65006  ; 0xfdee
+  163054:   e5901000    ldr r1, [r0]
+  163058:   e3540000    cmp r4, #0
+  16305c:   e2819001    add r9, r1, #1
+  163060:   e5809000    str r9, [r0]
+  163064:   4a000014    bmi 1630bc &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0xc4&gt;
+  163068:   e3590002    cmp r9, #2
+  16306c:   8a000012    bhi 1630bc &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0xc4&gt;
+  163070:   e59f02ac    ldr r0, [pc, #684]  ; 163324 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x32c&gt;
+  163074:   e28d1028    add r1, sp, #40 ; 0x28
+  163078:   e59f42a0    ldr r4, [pc, #672]  ; 163320 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x328&gt;
+  16307c:   e88100c1    stm r1, {r0, r6, r7}
+  163080:   e285600c    add r6, r5, #12
+  163084:   e1a00006    mov r0, r6
+  163088:   e58d4024    str r4, [sp, #36]   ; 0x24
+  16308c:   ebff3192    bl  12f6dc &lt;pthread_rwlock_destroy&gt;
+  163090:   e3500000    cmp r0, #0
+  163094:   0a000048    beq 1631bc &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x1c4&gt;
+  163098:   e350002d    cmp r0, #45 ; 0x2d
+  16309c:   0a000085    beq 1632b8 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x2c0&gt;
+  1630a0:   e350000b    cmp r0, #11
+  1630a4:   1a000047    bne 1631c8 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x1d0&gt;
+  1630a8:   e59f0280    ldr r0, [pc, #640]  ; 163330 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x338&gt;
+  1630ac:   e59f2280    ldr r2, [pc, #640]  ; 163334 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x33c&gt;
+  1630b0:   e3a01024    mov r1, #36 ; 0x24
+  1630b4:   ebffffa6    bl  162f54 &lt;_ZN3std9panicking11begin_panic17h40742ce854623fc3E&gt;
+  1630b8:   e7ffdefe    udf #65006  ; 0xfdee
+  1630bc:   e3590003    cmp r9, #3
+  1630c0:   3a000014    bcc 163118 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x120&gt;
+  1630c4:   e59f0278    ldr r0, [pc, #632]  ; 163344 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x34c&gt;
+  1630c8:   e59f1250    ldr r1, [pc, #592]  ; 163320 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x328&gt;
+  1630cc:   e3a02000    mov r2, #0
+  1630d0:   e58d0024    str r0, [sp, #36]   ; 0x24
+  1630d4:   e58d1034    str r1, [sp, #52]   ; 0x34
+  1630d8:   e28d0024    add r0, sp, #36 ; 0x24
+  1630dc:   e28d1024    add r1, sp, #36 ; 0x24
+  1630e0:   e58d2038    str r2, [sp, #56]   ; 0x38
+  1630e4:   e58d2030    str r2, [sp, #48]   ; 0x30
+  1630e8:   e58d202c    str r2, [sp, #44]   ; 0x2c
+  1630ec:   e3a02001    mov r2, #1
+  1630f0:   e58d2028    str r2, [sp, #40]   ; 0x28
+  1630f4:   ebffd573    bl  1586c8 &lt;_ZN3std2io5Write9write_fmt17h213d423f6cc8735eE&gt;
+  1630f8:   e6ef0070    uxtb    r0, r0
+  1630fc:   e3500003    cmp r0, #3
+  163100:   1a00002b    bne 1631b4 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x1bc&gt;
+  163104:   e1a04001    mov r4, r1
+  163108:   e8910003    ldm r1, {r0, r1}
+  16310c:   e5911000    ldr r1, [r1]
+  163110:   e12fff31    blx r1
+  163114:   ea00001b    b   163188 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x190&gt;
+  163118:   e59f2200    ldr r2, [pc, #512]  ; 163320 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x328&gt;
+  16311c:   e59f0218    ldr r0, [pc, #536]  ; 16333c &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x344&gt;
+  163120:   e28dc008    add ip, sp, #8
+  163124:   e59f31f8    ldr r3, [pc, #504]  ; 163324 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x32c&gt;
+  163128:   e88c00cc    stm ip, {r2, r3, r6, r7}
+  16312c:   e3a02001    mov r2, #1
+  163130:   e58d2038    str r2, [sp, #56]   ; 0x38
+  163134:   e28d201c    add r2, sp, #28
+  163138:   e58d2034    str r2, [sp, #52]   ; 0x34
+  16313c:   e3a02000    mov r2, #0
+  163140:   e28d3020    add r3, sp, #32
+  163144:   e59f11f4    ldr r1, [pc, #500]  ; 163340 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x348&gt;
+  163148:   e58d2030    str r2, [sp, #48]   ; 0x30
+  16314c:   e58d202c    str r2, [sp, #44]   ; 0x2c
+  163150:   e3a02002    mov r2, #2
+  163154:   e8830007    stm r3, {r0, r1, r2}
+  163158:   e28d0008    add r0, sp, #8
+  16315c:   e58d001c    str r0, [sp, #28]
+  163160:   e28d0024    add r0, sp, #36 ; 0x24
+  163164:   e28d1024    add r1, sp, #36 ; 0x24
+  163168:   ebffd556    bl  1586c8 &lt;_ZN3std2io5Write9write_fmt17h213d423f6cc8735eE&gt;
+  16316c:   e6ef0070    uxtb    r0, r0
+  163170:   e3500003    cmp r0, #3
+  163174:   1a00000e    bne 1631b4 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x1bc&gt;
+  163178:   e1a04001    mov r4, r1
+  16317c:   e8910003    ldm r1, {r0, r1}
+  163180:   e5911000    ldr r1, [r1]
+  163184:   e12fff31    blx r1
+  163188:   e5942004    ldr r2, [r4, #4]
+  16318c:   e5921004    ldr r1, [r2, #4]
+  163190:   e3510000    cmp r1, #0
+  163194:   0a000002    beq 1631a4 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x1ac&gt;
+  163198:   e5940000    ldr r0, [r4]
+  16319c:   e5922008    ldr r2, [r2, #8]
+  1631a0:   ebfecd3e    bl  1166a0 &lt;__rust_dealloc&gt;
+  1631a4:   e1a00004    mov r0, r4
+  1631a8:   e3a0100c    mov r1, #12
+  1631ac:   e3a02004    mov r2, #4
+  1631b0:   ebfecd3a    bl  1166a0 &lt;__rust_dealloc&gt;
+  1631b4:   e7ffdefe    udf #65006  ; 0xfdee
+  1631b8:   e7ffdefe    udf #65006  ; 0xfdee
+  1631bc:   e5d50048    ldrb    r0, [r5, #72]   ; 0x48
+  1631c0:   e3500000    cmp r0, #0
+  1631c4:   1a000039    bne 1632b0 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x2b8&gt;
+  1631c8:   e2857044    add r7, r5, #68 ; 0x44
+  1631cc:   e1970f9f    ldrex   r0, [r7]
+  1631d0:   e2800001    add r0, r0, #1
+  1631d4:   e1871f90    strex   r1, r0, [r7]
+  1631d8:   e3510000    cmp r1, #0
+  1631dc:   1afffffa    bne 1631cc &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x1d4&gt;
+  1631e0:   e595b008    ldr fp, [r5, #8]
+  1631e4:   e58d6008    str r6, [sp, #8]
+  1631e8:   e35b0000    cmp fp, #0
+  1631ec:   1a000007    bne 163210 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x218&gt;
+  1631f0:   e5981010    ldr r1, [r8, #16]
+  1631f4:   e1a0000a    mov r0, sl
+  1631f8:   e12fff31    blx r1
+  1631fc:   e58d0024    str r0, [sp, #36]   ; 0x24
+  163200:   e58d1028    str r1, [sp, #40]   ; 0x28
+  163204:   e28d0024    add r0, sp, #36 ; 0x24
+  163208:   ebfffcf0    bl  1625d0 &lt;_ZN3std9panicking12default_hook17hae86c2924655bcc1E&gt;
+  16320c:   ea000009    b   163238 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x240&gt;
+  163210:   e5955004    ldr r5, [r5, #4]
+  163214:   e5981010    ldr r1, [r8, #16]
+  163218:   e1a0000a    mov r0, sl
+  16321c:   e12fff31    blx r1
+  163220:   e58d0024    str r0, [sp, #36]   ; 0x24
+  163224:   e59b2014    ldr r2, [fp, #20]
+  163228:   e58d1028    str r1, [sp, #40]   ; 0x28
+  16322c:   e28d1024    add r1, sp, #36 ; 0x24
+  163230:   e1a00005    mov r0, r5
+  163234:   e12fff32    blx r2
+  163238:   e1970f9f    ldrex   r0, [r7]
+  16323c:   e2400001    sub r0, r0, #1
+  163240:   e1871f90    strex   r1, r0, [r7]
+  163244:   e3510000    cmp r1, #0
+  163248:   1afffffa    bne 163238 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x240&gt;
+  16324c:   e1a00006    mov r0, r6
+  163250:   ebff3121    bl  12f6dc &lt;pthread_rwlock_destroy&gt;
+  163254:   e3590001    cmp r9, #1
+  163258:   9a00001b    bls 1632cc &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x2d4&gt;
+  16325c:   e59f00d4    ldr r0, [pc, #212]  ; 163338 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x340&gt;
+  163260:   e3a01000    mov r1, #0
+  163264:   e58d1038    str r1, [sp, #56]   ; 0x38
+  163268:   e58d1030    str r1, [sp, #48]   ; 0x30
+  16326c:   e58d102c    str r1, [sp, #44]   ; 0x2c
+  163270:   e3a01001    mov r1, #1
+  163274:   e58d1028    str r1, [sp, #40]   ; 0x28
+  163278:   e58d0024    str r0, [sp, #36]   ; 0x24
+  16327c:   e28d0024    add r0, sp, #36 ; 0x24
+  163280:   e28d1024    add r1, sp, #36 ; 0x24
+  163284:   e58d4034    str r4, [sp, #52]   ; 0x34
+  163288:   ebffd50e    bl  1586c8 &lt;_ZN3std2io5Write9write_fmt17h213d423f6cc8735eE&gt;
+  16328c:   e58d0008    str r0, [sp, #8]
+  163290:   e6ef0070    uxtb    r0, r0
+  163294:   e3500004    cmp r0, #4
+  163298:   e58d100c    str r1, [sp, #12]
+  16329c:   0affffc4    beq 1631b4 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x1bc&gt;
+  1632a0:   e28d0008    add r0, sp, #8
+  1632a4:   ebfff578    bl  16088c &lt;_ZN4core3ptr42drop_in_place$LT$std..io..error..Error$GT$17h875a5e8c62a92f5aE.llvm.4592746386331816067&gt;
+  1632a8:   e7ffdefe    udf #65006  ; 0xfdee
+  1632ac:   e7ffdefe    udf #65006  ; 0xfdee
+  1632b0:   e1a00006    mov r0, r6
+  1632b4:   ebff3108    bl  12f6dc &lt;pthread_rwlock_destroy&gt;
+  1632b8:   e59f0068    ldr r0, [pc, #104]  ; 163328 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x330&gt;
+  1632bc:   e59f2068    ldr r2, [pc, #104]  ; 16332c &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x334&gt;
+  1632c0:   e3a01029    mov r1, #41 ; 0x29
+  1632c4:   ebffff22    bl  162f54 &lt;_ZN3std9panicking11begin_panic17h40742ce854623fc3E&gt;
+  1632c8:   e7ffdefe    udf #65006  ; 0xfdee
+  1632cc:   e1a0000a    mov r0, sl
+  1632d0:   e1a01008    mov r1, r8
+</code></pre></div>
+
+
+
+<a name="266514566"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514566" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514566">(Dec 31 2021 at 17:18)</a>:</h4>
+<p><span class="user-mention" data-user-id="133247">@bjorn3</span> sure, other than my weird path names, everything is uploaded on github already <span aria-label="joy" class="emoji emoji-1f602" role="img" title="joy">:joy:</span></p>
+
+
+
+<a name="266514592"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514592" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514592">(Dec 31 2021 at 17:19)</a>:</h4>
+<p>It looks like <code>panic_count::increase</code> is inlined. Are you sure this is a debug mode build?</p>
+
+
+
+<a name="266514678"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514678" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514678">(Dec 31 2021 at 17:21)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266514592">said</a>:</p>
+<blockquote>
+<p>It looks like <code>panic_count::increase</code> is inlined. Are you sure this is a debug mode build?</p>
+</blockquote>
+<p>Yep, it surely is. A release build would work, funny enough, since the <code>subtraction overflow error</code> would be ignored</p>
+
+
+
+<a name="266514750"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514750" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514750">(Dec 31 2021 at 17:22)</a>:</h4>
+<p>Can you try adding <code>#[inline(never)]</code> to <code>fn increase</code>?</p>
+
+
+
+<a name="266514754"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514754" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514754">(Dec 31 2021 at 17:22)</a>:</h4>
+<p>In particular, it looks like <code>GLOBAL_PANIC_COUNT.fetch_add</code> is getting inlined</p>
+
+
+
+<a name="266514757"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514757" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514757">(Dec 31 2021 at 17:22)</a>:</h4>
+<p><a href="https://drive.google.com/file/d/12lJkRM-5NDfJAG0Nf6iyC_yNRHTEacu5/view?usp=sharing">https://drive.google.com/file/d/12lJkRM-5NDfJAG0Nf6iyC_yNRHTEacu5/view?usp=sharing</a></p>
+
+
+
+<a name="266514759"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514759" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514759">(Dec 31 2021 at 17:23)</a>:</h4>
+<p>for the elf</p>
+
+
+
+<a name="266514763"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514763" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514763">(Dec 31 2021 at 17:23)</a>:</h4>
+<p>(the ldrex / strex loop)</p>
+
+
+
+<a name="266514765"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514765" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514765">(Dec 31 2021 at 17:23)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266514750">said</a>:</p>
+<blockquote>
+<p>Can you try adding <code>#[inline(never)]</code> to <code>fn increase</code>?</p>
+</blockquote>
+<p>I tried already, no change</p>
+
+
+
+<a name="266514829"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514829" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514829">(Dec 31 2021 at 17:24)</a>:</h4>
+<p>What's the exact command you're building with?</p>
+
+
+
+<a name="266514991"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266514991" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266514991">(Dec 31 2021 at 17:28)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125294">Aaron Hill</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266514829">said</a>:</p>
+<blockquote>
+<p>What's the exact command you're building with?</p>
+</blockquote>
+<p><code>cargo build -Z unstable-options -Z buid-std --target armv6k-nintendo-3ds -Clink-arg=-z -Clink-arg=muldefs -Clink-arg=-D__3DS__</code></p>
+<p>The link-args are needed for the toolchain libraries, I don't  know if they impact the <code>std</code> building too</p>
+
+
+
+<a name="266515251"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515251" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515251">(Dec 31 2021 at 17:35)</a>:</h4>
+<p>I looked at the disassembly and</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code>  <span class="err">163000:</span>   <span class="nf">e59f5314</span>    <span class="no">ldr</span> <span class="no">r5</span><span class="p">,</span> <span class="p">[</span><span class="no">pc</span><span class="p">,</span> <span class="mi">#788</span><span class="p">]</span>  <span class="c1">; 16331c &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+0x324&gt;</span>
+</code></pre></div>
+<p>loads the address of <code>GLOBAL_PANIC_COUNT</code> into <code>r5</code>. And then</p>
+<div class="codehilite" data-code-language="GAS"><pre><span></span><code>  <span class="err">163014:</span>   <span class="nf">e1954f9f</span>    <span class="no">ldrex</span>   <span class="no">r4</span><span class="p">,</span> <span class="p">[</span><span class="no">r5</span><span class="p">]</span>
+  <span class="err">163018:</span>   <span class="nf">e2840001</span>    <span class="no">add</span> <span class="no">r0</span><span class="p">,</span> <span class="no">r4</span><span class="p">,</span> <span class="mi">#1</span>
+  <span class="err">16301</span><span class="nl">c:</span>   <span class="nf">e1851f90</span>    <span class="no">strex</span>   <span class="no">r1</span><span class="p">,</span> <span class="no">r0</span><span class="p">,</span> <span class="p">[</span><span class="no">r5</span><span class="p">]</span>
+  <span class="err">163020:</span>   <span class="nf">e3510000</span>    <span class="no">cmp</span> <span class="no">r1</span><span class="p">,</span> <span class="mi">#0</span>
+  <span class="err">163024:</span>   <span class="err">1</span><span class="nf">afffffa</span>    <span class="no">bne</span> <span class="mh">163014</span> <span class="p">&lt;</span><span class="no">_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E</span><span class="p">+</span><span class="mi">0x1c</span><span class="p">&gt;</span>
+</code></pre></div>
+<p>atomically increments <code>GLOBAL_PANIC_COUNT</code> by 1.</p>
+
+
+
+<a name="266515260"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515260" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515260">(Dec 31 2021 at 17:35)</a>:</h4>
+<p>The underflow is coming from LOCAL_PANIC_COUNT, right?</p>
+
+
+
+<a name="266515301"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515301" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515301">(Dec 31 2021 at 17:36)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/blob/master/library/std/src/panicking.rs#L277">https://github.com/rust-lang/rust/blob/master/library/std/src/panicking.rs#L277</a></p>
+
+
+
+<a name="266515325"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515325" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515325">(Dec 31 2021 at 17:37)</a>:</h4>
+<p>Yeah the problem is from LOCAL_PANIC_COUNT, though GLOBAL_PANIC_COUNT doesn't change, in my tests, either. Neither manually checking the value in gdb nor putting an hardware watch noticed changes in GLOBAL_PANIC_COUNT</p>
+
+
+
+<a name="266515335"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515335" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515335">(Dec 31 2021 at 17:37)</a>:</h4>
+<p>Yeah, just wanted to check if the entirety of <code>panic_count::increase</code> was inlined and no part lost.</p>
+
+
+
+<a name="266515389"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515389" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515389">(Dec 31 2021 at 17:38)</a>:</h4>
+<p>Do you have the LLVM IR for that function as well?</p>
+
+
+
+<a name="266515396"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515396" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515396">(Dec 31 2021 at 17:38)</a>:</h4>
+<p>rust_panic_with_hook</p>
+
+
+
+<a name="266515407"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515407" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515407">(Dec 31 2021 at 17:39)</a>:</h4>
+<p>it's the one i sent earlier. I can send it in its entirety if you want</p>
+
+
+
+<a name="266515419"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515419" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515419">(Dec 31 2021 at 17:39)</a>:</h4>
+<p>That would be useful. Could you send it in a gist?</p>
+
+
+
+<a name="266515423"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515423" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515423">(Dec 31 2021 at 17:39)</a>:</h4>
+<p>Sure, brb</p>
+
+
+
+<a name="266515618"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515618" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515618">(Dec 31 2021 at 17:44)</a>:</h4>
+<p>Which libc do you use? The newlib libc provided by devkitARM 3DS?<br>
+Edit: just saw your libc pr. <a href="https://github.com/devkitPro/libctru">https://github.com/devkitPro/libctru</a> right?</p>
+
+
+
+<a name="266515729"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515729" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515729">(Dec 31 2021 at 17:46)</a>:</h4>
+<p>Never mind, libctru seems to be used in combination with devkitARM.</p>
+
+
+
+<a name="266515876"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515876" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515876">(Dec 31 2021 at 17:50)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="125294">Aaron Hill</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266515419">said</a>:</p>
+<blockquote>
+<p>That would be useful. Could you send it in a gist?</p>
+</blockquote>
+<p><a href="https://gist.github.com/Meziu/c04f95f28e4a75ba1fc3c9d9d9bce0ca">https://gist.github.com/Meziu/c04f95f28e4a75ba1fc3c9d9d9bce0ca</a></p>
+
+
+
+<a name="266515893"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515893" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515893">(Dec 31 2021 at 17:51)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266515618">said</a>:</p>
+<blockquote>
+<p>Which libc do you use? The newlib libc provided by devkitARM 3DS?<br>
+Edit: just saw your libc pr. <a href="https://github.com/devkitPro/libctru">https://github.com/devkitPro/libctru</a> right?</p>
+</blockquote>
+<p>My own fork of libc to add armv6k-horizon support: <a href="https://github.com/Meziu/libc">https://github.com/Meziu/libc</a></p>
+
+
+
+<a name="266515909"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515909" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515909">(Dec 31 2021 at 17:51)</a>:</h4>
+<p>Libctru is what i want to <em>avoid</em> using, because of better unix compatibility among other things</p>
+
+
+
+<a name="266515959"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515959" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515959">(Dec 31 2021 at 17:52)</a>:</h4>
+<p>Still, I don't see how libc could be affecting this issue, but I will provide all info necessary</p>
+
+
+
+<a name="266515961"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515961" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515961">(Dec 31 2021 at 17:52)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="452421">Meziu</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266515893">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266515618">said</a>:</p>
+<blockquote>
+<p>Which libc do you use? The newlib libc provided by devkitARM 3DS?<br>
+Edit: just saw your libc pr. <a href="https://github.com/devkitPro/libctru">https://github.com/devkitPro/libctru</a> right?</p>
+</blockquote>
+<p>My own fork of libc to add armv6k-horizon support: <a href="https://github.com/Meziu/libc">https://github.com/Meziu/libc</a></p>
+</blockquote>
+<p>I was actually referring to the libc implementation itself (written in C) rather than the rust bindings. This is <a href="https://github.com/devkitPro/newlib">https://github.com/devkitPro/newlib</a>, right?</p>
+
+
+
+<a name="266515968"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515968" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515968">(Dec 31 2021 at 17:52)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="452421">Meziu</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266515959">said</a>:</p>
+<blockquote>
+<p>Still, I don't see how libc could be affecting this issue, but I will provide all info necessary</p>
+</blockquote>
+<p>libc is responsible for the tls implementation.</p>
+
+
+
+<a name="266515985"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515985" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515985">(Dec 31 2021 at 17:53)</a>:</h4>
+<p>Yeah it should be there, though for the pthread tls stuff, you can look in my own version I'm using: <a href="https://github.com/Meziu/pthread-3ds">https://github.com/Meziu/pthread-3ds</a></p>
+
+
+
+<a name="266515992"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266515992" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266515992">(Dec 31 2021 at 17:53)</a>:</h4>
+<p>It's still linked as a C lib</p>
+
+
+
+<a name="266516000"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516000" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516000">(Dec 31 2021 at 17:53)</a>:</h4>
+<p>(pthread isn't available for the target, but a working implementation of tls is possible)</p>
+
+
+
+<a name="266516048"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516048" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516048">(Dec 31 2021 at 17:54)</a>:</h4>
+<p>As I said, tls in both the <code>std::thread</code> and this specific case is working. As for why the function is inlined, that i don't know</p>
+
+
+
+<a name="266516049"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516049" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516049">(Dec 31 2021 at 17:54)</a>:</h4>
+<p>Does the crash happen in a single threaded or multi threaded program?</p>
+
+
+
+<a name="266516066"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516066" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516066">(Dec 31 2021 at 17:55)</a>:</h4>
+<p>libctru calls threads, but they aren't related to the Rust <code>std</code>. In a general sense, it's a single threaded as far as the Rust runtime knows</p>
+
+
+
+<a name="266516136"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516136" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516136">(Dec 31 2021 at 17:57)</a>:</h4>
+<p>A nit though I doubt it is responsible for this issue is that pthread-3ds doesn't invoke the tls key destructors at the moment.</p>
+
+
+
+<a name="266516198"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516198" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516198">(Dec 31 2021 at 17:58)</a>:</h4>
+<p>Oh yeah, guess you're right, though in most cases a thread key is there to stay for a long time, so memory leak is far in the horizon. Thanks for pointing it out though.</p>
+
+
+
+<a name="266516331"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516331" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516331">(Dec 31 2021 at 18:01)</a>:</h4>
+<p>Could you try with the following json target spec file:</p>
+<div class="codehilite" data-code-language="JSON"><pre><span></span><code><span class="p">{</span>
+  <span class="nt">"abi"</span><span class="p">:</span> <span class="s2">"eabihf"</span><span class="p">,</span>
+  <span class="nt">"arch"</span><span class="p">:</span> <span class="s2">"arm"</span><span class="p">,</span>
+  <span class="nt">"cpu"</span><span class="p">:</span> <span class="s2">"mpcore"</span><span class="p">,</span>
+  <span class="nt">"data-layout"</span><span class="p">:</span> <span class="s2">"e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"</span><span class="p">,</span>
+  <span class="nt">"env"</span><span class="p">:</span> <span class="s2">"newlib"</span><span class="p">,</span>
+  <span class="nt">"exe-suffix"</span><span class="p">:</span> <span class="s2">".elf"</span><span class="p">,</span>
+  <span class="nt">"executables"</span><span class="p">:</span> <span class="kc">true</span><span class="p">,</span>
+  <span class="nt">"features"</span><span class="p">:</span> <span class="s2">"+vfp2"</span><span class="p">,</span>
+  <span class="nt">"linker"</span><span class="p">:</span> <span class="s2">"arm-none-eabi-gcc"</span><span class="p">,</span>
+  <span class="nt">"llvm-target"</span><span class="p">:</span> <span class="s2">"armv6k-none-eabihf"</span><span class="p">,</span>
+  <span class="nt">"os"</span><span class="p">:</span> <span class="s2">"horizon"</span><span class="p">,</span>
+  <span class="nt">"pre-link-args"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="nt">"gcc"</span><span class="p">:</span> <span class="p">[</span>
+      <span class="s2">"-specs=3dsx.specs"</span><span class="p">,</span>
+      <span class="s2">"-mtune=mpcore"</span><span class="p">,</span>
+      <span class="s2">"-mfloat-abi=hard"</span><span class="p">,</span>
+      <span class="s2">"-mtp=soft"</span>
+    <span class="p">]</span>
+  <span class="p">},</span>
+  <span class="nt">"relocation-model"</span><span class="p">:</span> <span class="s2">"static"</span><span class="p">,</span>
+  <span class="nt">"target-family"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="s2">"unix"</span>
+  <span class="p">],</span>
+  <span class="nt">"target-pointer-width"</span><span class="p">:</span> <span class="s2">"32"</span><span class="p">,</span>
+  <span class="nt">"vendor"</span><span class="p">:</span> <span class="s2">"nintendo"</span><span class="p">,</span>
+  <span class="nt">"has-thread-local"</span><span class="p">:</span> <span class="kc">true</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>? That is with the extra <code>"has-thread-local": true</code>. This should make <code>thread_local!</code> use <code>#[thread_local]</code> instead of <code>pthread_getspecific</code>.</p>
+
+
+
+<a name="266516341"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516341" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516341">(Dec 31 2021 at 18:01)</a>:</h4>
+<p>Basically put that in a <code>.json</code> file and then pass the filename to <code>--target</code>.</p>
+
+
+
+<a name="266516406"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516406" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516406">(Dec 31 2021 at 18:03)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266516341">said</a>:</p>
+<blockquote>
+<p>Basically put that in a <code>.json</code> file and then pass the filename to <code>--target</code>.</p>
+</blockquote>
+<p>I've worked on the target spec for this target <span aria-label="rolling on the floor laughing" class="emoji emoji-1f923" role="img" title="rolling on the floor laughing">:rolling_on_the_floor_laughing:</span><br>
+Ok that I'm a noob, but I do know... something haha. Brb</p>
+
+
+
+<a name="266516502"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516502" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516502">(Dec 31 2021 at 18:05)</a>:</h4>
+<p>I assumed you changed the compiler itself rather than use the target spec json functionality. <span aria-label="sweat smile" class="emoji emoji-1f605" role="img" title="sweat smile">:sweat_smile:</span></p>
+
+
+
+<a name="266516559"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516559" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516559">(Dec 31 2021 at 18:06)</a>:</h4>
+<p>Don't worry, I was joking. I'm just very grateful for your time spent on my issue.</p>
+
+
+
+<a name="266516812"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516812" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516812">(Dec 31 2021 at 18:12)</a>:</h4>
+<p>Hmm, looks like I'll have to implement some sort of <code>thread_local_dtor</code> in the <code>sys</code> module. I don't know how far I can go...</p>
+
+
+
+<a name="266516954"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266516954" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266516954">(Dec 31 2021 at 18:16)</a>:</h4>
+<p>You could stub it out for now I guess.</p>
+
+
+
+<a name="266518003"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266518003" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266518003">(Dec 31 2021 at 18:43)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266516331">said</a>:</p>
+<blockquote>
+<p>Could you try with the following json target spec file:</p>
+<div class="codehilite" data-code-language="JSON"><pre><span></span><code><span class="p">{</span>
+  <span class="nt">"abi"</span><span class="p">:</span> <span class="s2">"eabihf"</span><span class="p">,</span>
+  <span class="nt">"arch"</span><span class="p">:</span> <span class="s2">"arm"</span><span class="p">,</span>
+  <span class="nt">"cpu"</span><span class="p">:</span> <span class="s2">"mpcore"</span><span class="p">,</span>
+  <span class="nt">"data-layout"</span><span class="p">:</span> <span class="s2">"e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"</span><span class="p">,</span>
+  <span class="nt">"env"</span><span class="p">:</span> <span class="s2">"newlib"</span><span class="p">,</span>
+  <span class="nt">"exe-suffix"</span><span class="p">:</span> <span class="s2">".elf"</span><span class="p">,</span>
+  <span class="nt">"executables"</span><span class="p">:</span> <span class="kc">true</span><span class="p">,</span>
+  <span class="nt">"features"</span><span class="p">:</span> <span class="s2">"+vfp2"</span><span class="p">,</span>
+  <span class="nt">"linker"</span><span class="p">:</span> <span class="s2">"arm-none-eabi-gcc"</span><span class="p">,</span>
+  <span class="nt">"llvm-target"</span><span class="p">:</span> <span class="s2">"armv6k-none-eabihf"</span><span class="p">,</span>
+  <span class="nt">"os"</span><span class="p">:</span> <span class="s2">"horizon"</span><span class="p">,</span>
+  <span class="nt">"pre-link-args"</span><span class="p">:</span> <span class="p">{</span>
+    <span class="nt">"gcc"</span><span class="p">:</span> <span class="p">[</span>
+      <span class="s2">"-specs=3dsx.specs"</span><span class="p">,</span>
+      <span class="s2">"-mtune=mpcore"</span><span class="p">,</span>
+      <span class="s2">"-mfloat-abi=hard"</span><span class="p">,</span>
+      <span class="s2">"-mtp=soft"</span>
+    <span class="p">]</span>
+  <span class="p">},</span>
+  <span class="nt">"relocation-model"</span><span class="p">:</span> <span class="s2">"static"</span><span class="p">,</span>
+  <span class="nt">"target-family"</span><span class="p">:</span> <span class="p">[</span>
+    <span class="s2">"unix"</span>
+  <span class="p">],</span>
+  <span class="nt">"target-pointer-width"</span><span class="p">:</span> <span class="s2">"32"</span><span class="p">,</span>
+  <span class="nt">"vendor"</span><span class="p">:</span> <span class="s2">"nintendo"</span><span class="p">,</span>
+  <span class="nt">"has-thread-local"</span><span class="p">:</span> <span class="kc">true</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>? That is with the extra <code>"has-thread-local": true</code>. This should make <code>thread_local!</code> use <code>#[thread_local]</code> instead of <code>pthread_getspecific</code>.</p>
+</blockquote>
+<p>Nope, the function is still inlined, and it doesn't work too. Which is the weirdest part. I understand it being inlined, but it doesn't run at all, since GLOBAL_PANIC_COUNT is unchanged... I guess I could implement this parameter in my spec file though, since it's possible anyways.</p>
+
+
+
+<a name="266518141"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266518141" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266518141">(Dec 31 2021 at 18:47)</a>:</h4>
+<p>I know it doesn't run, because if I add the call to <code>panic_count::increase</code> in <code>panic_count::decrease</code>, right before the subtraction, it runs fine and everything goes well.</p>
+
+
+
+<a name="266518185"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266518185" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266518185">(Dec 31 2021 at 18:48)</a>:</h4>
+<p>Though that makes no sense, thinking about it</p>
+
+
+
+<a name="266570788"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266570788" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266570788">(Jan 01 2022 at 19:10)</a>:</h4>
+<p>I've also been working on this issue with <span class="user-mention" data-user-id="452421">@Meziu</span> (<a href="https://github.com/Meziu/rust-horizon/issues/2">https://github.com/Meziu/rust-horizon/issues/2</a>). I just checked my release build and it does include the <code>increase</code> function:</p>
+<div class="codehilite"><pre><span></span><code>(gdb) info functions
+...
+File /home/mark/media/CLionProjects/rust-horizon/build/x86_64-unknown-linux-gnu/stage1/lib/rustlib/src/rust/library/std/src/panicking.rs:
+279:    fn std::panicking::panic_count::decrease();
+266:    fn std::panicking::panic_count::increase();
+324:    fn std::panicking::panic_count::is_zero_slow_path();
+574:    fn std::panicking::rust_panic_with_hook();
+389:    fn std::panicking::try::cleanup();
+532:    static fn std::panicking::begin_panic::{closure#0}&lt;&amp;str&gt;();
+560:    static fn std::panicking::begin_panic::{impl#1}::get&lt;&amp;str&gt;();
+547:    static fn std::panicking::begin_panic::{impl#1}::take_box&lt;&amp;str&gt;();
+526:    static fn std::panicking::begin_panic&lt;&amp;str&gt;();
+183:    static fn std::panicking::default_hook();
+205:    static fn std::panicking::default_hook::{closure#1}();
+</code></pre></div>
+<p>Checking the disassembly of <code>rust_panic_with_hook</code> it does call the increase function, at least in the compiled ELF file:</p>
+<div class="codehilite"><pre><span></span><code>(gdb) disassemble/s std::panicking::rust_panic_with_hook
+Dump of assembler code for function _ZN3std9panicking20rust_panic_with_hook17h6cde0e001e1f79b1E:
+/home/mark/media/CLionProjects/rust-horizon/build/x86_64-unknown-linux-gnu/stage1/lib/rustlib/src/rust/library/std/src/panicking.rs:
+574 fn rust_panic_with_hook(
+   0x0015bae0 &lt;+0&gt;: push    {r4, r5, r6, r7, r8, r9, r10, r11, lr}
+   0x0015bae4 &lt;+4&gt;: sub sp, sp, #52 ; 0x34
+   0x0015bae8 &lt;+8&gt;: mov r4, r3
+   0x0015baec &lt;+12&gt;:    mov r7, r2
+   0x0015baf0 &lt;+16&gt;:    mov r8, r1
+   0x0015baf4 &lt;+20&gt;:    mov r11, r0
+
+575     payload: &amp;mut dyn BoxMeUp,
+576     message: Option&lt;&amp;fmt::Arguments&lt;&#39;_&gt;&gt;,
+577     location: &amp;Location&lt;&#39;_&gt;,
+578 ) -&gt; ! {
+579     let (must_abort, panics) = panic_count::increase();
+   0x0015baf8 &lt;+24&gt;:    bl  0x1694a4 &lt;std::panicking::panic_count::increase&gt;
+   0x0015bafc &lt;+28&gt;:    mov r6, r1
+</code></pre></div>
+<p>But once I load the ELF (Citra emulator) or 3DSX file (Citra or physical 3DS, generated via 3dsxtool: <a href="https://openctr.github.io/3DSX.html">https://openctr.github.io/3DSX.html</a>) it looks very different:</p>
+<div class="codehilite"><pre><span></span><code>0x144eb0 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E&gt;          push    {r4, r5, r6, r7, r8, r9, r10, r11, lr}
+0x144eb4 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+4&gt;        sub     sp, sp, #60     ; 0x3c
+0x144eb8 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+8&gt;        ldr     r5, [pc, #788]  ; 0x1451d4 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+804&gt;
+0x144ebc &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+12&gt;       mov     r7, r3
+0x144ec0 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+16&gt;       mov     r6, r2
+0x144ec4 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+20&gt;       mov     r8, r1
+0x144ec8 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+24&gt;       mov     r10, r0
+0x144ecc &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+28&gt;       ldrex   r4, [r5]
+0x144ed0 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+32&gt;       add     r0, r4, #1
+0x144ed4 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+36&gt;       strex   r1, r0, [r5]
+0x144ed8 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+40&gt;       cmp     r1, #0
+0x144edc &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+44&gt;       bne     0x144ecc &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+28&gt;
+0x144ee0 &lt;_ZN3std9panicking20rust_panic_with_hook17ha2cca1609eb1f355E+48&gt;       bl      0x145324 &lt;_ZN3std9panicking11panic_count17LOCAL_PANIC_COUNT7__getit17h67982381b452f8daE.llvm.4592746386331816067&gt;
+</code></pre></div>
+
+
+
+<a name="266571359"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266571359" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266571359">(Jan 01 2022 at 19:27)</a>:</h4>
+<p>Scrolling around in gdb (when running the code) I found the correct assembly at 0x15bae0, just as the ELF shows. So for some reason there's two copies of <code>rust_panic_with_hook</code> being made, and it's calling the "wrong" one.</p>
+
+
+
+<a name="266571525"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266571525" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266571525">(Jan 01 2022 at 19:31)</a>:</h4>
+<p>Could you post the assembly of the two different copies in a gist?</p>
+
+
+
+<a name="266571528"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266571528" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266571528">(Jan 01 2022 at 19:31)</a>:</h4>
+<div class="codehilite"><pre><span></span><code>But once I load the ELF (Citra emulator) or 3DSX file (Citra or physical 3DS, generated via 3dsxtool: https://openctr.github.io/3DSX.html) it looks very different:
+</code></pre></div>
+<p>Not wanting to spread chaos over the issue, but checking at my ELF file for the debug build through <code>gdb</code>  on runtime it shows me this version.</p>
+
+
+
+<a name="266571814"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266571814" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266571814">(Jan 01 2022 at 19:38)</a>:</h4>
+<p>Here's the "correct" function's assembly: <a href="https://gist.github.com/AzureMarker/c3293aab79351625acae55ef796ee4db">https://gist.github.com/AzureMarker/c3293aab79351625acae55ef796ee4db</a><br>
+Here's the "second"/"inlined" function's assembly: <a href="https://gist.github.com/AzureMarker/4df0ac2d3364215002a7dd3987d24cf3">https://gist.github.com/AzureMarker/4df0ac2d3364215002a7dd3987d24cf3</a></p>
+
+
+
+<a name="266571827"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266571827" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266571827">(Jan 01 2022 at 19:39)</a>:</h4>
+<p>Here's also the backtrace during execution:</p>
+<div class="codehilite"><pre><span></span><code>(gdb) where
+#0  0x00144ebc in std::panicking::rust_panic_with_hook ()
+#1  0x00115bb4 in std::panicking::begin_panic_handler::{{closure}} ()
+#2  0x00115804 in std::sys_common::backtrace::__rust_end_short_backtrace ()
+#3  0x00144c3c in rust_begin_unwind ()
+#4  0x0018c738 in core::panicking::panic_fmt () at /home/mark/media/CLionProjects/rust-horizon/build/x86_64-unknown-linux-gnu/stage1/lib/rustlib/src/rust/library/core/src/panicking.rs:107
+#5  0x00100ec4 in n3ds_controller::main () at src/main.rs:24
+</code></pre></div>
+
+
+
+<a name="266572319"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572319" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572319">(Jan 01 2022 at 19:52)</a>:</h4>
+<p>Wait, did you compile the pthreads-3ds lib against the <code>-Zbuild-std</code> libstd or the sysroot libstd?</p>
+
+
+
+<a name="266572351"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572351" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572351">(Jan 01 2022 at 19:53)</a>:</h4>
+<p>I am pretty sure you will want to add <code>#![no_std]</code> to it's source.</p>
+
+
+
+<a name="266572409"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572409" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572409">(Jan 01 2022 at 19:54)</a>:</h4>
+<p>It's referenced by the <code>ctru-sys</code> library as a static lib (<code>.a</code> file), which is depended on transitively (through <code>ctru-rs</code>) by the main binary.</p>
+
+
+
+<a name="266572415"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572415" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572415">(Jan 01 2022 at 19:54)</a>:</h4>
+<p>What probably happens is that <code>libpthreads_3ds.a</code> contains a conflicting copy of libstd.</p>
+
+
+
+<a name="266572447"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572447" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572447">(Jan 01 2022 at 19:56)</a>:</h4>
+<p>Is it possible to make it a regular rust dependency instead of a <code>.a</code> staticlib?</p>
+
+
+
+<a name="266572490"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572490" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572490">(Jan 01 2022 at 19:56)</a>:</h4>
+<p>Yeah it does use some std stuff like BTreeMap. I tried making it a normal rust dependency, but only succeeded in transitioning a smaller fix lib: <a href="https://github.com/Meziu/ctru-rs/pull/5">https://github.com/Meziu/ctru-rs/pull/5</a></p>
+
+
+
+<a name="266572499"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572499" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572499">(Jan 01 2022 at 19:57)</a>:</h4>
+<p>This is the current status of trying to use it as a normal dependency: <a href="https://github.com/Meziu/ctru-rs/issues/2#issuecomment-1001216656">https://github.com/Meziu/ctru-rs/issues/2#issuecomment-1001216656</a></p>
+
+
+
+<a name="266572507"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572507" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572507">(Jan 01 2022 at 19:57)</a>:</h4>
+<p>It runs into this bug: <a href="https://github.com/rust-lang/rust/issues/47384">https://github.com/rust-lang/rust/issues/47384</a></p>
+
+
+
+<a name="266572552"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572552" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572552">(Jan 01 2022 at 19:58)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133247">bjorn3</span> <a href="#narrow/stream/122651-general/topic/panic.20handling.20in.20new.20target/near/266572415">said</a>:</p>
+<blockquote>
+<p>What probably happens is that <code>libpthreads_3ds.a</code> contains a conflicting copy of libstd.</p>
+</blockquote>
+<p>Hmm, I can see that happening, though it should have been compiled against a pretty similar source...</p>
+
+
+
+<a name="266572555"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572555" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572555">(Jan 01 2022 at 19:58)</a>:</h4>
+<p><code>BTreeMap</code> is part of liballoc.</p>
+
+
+
+<a name="266572559"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572559" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Meziu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572559">(Jan 01 2022 at 19:58)</a>:</h4>
+<p>Let's try making it no_std then</p>
+
+
+
+<a name="266572583"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572583" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572583">(Jan 01 2022 at 19:59)</a>:</h4>
+<p>It uses a BTreeMap to implement thread keys</p>
+
+
+
+<a name="266572737"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572737" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572737">(Jan 01 2022 at 20:01)</a>:</h4>
+<p>If a different copy is getting used at all (even if the source is identical), then I think that could lead to the issue you're having</p>
+
+
+
+<a name="266572739"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572739" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572739">(Jan 01 2022 at 20:01)</a>:</h4>
+<p>the panic starts in one copy of libstd, and increments that's copy's local panic count</p>
+
+
+
+<a name="266572790"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572790" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572790">(Jan 01 2022 at 20:02)</a>:</h4>
+<p>the panic then gets caught (if only by the <code>catch_unwind</code> used to wrap the call to <code>main</code>) by a <em>different</em> copy of libstd, which tries to decrement <em>that</em> copy's local panic count</p>
+
+
+
+<a name="266572793"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572793" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572793">(Jan 01 2022 at 20:02)</a>:</h4>
+<p>which will not have previously been incremented</p>
+
+
+
+<a name="266572818"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572818" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572818">(Jan 01 2022 at 20:03)</a>:</h4>
+<p>What code is triggering the panic in the first place?</p>
+
+
+
+<a name="266572962"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266572962" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266572962">(Jan 01 2022 at 20:06)</a>:</h4>
+<p><code>BTreeMap</code> can be used without libstd. You can use <code>extern crate alloc;</code> and then <code>alloc::collections::BTreeMap</code>.</p>
+
+
+
+<a name="266573428"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266573428" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266573428">(Jan 01 2022 at 20:18)</a>:</h4>
+<p>We saw a panic during testing something else, then noticed the issue. I've just been testing with an explicit panic call.</p>
+
+
+
+<a name="266573434"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266573434" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266573434">(Jan 01 2022 at 20:18)</a>:</h4>
+<p>which library did you put the panic call in?</p>
+
+
+
+<a name="266573440"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266573440" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266573440">(Jan 01 2022 at 20:18)</a>:</h4>
+<p>My binary's main</p>
+
+
+
+<a name="266573469"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266573469" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266573469">(Jan 01 2022 at 20:19)</a>:</h4>
+<p>Can you tell from gdb where the panic is being caught?</p>
+
+
+
+<a name="266573471"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266573471" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266573471">(Jan 01 2022 at 20:20)</a>:</h4>
+<p>The original one I think was triggered by a call to std (TcpListener) when we were testing networking</p>
+
+
+
+<a name="266573520"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266573520" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266573520">(Jan 01 2022 at 20:20)</a>:</h4>
+<p>I have the back trace above, but I think it's from the entry point's catch unwind</p>
+
+
+
+<a name="266573544"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266573544" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266573544">(Jan 01 2022 at 20:21)</a>:</h4>
+<p>(I think there's another backtrace I could show where it calls the default hook, before unwinding, but I'm on mobile atm)</p>
+
+
+
+<a name="266586479"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266586479" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266586479">(Jan 02 2022 at 01:17)</a>:</h4>
+<p>FYI I'm currently working on using the pthread-3ds fix via cargo dependency. Running into some linking issues (missing symbols) but theoretically they shouldn't be a problem. Also still running into the rust issue mentioned above (<a href="https://github.com/rust-lang/rust/issues/47384">https://github.com/rust-lang/rust/issues/47384</a>), but I should be able to mitigate it as described in the issue.</p>
+
+
+
+<a name="266630496"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/panic%20handling%20in%20new%20target/near/266630496" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Mark Drobnak <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/panic.20handling.20in.20new.20target.html#266630496">(Jan 02 2022 at 20:02)</a>:</h4>
+<p><span class="user-mention" data-user-id="133247">@bjorn3</span> <span class="user-mention" data-user-id="125294">@Aaron Hill</span> You were right, switching the pthread-3ds crate to a cargo dependency does fix the missing <code>increase</code> call AND the missing debug info. Thanks!</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

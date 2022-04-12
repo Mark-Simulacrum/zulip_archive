@@ -1,0 +1,242 @@
+[
+    {
+        "content": "<p>I think it's possible to obtain the benefits of the proposed <code>Async</code> trait, without actually introducing a new trait. Only requirements are a good <code>AsyncDrop</code> design, and the <code>?Leak</code> auto trait.</p>\n<p><strong>How It Works</strong></p>\n<p>The key idea is that there is significant overlap with <code>Async</code>'s \"must call poll until completion\" and <code>AsyncDrop</code>'s \"must call poll_drop until done\". <code>AsyncDrop</code> is a mechanism for disposing of things asynchronously, which is applicable even if the \"thing\" is a <code>Future</code>. So, why not use <code>AsyncDrop</code> for everything, instead of building a parallel mechanism just for futures?</p>\n<p>Futures that must be async-canceled would implement AsyncDrop. When <code>poll_drop</code> is first called, the future interprets it as a cancel request, and initiates cancelation. Subsequent <code>poll_drop</code> calls continue doing the cancelation work.   Examples of such async cancels are: flush a file buffer, gracefully close a connection, stop an io-uring operation, stop a DMA transfer.</p>\n<p>Futures that are non-cancelable at all would also implement AsyncDrop, but its <code>poll_drop</code> just calls <code>poll</code> internally. When dropped, it just keeps working on its original work, and drop finishes when the original work finishes.</p>\n<p><strong>What about sync Drop?</strong></p>\n<p>This depends on how the final <code>AsyncDrop</code> design looks. We'll asume we have found a way to enforce that all things with <code>AsyncDrop</code> are async-dropped instead of sync-dropped.</p>\n<p><strong>What about leaking?</strong></p>\n<p>These non/async-cancellable futures are only really non/async-cancellable if Drop/AsyncDrop is guaranteed to run.</p>\n<p>Unfortunately in current Rust it's perfectly safe to \"leak\" objects: bring them out of scope without running Drop. Much has been <a href=\"https://cglab.ca/~abeinges/blah/everyone-poops/\">written</a> <a href=\"https://gankra.github.io/blah/only-in-rust/#destructor-leaking---the-leakpocalypse\">about</a> <a href=\"https://doc.rust-lang.org/nomicon/leaking.html\">this</a>. I would even argue this is a <em>design mistake</em> in Rust. There are lots of nice things that we can't have due to leaking being safe:</p>\n<ul>\n<li>All the examples in the PPYP post and the nomicon. These have been \"creatively\" workarounded with the PPYP trick.</li>\n<li>Non-cancellable, async-cancellable futures, as seen here.</li>\n<li>io-uring operations with borrowed buffers. <a href=\"https://boats.gitlab.io/blog/post/io-uring/\">post</a>. <a href=\"https://github.com/spacejam/rio#soundness-status\">one project that gave up</a>.</li>\n<li>DMA operations with borrowed buffers. <a href=\"https://github.com/embassy-rs/embassy\">embassy</a> has given up on this too, it asks users to not leak futures. <a href=\"#narrow/stream/187312-wg-async-foundations/topic/mem.3A.3Aforget.2C.20borrowed.20buffers.20and.20DMA\">topic here</a></li>\n<li>The new \"scope\" API: scope drop must ensure Drop runs so child tasks are canceled, because they use data borrowed from the current task.</li>\n</ul>\n<p>It's time to put an end to this suffering. Let's fix the root issue.</p>\n<ul>\n<li>Introduce a new <code>Leak</code> auto trait. </li>\n<li>For backwards compatibility, all bounds require it by default, like <code>Sized</code>. To opt out, user has to do <code>where T: ?Leak</code>. Therefore all existing types implement <code>Leak</code>, all existing code continues to compile.</li>\n<li>Introduce a new <code>PhantomNoLeak</code> type that is not <code>Leak</code>. This is the only not-<code>Leak</code> type at launch.</li>\n<li>Define the safety contract for <code>!Leak</code> types as \"drop MUST run before Self's lifetime ends\".</li>\n<li>APIs that can violate this contract require <code>T: Leak</code>: 'mem::forget', 'Box::leak', 'Rc', 'Arc', 'MaybeUninit', 'ManuallyDrop'.</li>\n</ul>\n<p>Note that the contract is not \"drop MUST run\", it's \"drop MUST run <em>before Self's lifetime ends</em>\". Drop may still not run in cases like <code>process::exit</code> or <code>panic!()</code> with <code>panic=abort</code>. These cases are sound, since the entire process exits the \"universe ends\", so you could say \"time stops\" and Self's lifetime never ends. </p>\n<p><strong>Result</strong></p>\n<p>With this, we get noncancellable / async-cancellable futures without duplicating traits, and without an <code>unsafe fn poll()</code>. As a bonus, we get ergonomic io-uring and DMA, and the Scope API. All on top of the current <code>Future</code> trait.</p>\n<p>The only unknown is how to enforce async-droppable things are async-dropped. Hopefully we can work something out.</p>",
+        "id": 245527057,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1625888143
+    },
+    {
+        "content": "<p>Thanks-- I was planning on starting a kind of design doc on this spce</p>",
+        "id": 245878791,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1626206345
+    },
+    {
+        "content": "<p>enumerating the alternatives and so forth</p>",
+        "id": 245878802,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1626206349
+    },
+    {
+        "content": "<p>I'll try to read this and follow up on it</p>",
+        "id": 245878814,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1626206357
+    },
+    {
+        "content": "<p>that said, I do feel introducing <code>?Leak</code> (or any <code>?</code> trait) has a pretty big cost too, not to be underestimated.</p>",
+        "id": 245878844,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1626206375
+    },
+    {
+        "content": "<p>Crazy idea: maybe Leak could stop being a <code>?Trait</code> as an edition change?  </p>\n<p>Rust 2018: <code>Foo&lt;T&gt;</code>  implicitly means <code>where T: Sized + Leak</code>.<br>\nRust 2021 <code>Foo&lt;T&gt;</code> implicitly means <code>where T: Sized</code>.</p>\n<p><code>Sized</code> has a valid reason to stay as a <code>?</code> trait forever: it's super common to want to store a T in a struct field or local variable. There's no such reason for <code>Leak</code>. Only code that needs <code>T: Leak</code> is code that wants to store the T in an Arc or similar, which is much rarer.</p>",
+        "id": 246265947,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626462604
+    },
+    {
+        "content": "<p>This removes the need for it to be a <code>?Trait</code>, which is the main drawback of the <code>Leak</code> idea. I agree <code>?Trait</code>s suck</p>",
+        "id": 246266054,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626462671
+    },
+    {
+        "content": "<p>A very useful feature of this design would be that users don't have to make a trade-off between eager spawning and implicit scoping. With <code>unsafe fn poll</code>-based designs, completion is only guaranteed after the first poll, meaning scoped tasks can either be:</p>\n<ul>\n<li>Implicitly scoped, but spawned lazily to ensure that the future is actually polled after spawning (i.e. <code>async fn spawn&lt;F: Async&gt;(fut: F) -&gt; F::Output</code>)</li>\n<li>Explicitly (i.e. with <code>scope(async |scope| { ... })</code>) scoped, and spawned eagerly. But explicit scoping increases indentation.</li>\n</ul>\n<p>This design provides the best of both worlds, where <code>spawn</code> does not require any kind of explicit <code>scope</code> API, and can simply take in a future of any lifetime and immediately start running it.</p>",
+        "id": 246278902,
+        "sender_full_name": "Kestrer",
+        "timestamp": 1626469440
+    },
+    {
+        "content": "<p>Quick newbie question: What does the <code>Leak</code> trait mean?</p>",
+        "id": 246287751,
+        "sender_full_name": "eholk",
+        "timestamp": 1626474250
+    },
+    {
+        "content": "<p>currently in Rust it's perfectly safe to leak values (destroy them without calling Drop). The proposed Leak trait adds a way to \"close\" this hole: only Leak types would be safe to leak, so a type can declare it's <em>not</em> safe to leak by not implementing Leak.</p>",
+        "id": 246287954,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626474430
+    },
+    {
+        "content": "<p>these links from the OP are a great read: <br>\n<a href=\"https://cglab.ca/~abeinges/blah/everyone-poops/\">https://cglab.ca/~abeinges/blah/everyone-poops/</a><br>\n<a href=\"https://gankra.github.io/blah/only-in-rust/#destructor-leaking---the-leakpocalypse\">https://gankra.github.io/blah/only-in-rust/#destructor-leaking---the-leakpocalypse</a><br>\n<a href=\"https://doc.rust-lang.org/nomicon/leaking.html\">https://doc.rust-lang.org/nomicon/leaking.html</a></p>",
+        "id": 246288063,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626474519
+    },
+    {
+        "content": "<p>Ah, thanks!</p>",
+        "id": 246291835,
+        "sender_full_name": "eholk",
+        "timestamp": 1626478510
+    },
+    {
+        "content": "<p>I don't think the \"lifetime\" of a value is a well defined concept unless you do something afterward with the memory (like free it, or overwrite it with something unrelated). What is an example of a piece of code that requires the <code>Leak</code> bound for memory safety or correctness?</p>",
+        "id": 246292413,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626479188
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span> do you mean require the type to be <code>!Leak</code> ?</p>",
+        "id": 246292810,
+        "sender_full_name": "Thales Fragoso",
+        "timestamp": 1626479659
+    },
+    {
+        "content": "<p>You can't require a negative bound</p>",
+        "id": 246292826,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626479683
+    },
+    {
+        "content": "<p>Sure, but I meant as a type that doesn't implement Leak</p>",
+        "id": 246292855,
+        "sender_full_name": "Thales Fragoso",
+        "timestamp": 1626479727
+    },
+    {
+        "content": "<p>The claim is that <code>Leak</code> gives more promises, so those promises have to be more than the <code>?Leak</code> baseline</p>",
+        "id": 246292858,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626479729
+    },
+    {
+        "content": "<p>The closest thing I can think of is some kind of relationship between the scope-based static view of lifetimes and the dynamic extent of a piece of memory like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">T</span><span class=\"w\"> </span>:<span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">do_stuff</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"c1\">// If this line is executed, then `drop(x)` must have been called and completed</span>\n<span class=\"w\">  </span><span class=\"n\">do_more_stuff</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>But at the point indicated, <code>x</code> is not in scope so you can't even assert that</p>",
+        "id": 246292988,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626479874
+    },
+    {
+        "content": "<p>Here's a simple example that you probably wouldn't call \"leaking\" that nevertheless fails the test:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">fn</span> <span class=\"nf\">foo</span><span class=\"p\">()</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">vec</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"fm\">vec!</span><span class=\"p\">[];</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">T</span><span class=\"w\"> </span>:<span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">vec</span><span class=\"p\">.</span><span class=\"n\">push</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">  </span><span class=\"c1\">// x is not dropped yet!</span>\n<span class=\"w\">  </span><span class=\"n\">do_more_stuff</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>",
+        "id": 246293633,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626480496
+    },
+    {
+        "content": "<p>I think the lifetime thing is w.r.t when a type borrow something, like <code>MyStruct&lt;'a&gt;</code>, the Leak would mean that the lifetime <code>'a</code> won't end before Drop</p>",
+        "id": 246294049,
+        "sender_full_name": "Thales Fragoso",
+        "timestamp": 1626480985
+    },
+    {
+        "content": "<p>So if you borrow a buffer, you're guaranteed that the borrow won't end until Drop gets called</p>",
+        "id": 246294064,
+        "sender_full_name": "Thales Fragoso",
+        "timestamp": 1626481027
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span>: It doesn't make a difference for safe code, as the borrow checker enforces no UB can occur even when leaking. It enables currently impossible to make sound patterns of unsafe code.</p>\n<p>Examples where Leak is useful.</p>\n<ol>\n<li>Type A borrows type B and mucks with its internal state in a way that would create UB if that internal state was observed. with !Leak A can rely on Drop running before anyone else can observe B, so it can fix up the state on drop. Example: <code>Vec::drain</code> as detailed <a href=\"https://cglab.ca/~abeinges/blah/everyone-poops/\">here</a>.</li>\n<li>Type that borrows data and unsafely creates something \"globally\" that uses the borrowed data, something that would normally be possible only for <code>'static</code> data. Examples: the old scoped thread API as detailed <a href=\"https://cglab.ca/~abeinges/blah/everyone-poops/\">here</a>, the new proposed Async Scope API.</li>\n<li>Type that gives a pointer to borrowed data to some \"external actor\" that will read/write to it. The \"external actor\" should be stopped on drop, to stop it from using the pointer after the borrow has ended. Examples: futures that read/write to borrowed buffers using <a href=\"https://boats.gitlab.io/blog/post/io-uring/\">io-uring</a>. Futures that read/write to borrowed buffers using <a href=\"https://en.wikipedia.org/wiki/Direct_memory_access\">hardware DMA</a>, super common on embedded firmware.</li>\n</ol>\n<p>All of these use <code>unsafe</code>, but can be made sound if there's a way to enforce Drop runs. With today's Rust they're impossible to make sound.</p>",
+        "id": 246301984,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626493194
+    },
+    {
+        "content": "<p>What I'm trying to get at is exactly what about <code>mem::forget</code> or <code>Arc</code> makes them not leak safe, and how exactly is that encoded in the types/traits. <em>Which</em> arc function requires a <code>Leak</code> bound?</p>",
+        "id": 246302098,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626493417
+    },
+    {
+        "content": "<p>I'm on board with the basic idea but it's not clear to me how you can distinguish a type that leaks from one that doesn't, because leaking is a thing functions do, not types</p>",
+        "id": 246302153,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626493503
+    },
+    {
+        "content": "<p>what's \"leak safe or not\" is the types. For example a <code>IoUringReadFuture&lt;'a&gt;</code>type wouldn't be leak safe, so it wouldn't implement <code>Leak</code>.</p>\n<p><code>mem::forget</code>, <code>Arc</code> are \"things that can be used to leak values\", therefore they'd require that <code>T: Leak</code>, so you may not <code>mem::forget</code> a <code>IoUringReadFuture&lt;'a&gt;</code>, for example.</p>",
+        "id": 246302184,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626493535
+    },
+    {
+        "content": "<p><code>T</code> implementing <code>Leak</code> trait means it's OK to leak values of type <code>T</code>.</p>",
+        "id": 246302244,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626493602
+    },
+    {
+        "content": "<p>if <code>T</code> doesn't implement <code>Leak</code> then its Drop must run before <code>T</code>'s lifetime ends.</p>\n<p>Types/functions generic over <code>T</code> that use unsafe internally must audit if they can uphold \"all values of T will be dropped before their lifetime ends\". If they do, great, they can accept <code>!Leak</code> types. If they don't, then they must require <code>T: Leak</code></p>",
+        "id": 246302299,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626493710
+    },
+    {
+        "content": "<p>See that sentence doesn't make sense to me because a value's lifetime ends when it is dropped</p>",
+        "id": 246302306,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626493756
+    },
+    {
+        "content": "<p>Types have lifetimes too, what matters here is the type's lifetime</p>",
+        "id": 246302364,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626493865
+    },
+    {
+        "content": "<p>okay, so <code>Leak</code> bounds don't make sense unless the type has a lifetime argument. Maybe <code>Leak&lt;'a&gt;</code> itself should have a lifetime?</p>",
+        "id": 246302372,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626493907
+    },
+    {
+        "content": "<p>for example:<br>\nlifetime of <code>Foo&lt;'a&gt;</code> is <code>'a</code><br>\nlifetime of <code>Foo&lt;'a, 'b&gt;</code> is <code>min('a, 'b)</code> (speaking loosely)<br>\nlifetime of <code>Foo</code> is <code>'static</code></p>",
+        "id": 246302380,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626493921
+    },
+    {
+        "content": "<p><code>Leak</code> makes sense for types without lifetime argument: \"Drop must be run before T's lifetime ends\" + \"T's lifetime is 'static\" implies it's OK for T's Drop to never run, since the <code>'static</code> lifetime never ends</p>",
+        "id": 246302453,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626494009
+    },
+    {
+        "content": "<p>so yes,  it's OK to leak <code>'static</code> things even if they're <code>!Leak</code></p>",
+        "id": 246302461,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626494029
+    },
+    {
+        "content": "<p>I've been reading the rustbelt semantics for the past few hours to see if there is a way to formalize this. Part of the problem is that <code>drop</code> has a weird type signature: it's supposed to be returning the resources borrowed in the constructor but it is just <code>drop(&amp;mut T)</code> so you have to be in a valid state afterward (and one which is leak-safe, since the cleanup should be done at that point), which means that other functions can't assume that the value is necessarily in its \"armed\" state</p>",
+        "id": 246302544,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626494117
+    },
+    {
+        "content": "<p>Not sure what you gain with <code>Leak&lt;'a&gt;</code></p>",
+        "id": 246302545,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626494118
+    },
+    {
+        "content": "<p>yeah you could say it's OK to leak a <code>T</code> after <code>Drop</code> has run even if it's <code>!Leak</code></p>",
+        "id": 246302743,
+        "sender_full_name": "Dario Nieuwenhuis",
+        "timestamp": 1626494280
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/187312-wg-async-foundations/topic/Alternative.20to.20Async.20trait.3A.20AsyncDrop.20.2B.20.3FLeak/near/246302098\">said</a>:</p>\n<blockquote>\n<p>What I'm trying to get at is exactly what about <code>mem::forget</code> or <code>Arc</code> makes them not leak safe, and how exactly is that encoded in the types/traits. <em>Which</em> arc function requires a <code>Leak</code> bound?</p>\n</blockquote>\n<p>I would say that it's <code>Arc::new</code> and <code>Arc::new_cyclic</code> that requires a <code>Leak</code> bound, because then there is a possibility of an <code>unsafe</code> <code>Arc::new_acyclic</code>/<code>Arc::new_unchecked</code> constructor.</p>",
+        "id": 246307527,
+        "sender_full_name": "Kestrer",
+        "timestamp": 1626501959
+    },
+    {
+        "content": "<p>And by the way this \"defining leaking\" problem occurs with _all_ the new async proposals; <code>Async</code> has to define it for the safety of <code>Async::poll</code>.</p>",
+        "id": 246307579,
+        "sender_full_name": "Kestrer",
+        "timestamp": 1626502013
+    },
+    {
+        "content": "<p>An important thing to consider: Does <code>Leak</code> leak in async blocks? Currently all auto-traits do, but it would be possible to add an exception for <code>Leak</code> if deemed necessary.</p>",
+        "id": 246309852,
+        "sender_full_name": "Kestrer",
+        "timestamp": 1626505548
+    },
+    {
+        "content": "<p>that doesn't seem much different from leaking <code>Send</code> and <code>Sync</code>, I don't see why it would need an exception</p>",
+        "id": 246310550,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1626506524
+    }
+]

@@ -1,0 +1,386 @@
+<html>
+<head><meta charset="utf-8"><title>Path Resolution in r-a · t-compiler/rust-analyzer · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/index.html">t-compiler/rust-analyzer</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html">Path Resolution in r-a</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="221412448"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221412448" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221412448">(Jan 02 2021 at 19:01)</a>:</h4>
+<p>Read the <code>resolve_path_fp_with_macro</code> that <span class="user-mention" data-user-id="129457">@Florian Diebold</span> sent yesterday. For anyone interested, I think this is mostly correct in broad strokes. If any mistakes are found, please let me know!</p>
+<p>These are the following path types:</p>
+<p><strong>Dollar Crate</strong></p>
+<p>Example: <code>use $crate::foo::bar</code></p>
+<p>Usage: used in macros.</p>
+<p><strong>Crate</strong></p>
+<p>Example: <code>use crate::foo::bar</code></p>
+<p>Usage: When you want to import something in the crate. It is like an absolute path from the current crate to the item you want to import.</p>
+<p><strong>Plain</strong></p>
+<p>Example: <code>use foo::bar</code></p>
+<p>Usage: You can use it to import an external dependency or a module. Local modules take precedence, here so if you had an external dependency called <code>foo</code>, you will need an absolute Path.</p>
+<p><strong>Absolute</strong></p>
+<p>Example: <code>use ::foo::bar</code></p>
+<p>Usage: You can use it to import an external dependency. It is similar to crate, however it is the absolute path at the crate graph level. <code>foo</code> in this case is a crate and not a module.</p>
+<p><strong>Super</strong></p>
+<p>Example: <code>use super::foo::bar</code></p>
+<p>Usage: If you don't want to reference the parent module, you can use Super. It is like the <code>..</code> in a path.</p>
+<hr>
+<p>The algorithm to solve a path is a two step process.</p>
+<p>The first step is processing the first segment and figuring out: - path type, the crate the path is referencing to and the namespace of the first segment.</p>
+<p><strong>Notes on Path type</strong></p>
+<p>The only path types which can reference an external dependency is Absolute and Plain. Note also that Absolute cannot use crate, so the following paths are usually not valid : <code>use ::crate::foo::bar</code> <code>use ::$crate::foo::bar</code>.</p>
+<p><strong>Notes on Which Crate</strong></p>
+<p>When we see a Plain Path, we first look if the first segment is referring to another module. If not, we then look into our external dependencies which is located in <code>extern_prelude</code>.</p>
+<p>When we see an absolute path, we immediately look into the <code>extern_prelude</code> for the crate it is referring to. Since a crate cannot depend on itself(excluding tests/dev-builds), you will not be able to reference the current crate with an absolute path.</p>
+<p>When we see a Super Path, we first look up the module which had the import statement to begin with. Then we look at it's parent, which is a field that the ModuleData data structure stores. </p>
+<p><em>Skips macros to simplify the explanation, also because I've been ignoring them while reading the codebase for simplicity, so anything I assume will most likely be wrong</em></p>
+<hr>
+<p><strong>Finished Step one</strong></p>
+<p>So given the following path <code>use foo::bar::world</code> at the end of step one, we would have:</p>
+<ul>
+<li>Processed the <code>foo</code> segment</li>
+<li>Collected the NameSpace of <code>foo</code> which also tells us the Crate, and the Item that <code>foo</code> is (module/crate/Function/etc)</li>
+</ul>
+<p>For example, If <code>foo</code> was a module the NameSpace of <code>foo</code> would be <code>ModuleDef{crate_Id : 0, module_id : 2}</code> . We can use this information to get the items which are visible from <code>foo</code>.</p>
+<p><strong>Step Two </strong>  </p>
+<p>The second step is to iterate through the other segments until we get to the end. So in <code>foo::bar::hello</code> we take the NameSpace of <code>foo</code> which was <code>ModuleDef{crate_Id : 0, module_id : 2}</code> and we use that to search for a visible item named bar. We know exactly where to look too because of the Crate_ID being present. Once we've found <code>bar</code> in the <code>foo</code> namespace, we then set the <code>bar</code> namespace as the current namespace and repeat until we are finished.</p>
+
+
+
+<a name="221412541"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221412541" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221412541">(Jan 02 2021 at 19:03)</a>:</h4>
+<p>For debugging and learning, I created a test in <code>crates/hir_def/src/nameres/tests.rs</code> and pasted the following in a test function:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="w">    </span><span class="n">compute_crate_def_map</span><span class="p">(</span><span class="w"></span>
+<span class="w">        </span><span class="n">r</span><span class="err">#</span><span class="s">"</span>
+<span class="s">        //- /lib.rs crate:main deps:foo</span>
+<span class="s">        mod a;</span>
+<span class="s">        mod b;</span>
+<span class="s">        pub mod foo;</span>
+<span class="s">        pub use ::foo::hello;</span>
+
+<span class="s">        //- /foo/mod.rs</span>
+<span class="s">        pub mod hello;</span>
+<span class="s">        pub struct Foo;</span>
+
+<span class="s">        //- /a/mod.rs</span>
+<span class="s">        pub mod hello;</span>
+<span class="s">        pub struct Foo;</span>
+
+<span class="s">        //- /b/mod.rs</span>
+<span class="s">        pub mod hello;</span>
+<span class="s">        pub struct Foo;</span>
+
+<span class="s">        //- /foo/hello.rs</span>
+<span class="s">        pub struct Baz;</span>
+
+<span class="s">        //- /lib.rs crate:foo</span>
+<span class="s">            pub fn hello() {};</span>
+<span class="s">        "</span><span class="err">#</span><span class="p">,</span><span class="w"></span>
+<span class="p">);</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="221412609"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221412609" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221412609">(Jan 02 2021 at 19:05)</a>:</h4>
+<p>You can modify the use statement  to trigger different branches in <code>resolve_path_fp_with_macro</code> and add debug statements on <code>curr_ns</code> and <code>segment</code> to see the changed output</p>
+
+
+
+<a name="221412678"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221412678" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221412678">(Jan 02 2021 at 19:06)</a>:</h4>
+<p>I noticed that if there is an error, like the dependency is missing , then the test will silently return nothing though</p>
+
+
+
+<a name="221413338"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221413338" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221413338">(Jan 02 2021 at 19:21)</a>:</h4>
+<hr>
+<p>Hmm noticed I was not completely finished and am a bit perplexed as to why this line is needed: <a href="https://github.com/rust-analyzer/rust-analyzer/blob/master/crates/hir_def/src/nameres/collector.rs#L515">https://github.com/rust-analyzer/rust-analyzer/blob/master/crates/hir_def/src/nameres/collector.rs#L515</a></p>
+
+
+
+<a name="221413358"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221413358" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221413358">(Jan 02 2021 at 19:22)</a>:</h4>
+<p>If I import a function only, then I think the macros namespace would be <code>None</code> and the <code>Values</code> namespace in PerNS would also be None? But it should be seen as Resolved, unless I'm missing something with the PerNs structure?</p>
+
+
+
+<a name="221416465"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221416465" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221416465">(Jan 02 2021 at 20:43)</a>:</h4>
+<p>a function exists only in the values namespace, actually.</p>
+<p>let's say you import <code>foo</code> and it initially resolves to the function <code>foo</code>, then it may later still resolve to a type additionally: e.g. <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f722c68d035869839c29b6f71eb1ba4d">something like this</a></p>
+
+
+
+<a name="221416795"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221416795" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221416795">(Jan 02 2021 at 20:52)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="129457">Florian Diebold</span> <a href="#narrow/stream/185405-t-compiler.2Fwg-rls-2.2E0/topic/Path.20Resolution.20in.20r-a/near/221416465">said</a>:</p>
+<blockquote>
+<p>a function exists only in the values namespace, actually.</p>
+<p>let's say you import <code>foo</code> and it initially resolves to the function <code>foo</code>, then it may later still resolve to a type additionally: e.g. <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f722c68d035869839c29b6f71eb1ba4d">something like this</a></p>
+</blockquote>
+<p>Yeah sorry, you are right, I was reading the debug wrong:</p>
+<div class="codehilite"><pre><span></span><code>Segment : Name(Text(&quot;hello&quot;)) for Namespace : PerNs { types: None, values: Some((FunctionId(FunctionId(0)), Public)), macros: None }
+</code></pre></div>
+
+
+
+<a name="221416814"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221416814" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221416814">(Jan 02 2021 at 20:53)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="129457">Florian Diebold</span> <a href="#narrow/stream/185405-t-compiler.2Fwg-rls-2.2E0/topic/Path.20Resolution.20in.20r-a/near/221416465">said</a>:</p>
+<blockquote>
+<p>a function exists only in the values namespace, actually.</p>
+<p>let's say you import <code>foo</code> and it initially resolves to the function <code>foo</code>, then it may later still resolve to a type additionally: e.g. <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=f722c68d035869839c29b6f71eb1ba4d">something like this</a></p>
+</blockquote>
+<p>This does not answer the initial question though? Regarding this: <a href="https://github.com/rust-analyzer/rust-analyzer/blob/master/crates/hir_def/src/nameres/collector.rs#L515">https://github.com/rust-analyzer/rust-analyzer/blob/master/crates/hir_def/src/nameres/collector.rs#L515</a></p>
+<p>From the code I pasted  macros and types is None, so then the import would be seen as not resolved IIUC?</p>
+<p>Hmm not sure what I am misunderstanding about that line</p>
+
+
+
+<a name="221416948"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221416948" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221416948">(Jan 02 2021 at 20:56)</a>:</h4>
+<p>let's say you do <code>use some_module::foo;</code>, then in the first loop of import resolution it may only resolve to a value, but later it may also resolve to a type. that's why <code>Indeterminate</code> is returned there; the way import resolution works is that it loops until everything is fully resolved or nothing changes anymore. <code>PartialResolvedImport::Resolved</code> would mean "this is fully resolved and can't change anymore"</p>
+
+
+
+<a name="221417030"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417030" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417030">(Jan 02 2021 at 20:58)</a>:</h4>
+<p>that's also why it returns <code>Resolved</code> when the import comes from a different crate; in that case, the resolution <em>can't</em> change in any future loops</p>
+
+
+
+<a name="221417039"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417039" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417039">(Jan 02 2021 at 20:58)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="129457">Florian Diebold</span> <a href="#narrow/stream/185405-t-compiler.2Fwg-rls-2.2E0/topic/Path.20Resolution.20in.20r-a/near/221416948">said</a>:</p>
+<blockquote>
+<p>let's say you do <code>use some_module::foo;</code>, then in the first loop of import resolution it may only resolve to a value, but later it may also resolve to a type. that's why <code>Indeterminate</code> is returned there; the way import resolution works is that it loops until everything is fully resolved or nothing changes anymore. <code>PartialResolvedImport::Resolved</code> would mean "this is fully resolved and can't change anymore"</p>
+</blockquote>
+<p>Oh right, so Indeterminate means that it is Resolved, but there is space for other things in the other namespaces</p>
+
+
+
+<a name="221417051"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417051" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417051">(Jan 02 2021 at 20:59)</a>:</h4>
+<blockquote>
+<p>Oh right, so Indeterminate means that it is Resolved, but there is space for other things in the other namespaces</p>
+</blockquote>
+<p>well, it could be Resolved with space in other namespace if the import comes from a different crate, since we know in that case it can't change</p>
+
+
+
+<a name="221417097"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417097" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417097">(Jan 02 2021 at 21:00)</a>:</h4>
+<p>Indeterminate means "maybe there'll be more if we resolve some other imports first"</p>
+
+
+
+<a name="221417197"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417197" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417197">(Jan 02 2021 at 21:02)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="129457">Florian Diebold</span> <a href="#narrow/stream/185405-t-compiler.2Fwg-rls-2.2E0/topic/Path.20Resolution.20in.20r-a/near/221417030">said</a>:</p>
+<blockquote>
+<p>that's also why it returns <code>Resolved</code> when the import comes from a different crate; in that case, the resolution <em>can't</em> change in any future loops</p>
+</blockquote>
+<p>Ah this was going to be my follow-up question :) </p>
+<p>do you mean that it is impossible to import a foo function and foo macro from another crate?</p>
+<p>so for example:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">use</span><span class="w"> </span><span class="n">other_crate</span>::<span class="n">foo</span><span class="w"> </span><span class="p">(</span><span class="n">function</span><span class="p">);</span><span class="w"></span>
+<span class="k">use</span><span class="w"> </span><span class="n">other_crate</span>::<span class="n">foo</span><span class="w"> </span><span class="p">(</span><span class="kr">macro</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+<p>would be impossible, so once we resolve the function, it's impossible to resolve the macro unless it is aliased?</p>
+
+
+
+<a name="221417229"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417229" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417229">(Jan 02 2021 at 21:03)</a>:</h4>
+<p>well just the first <code>use other_crate::foo</code> will import both the function and the macro</p>
+
+
+
+<a name="221417289"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417289" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417289">(Jan 02 2021 at 21:04)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="129457">Florian Diebold</span> <a href="#narrow/stream/185405-t-compiler.2Fwg-rls-2.2E0/topic/Path.20Resolution.20in.20r-a/near/221417229">said</a>:</p>
+<blockquote>
+<p>well just the first <code>use other_crate::foo</code> will import both the function and the macro</p>
+</blockquote>
+<p>Ah right, found my error</p>
+
+
+
+<a name="221417482"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417482" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417482">(Jan 02 2021 at 21:09)</a>:</h4>
+<p>So IIUC, </p>
+<p>When you do <code>use other_crate::foo</code> once we Resolve this, the namespace  cannot change, because it is not valid to do this:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">use</span><span class="w"> </span><span class="n">other_crate</span>::<span class="n">foo</span><span class="p">;</span><span class="w"></span>
+<span class="k">use</span><span class="w"> </span><span class="n">my_mod</span>::<span class="n">foo</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<p>In the above there is a namespace clash.</p>
+<p>However, if it comes from a local module, then we could possibly populate the namespace further. For example:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">use</span><span class="w"> </span><span class="n">my_mod</span>::<span class="n">foo</span><span class="w"> </span><span class="p">(</span><span class="n">function</span><span class="p">);</span><span class="w"></span>
+
+<span class="k">fn</span> <span class="nf">bar</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">let</span><span class="w"> </span><span class="n">f</span><span class="w"> </span>: <span class="nc">foo</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">foo</span><span class="p">{}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="221417569"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417569" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417569">(Jan 02 2021 at 21:11)</a>:</h4>
+<p>So we've imported foo as a function and we've also used it as a type, so foo exists within the type and value namespace</p>
+
+
+
+<a name="221417671"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417671" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417671">(Jan 02 2021 at 21:13)</a>:</h4>
+<p><del>Hmm I think I am wrong actually, because in that instance, we did not import the foo type, we just used it as a type</del></p>
+<p>Hmm I think this makes a bit more sense:</p>
+<ul>
+<li>
+<p>So when we import a function called <code>foo</code> we put it in the Value namespace and state that it has not been fully resolved.</p>
+</li>
+<li>
+<p>It is possible to then have a <code>foo</code> macro in the same file, which would then populate the macro namespace.</p>
+</li>
+<li>
+<p>Within a function, it is possible to use the function as a type which would then populate the type namespace.</p>
+</li>
+<li>
+<p>It is not possible however to populate the type and value namespace for a function from an import.</p>
+</li>
+</ul>
+<p><span class="user-mention" data-user-id="129457">@Florian Diebold</span> does this sound remotely correct?</p>
+
+
+
+<a name="221417923"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417923" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417923">(Jan 02 2021 at 21:19)</a>:</h4>
+<p>well the point is that the <code>use my_mod::foo</code> could turn out to also be a type. for example</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">mod</span> <span class="nn">a</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="bp">self</span>::<span class="n">a</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="bp">self</span>::<span class="n">c</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+<span class="k">mod</span> <span class="nn">b</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="k">super</span>::<span class="n">foo</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="k">mod</span> <span class="nn">c</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="k">super</span>::<span class="n">bar</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">foo</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="k">mod</span> <span class="nn">d</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">bar</span><span class="w"> </span><span class="p">{}</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="bp">self</span>::<span class="n">d</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<p>if we resolve the imports in the order as written in the first iteration, the <code>use super::foo</code> will first only resolve to the function foo because we haven't gotten to c and d yet. after a first loop, we know <code>bar</code> means the type <code>bar</code> in the top module; then in the second module, we can resolve the <code>pub use super::bar as foo</code>, which means we have an additional meaning for the <code>pub use self::c::*</code> as well</p>
+
+
+
+<a name="221417931"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417931" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417931">(Jan 02 2021 at 21:19)</a>:</h4>
+<p>"using the function as a type" does not populate the type namespace</p>
+
+
+
+<a name="221417989"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221417989" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221417989">(Jan 02 2021 at 21:20)</a>:</h4>
+<p>all of this mostly only matters in edge cases</p>
+
+
+
+<a name="221418069"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221418069" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Florian Diebold <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221418069">(Jan 02 2021 at 21:22)</a>:</h4>
+<p>it might be interesting to try changing that line to return <code>Resolved</code> and see which test cases fail ;)</p>
+
+
+
+<a name="221418591"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221418591" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221418591">(Jan 02 2021 at 21:34)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="129457">Florian Diebold</span> <a href="#narrow/stream/185405-t-compiler.2Fwg-rls-2.2E0/topic/Path.20Resolution.20in.20r-a/near/221417923">said</a>:</p>
+<blockquote>
+<p>well the point is that the <code>use my_mod::foo</code> could turn out to also be a type. for example</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="k">mod</span> <span class="nn">a</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="bp">self</span>::<span class="n">a</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="bp">self</span>::<span class="n">c</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+<span class="k">mod</span> <span class="nn">b</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="k">super</span>::<span class="n">foo</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="k">mod</span> <span class="nn">c</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="k">super</span>::<span class="n">bar</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">foo</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="k">mod</span> <span class="nn">d</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">bar</span><span class="w"> </span><span class="p">{}</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">use</span><span class="w"> </span><span class="bp">self</span>::<span class="n">d</span>::<span class="o">*</span><span class="p">;</span><span class="w"></span>
+</code></pre></div>
+<p>if we resolve the imports in the order as written in the first iteration, the <code>use super::foo</code> will first only resolve to the function foo because we haven't gotten to c and d yet. after a first loop, we know <code>bar</code> means the type <code>bar</code> in the top module; then in the second module, we can resolve the <code>pub use super::bar as foo</code>, which means we have an additional meaning for the <code>pub use self::c::*</code> as well</p>
+</blockquote>
+<p>Haha trying to understand this:</p>
+<p>here </p>
+<div class="codehilite"><pre><span></span><code>pub use super::bar as foo;
+</code></pre></div>
+<p>We import <code>bar</code> which is a Struct which is in the Type NameSpace and since we are aliasing it as <code>foo</code> then we now have <code>foo</code> being in Type namespace for <code>mod </code>c`</p>
+<p>So at this point, we have foo being seen as a Type in <code>mod c</code></p>
+<p>Since we have:</p>
+<div class="codehilite"><pre><span></span><code>pub use self::c::*;
+</code></pre></div>
+<p>We now have foo being seen as a Type which is the <code>Bar</code> struct from <code>mod c</code> and also foo being seen as a function from <code>mod a</code></p>
+
+
+
+<a name="221418598"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221418598" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221418598">(Jan 02 2021 at 21:34)</a>:</h4>
+<p>sorry took me longer than I'd like to wrap my head around it</p>
+
+
+
+<a name="221418620"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221418620" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221418620">(Jan 02 2021 at 21:35)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="129457">Florian Diebold</span> <a href="#narrow/stream/185405-t-compiler.2Fwg-rls-2.2E0/topic/Path.20Resolution.20in.20r-a/near/221418069">said</a>:</p>
+<blockquote>
+<p>it might be interesting to try changing that line to return <code>Resolved</code> and see which test cases fail ;)</p>
+</blockquote>
+<p>thanks for the idea, going to try this now</p>
+
+
+
+<a name="221419569"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221419569" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221419569">(Jan 02 2021 at 21:59)</a>:</h4>
+<p>The test case was really helpful haha.</p>
+<p>This is the test that fails, when we switch &amp;&amp; to ||.</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="cp">#[macro_export]</span><span class="w"></span>
+<span class="fm">macro_rules!</span><span class="w"> </span><span class="n">foo</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="cp">$x</span>:<span class="nc">ident</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">type</span> <span class="cp">$x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">();</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="n">foo</span><span class="o">!</span><span class="p">(</span><span class="n">foo</span><span class="p">);</span><span class="w"></span>
+<span class="k">use</span><span class="w"> </span><span class="n">foo</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">bar</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">use</span><span class="w"> </span><span class="bp">self</span>::<span class="n">foo</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">baz</span><span class="p">;</span><span class="w"></span>
+<span class="k">fn</span> <span class="nf">baz</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+</code></pre></div>
+<ul>
+<li>
+<p><code>foo</code> is first a macro.</p>
+</li>
+<li>
+<p>Then when we do <code>foo!(foo)</code> it now becomes a type and a macro.</p>
+</li>
+<li>
+<p>We then do <code>use foo as bar</code> which means that bar is also now a type and a macro, since it just aliases <code>foo</code></p>
+</li>
+<li>
+<p>I note that <code>use foo as bar;</code> this does not make <code>bar</code> a type. It is the fact that <code>foo</code> is a type.</p>
+</li>
+<li>
+<p>We then do the same thing with <code>baz</code> with <code>use self::foo as baz</code>. So <code>baz</code> is a type and a macro. However, we also have a baz function, so <code>baz</code> is also a value</p>
+</li>
+</ul>
+
+
+
+<a name="221419836"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/Path%20Resolution%20in%20r-a/near/221419836" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> kev <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/Path.20Resolution.20in.20r-a.html#221419836">(Jan 02 2021 at 22:05)</a>:</h4>
+<p>So If the following code was an external dep, and we imported it, we would be given:</p>
+<div class="codehilite"><pre><span></span><code>            bar: t m
+            baz: t v m
+            foo: t m
+</code></pre></div>
+<p>Which is why I believe Florian said that once we resolve an external dep, we can mark it as resolved. It's namespace would not change.</p>
+<p>The snippet was taken from the test <code>fn type_value_macro_live_in_different_scopes() </code></p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

@@ -1,0 +1,380 @@
+<html>
+<head><meta charset="utf-8"><title>loop unrolling · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html">loop unrolling</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="269695008"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269695008" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269695008">(Jan 28 2022 at 07:09)</a>:</h4>
+<p>So i was looking into implementing <code>#pragma unroll</code> in my GPU codegen (and maybe opening up a path to merging it back to cg_llvm), since it is important in a lot of cases, but there is some rustc and llvm weirdness im unsure about. Firstly, the <a href="https://llvm.org/docs/LangRef.html#id1576">llvm ref</a> says that the loop metadata should go on the conditional <code>br</code> for the loop condition, but <a href="https://cpp.godbolt.org/z/eTvhhsh3M">godbolt</a> seems to point to clang putting it on the jump back to the first block that loads the value and compares to see if it needs another iteration. So which one is right?</p>
+<p>Second (the hardest part). Does anyone have any idea of a possible way to implement this at the codegen level? i essentially need a way to identify the br going back to the first block OR the cond br, and then see if its marked with unroll and apply the needed stuff. I can mark loops very easily by just having a macro desugar to an internal attr my codegen identifies. However, i cannot think of a way to identify the correct jumps AND then mark them when they are being codegenned. I thought about maybe desugaring the for loop myself but i do not think that would work. The primary issue is cg_ssa is mostly opaque when it comes to the MIR -&gt; codegen part. Perhaps i will need to manually go through a function's mir looking for places with unroll and marking the right jumps in some way.</p>
+
+
+
+<a name="269695878"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269695878" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269695878">(Jan 28 2022 at 07:21)</a>:</h4>
+<p>The issue is MIR does not encode loops, it just encodes jumps, so there is no easy way of mapping unroll annotations to the individual loops and jumps in the loop. Maybe there could be some rustc-level support for this by marking jumps as backedge/condition which the codegen or cg_ssa could read and emit stuff?</p>
+
+
+
+<a name="269706280"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269706280" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nikita Popov <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269706280">(Jan 28 2022 at 09:10)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="276242">Riccardo D'Ambrosio</span> <a href="#narrow/stream/131828-t-compiler/topic/loop.20unrolling/near/269695008">said</a>:</p>
+<blockquote>
+<p>Firstly, the <a href="https://llvm.org/docs/LangRef.html#id1576">llvm ref</a> says that the loop metadata should go on the conditional <code>br</code> for the loop condition, but <a href="https://cpp.godbolt.org/z/eTvhhsh3M">godbolt</a> seems to point to clang putting it on the jump back to the first block that loads the value and compares to see if it needs another iteration. So which one is right?</p>
+</blockquote>
+<p>The metadata is on the loop latch, which is the branch that goes back to the loop header. It's pretty common for the loop latch and the loop condition to be the same (namely for single exit rotated loops), but it's not always the case.</p>
+
+
+
+<a name="269707009"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269707009" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269707009">(Jan 28 2022 at 09:17)</a>:</h4>
+<p>Could we support this at the MIR level only? Like not relying on llvm, but having an unrolling opt controlled by an attribute on the loop?</p>
+
+
+
+<a name="269714160"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269714160" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269714160">(Jan 28 2022 at 10:20)</a>:</h4>
+<p>Is there a point at which we could do the unrolling in MIR?  If it's a loop over a const generic, or something, we can't do it in the normal mir-opt spot.</p>
+
+
+
+<a name="269732310"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269732310" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269732310">(Jan 28 2022 at 13:06)</a>:</h4>
+<p>Ah, good point, we can only do it pre-monomorphization</p>
+
+
+
+<a name="269732415"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269732415" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269732415">(Jan 28 2022 at 13:07)</a>:</h4>
+<p>That's a general issue with our system tho. There are multiple opts that suffer from this and we could consider having a post monomorphization opt system, but it'll probably cause slowdowns</p>
+
+
+
+<a name="269760578"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269760578" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269760578">(Jan 28 2022 at 16:17)</a>:</h4>
+<p>the entire idea of mir opts hinges on the fact that it manages to do a large multiple of work in one go, compared to backends.</p>
+
+
+
+<a name="269760663"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269760663" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> nagisa <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269760663">(Jan 28 2022 at 16:18)</a>:</h4>
+<p>Otherwise MIR as a IR is not all that optimal for optimization, since it wasn't designed for it.</p>
+
+
+
+<a name="269761109"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269761109" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269761109">(Jan 28 2022 at 16:21)</a>:</h4>
+<p>well... except for language guaranteed opts, we do kind of need to do them on MIR, otherwise each backend needs to reimplement them</p>
+
+
+
+<a name="269761478"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269761478" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269761478">(Jan 28 2022 at 16:24)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="123586">nagisa</span> <a href="#narrow/stream/131828-t-compiler/topic/loop.20unrolling/near/269760663">said</a>:</p>
+<blockquote>
+<p>Otherwise MIR as a IR is not all that optimal for optimization, since it wasn't designed for it.</p>
+</blockquote>
+<p>Is there any plan to change this? It seems like doing optimizations in MIR is a good idea, both for improved compile times but also to be more able to fix issues of the "this code compiles poorly" kind</p>
+
+
+
+<a name="269768282"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269768282" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269768282">(Jan 28 2022 at 17:10)</a>:</h4>
+<p><a class="stream" data-stream-id="189540" href="/#narrow/stream/189540-t-compiler.2Fwg-mir-opt">#t-compiler/wg-mir-opt</a> is both implementing mir opts and changing MIR for performance and usability. We don't plan on refactorings just for making MIR more optimizable if that would affect any of the other MIR uses.</p>
+
+
+
+<a name="269769700"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269769700" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269769700">(Jan 28 2022 at 17:19)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/131828-t-compiler/topic/loop.20unrolling/near/269768282">said</a>:</p>
+<blockquote>
+<p><a class="stream" data-stream-id="189540" href="/#narrow/stream/189540-t-compiler.2Fwg-mir-opt">#t-compiler/wg-mir-opt</a> is both implementing mir opts and changing MIR for performance and usability. We don't plan on refactorings just for making MIR more optimizable if that would affect any of the other MIR uses.</p>
+</blockquote>
+<p>Hm, yeah. Adding stuff like SSA would probably require a new IR to avoid re-writing borrowck</p>
+
+
+
+<a name="269775952"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269775952" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269775952">(Jan 28 2022 at 17:59)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/131828-t-compiler/topic/loop.20unrolling/near/269707009">said</a>:</p>
+<blockquote>
+<p>Could we support this at the MIR level only? Like not relying on llvm, but having an unrolling opt controlled by an attribute on the loop?</p>
+</blockquote>
+<p>id be hesitant of this, same with inlining, both of those ops are much more complex than they seem to be at first. I think its better to do the same thing done for inlining, which is to have the facilities needed in MIR/cg_ssa for codegens to apply loop hints, then maybe a mir opt for speed so llvm doesnt have to do the work</p>
+
+
+
+<a name="269776308"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269776308" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269776308">(Jan 28 2022 at 18:00)</a>:</h4>
+<p>I think it is kind of impossible to do this as a custom codegen feature just because of how much info is lost to the conversion to MIR</p>
+
+
+
+<a name="269776463"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269776463" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269776463">(Jan 28 2022 at 18:01)</a>:</h4>
+<p>Would the lang team be open to making this a language-feature (is that the term for new attrs?)? i.e. add <code>#[unroll]</code>, <code>#[unroll(2)]</code> etc. Then make necessary changes to HIR/MIR/cg_ssa to allow the codegen to decide what attributes to apply</p>
+
+
+
+<a name="269776584"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269776584" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269776584">(Jan 28 2022 at 18:02)</a>:</h4>
+<p>This is especially useful on the GPU, but it would have some uses for fine-grained optimization on the CPU too</p>
+
+
+
+<a name="269779005"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269779005" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269779005">(Jan 28 2022 at 18:17)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="133224">Nikita Popov</span> <a href="#narrow/stream/131828-t-compiler/topic/loop.20unrolling/near/269706280">said</a>:</p>
+<blockquote>
+<p><span class="user-mention silent" data-user-id="276242">Riccardo D'Ambrosio</span> <a href="#narrow/stream/131828-t-compiler/topic/loop.20unrolling/near/269695008">said</a>:</p>
+<blockquote>
+<p>Firstly, the <a href="https://llvm.org/docs/LangRef.html#id1576">llvm ref</a> says that the loop metadata should go on the conditional <code>br</code> for the loop condition, but <a href="https://cpp.godbolt.org/z/eTvhhsh3M">godbolt</a> seems to point to clang putting it on the jump back to the first block that loads the value and compares to see if it needs another iteration. So which one is right?</p>
+</blockquote>
+<p>The metadata is on the loop latch, which is the branch that goes back to the loop header. It's pretty common for the loop latch and the loop condition to be the same (namely for single exit rotated loops), but it's not always the case.</p>
+</blockquote>
+<p>Oh ok, so in rust's case, would the metadata go on the <code>next(...) -&gt; bb3</code> in this MIR:</p>
+<div class="codehilite"><pre><span></span><code>    bb2: {
+        _9 = &amp;mut _6;                    // scope 2 at src/lib.rs:6:14: 6:18
+        _8 = &amp;mut (*_9);                 // scope 2 at src/lib.rs:6:14: 6:18
+        _7 = &lt;std::ops::Range&lt;usize&gt; as Iterator&gt;::next(move _8) -&gt; bb3; // scope 2 at src/lib.rs:6:14: 6:18
+                                         // mir::Constant
+                                         // + span: src/lib.rs:6:14: 6:18
+                                         // + literal: Const { ty: for&lt;&#39;r&gt; fn(&amp;&#39;r mut std::ops::Range&lt;usize&gt;) -&gt; std::option::Option&lt;&lt;std::ops::Range&lt;usize&gt; as std::iter::Iterator&gt;::Item&gt; {&lt;std::ops::Range&lt;usize&gt; as std::iter::Iterator&gt;::next}, val: Value(Scalar(&lt;ZST&gt;)) }
+    }
+
+    bb3: {
+        _10 = discriminant(_7);          // scope 2 at src/lib.rs:6:14: 6:18
+        switchInt(move _10) -&gt; [0_isize: bb6, 1_isize: bb4, otherwise: bb5]; // scope 2 at src/lib.rs:6:14: 6:18
+    }
+</code></pre></div>
+<p>im just confused on what <code>next(move _8) -&gt; bb3</code> means, i presume it means call next then move onto bb3, right? in which case, the <code>_7</code> statement is the loop latch and <code>bb3</code> is the header? correct?</p>
+
+
+
+<a name="269779194"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269779194" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269779194">(Jan 28 2022 at 18:18)</a>:</h4>
+<p>which means it would be this br that gets the metadata, right?</p>
+<div class="codehilite" data-code-language="LLVM"><pre><span></span><code><span class="nl">bb2:</span><span class="w">                                              </span><span class="c">; preds = %bb7, %bb1</span>
+<span class="w">  </span><span class="nv nv-Anonymous">%9</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="k">call</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="vg">@"_ZN4core4iter5range101_$LT$impl$u20$core..iter..traits..iterator..Iterator$u20$for$u20$core..ops..range..Range$LT$A$GT$$GT$4next17h16ae25168d5e9832E"</span><span class="p">({</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="w"> </span><span class="p">}*</span><span class="w"> </span><span class="k">align</span><span class="w"> </span><span class="m">8</span><span class="w"> </span><span class="k">dereferenceable</span><span class="p">(</span><span class="m">16</span><span class="p">)</span><span class="w"> </span><span class="nv">%iter</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">store</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="nv nv-Anonymous">%9</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="kt">i64</span><span class="w"> </span><span class="p">}*</span><span class="w"> </span><span class="nv">%_7</span><span class="p">,</span><span class="w"> </span><span class="k">align</span><span class="w"> </span><span class="m">8</span><span class="w"></span>
+<span class="w">  </span><span class="k">br</span><span class="w"> </span><span class="kt">label</span><span class="w"> </span><span class="nv">%bb3</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="269780015"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269780015" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269780015">(Jan 28 2022 at 18:24)</a>:</h4>
+<p><a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=e6868c071887ed7e2fb34acbf0c9b07a">playground</a> and <a href="https://rust.godbolt.org/z/zvYWMfqcn">godbolt</a> link</p>
+
+
+
+<a name="269782184"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269782184" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269782184">(Jan 28 2022 at 18:38)</a>:</h4>
+<p>I think the loop header is <code>bb2</code>, so the loop latch is the branch in <code>bb7</code> I think.</p>
+
+
+
+<a name="269782559"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269782559" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269782559">(Jan 28 2022 at 18:40)</a>:</h4>
+<p>isn't the loop header the one that decides whether to go onto another iteration or not?</p>
+
+
+
+<a name="269782663"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269782663" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269782663">(Jan 28 2022 at 18:41)</a>:</h4>
+<p>i mean, i guess bb2 is the <em>start</em> of the header, bb3 is the "important" part of the header</p>
+
+
+
+<a name="269782874"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269782874" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269782874">(Jan 28 2022 at 18:42)</a>:</h4>
+<p>bb7 being the latch makes sense, i missed that</p>
+
+
+
+<a name="269786265"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269786265" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269786265">(Jan 28 2022 at 19:05)</a>:</h4>
+<p>To implement this i would need to add some sort of metadata to MIR to encode that a goto is a loop latch then modify <a href="https://github.com/rust-lang/rust/blob/master/compiler/rustc_mir_build/src/build/expr/into.rs#L199">this thir lowering code</a>, right?</p>
+
+
+
+<a name="269786370"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269786370" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269786370">(Jan 28 2022 at 19:06)</a>:</h4>
+<p>specifically, add the metadata to the <code>body_block_end</code> goto, right?</p>
+
+
+
+<a name="269787010"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269787010" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269787010">(Jan 28 2022 at 19:10)</a>:</h4>
+<p>What would be the best way to encode the unrolling info inside of the latch goto? a separate map somewhere mapping latches to unroll info? or some metadata field in the actual MIR?</p>
+
+
+
+<a name="269789220"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269789220" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269789220">(Jan 28 2022 at 19:27)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="276242">Riccardo D'Ambrosio</span> <a href="#narrow/stream/131828-t-compiler/topic/loop.20unrolling/near/269776463">said</a>:</p>
+<blockquote>
+<p>Would the lang team be open to making this a language-feature (is that the term for new attrs?)? i.e. add <code>#[unroll]</code>, <code>#[unroll(2)]</code> etc. Then make necessary changes to HIR/MIR/cg_ssa to allow the codegen to decide what attributes to apply</p>
+</blockquote>
+<p>Speaking for myself (not the team), the hard part of this is often if it's not just a hint, because of implications that every compiler <em>must</em> do it always.  Like does every backend <em>have</em> to do this exactly right?</p>
+<p>If it's a hint -- like how <code>inline(always)</code> isn't a guarantee -- then it's less scary to make a lang feature.  Though of course that also makes it less useful.</p>
+<p>But maybe <code>unroll(2)</code> could be feasibly done for <code>loop</code>s in MIR by just duplicating the body and hinting to codegen to not unroll further, or something.  So maybe parts of it are less scary.</p>
+
+
+
+<a name="269789434"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269789434" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269789434">(Jan 28 2022 at 19:28)</a>:</h4>
+<p>Oh yeah absolutely this should NOT be a guaranteed thing, it would just be a hint that the backend can ignore just fine, like inline</p>
+
+
+
+<a name="269789467"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269789467" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269789467">(Jan 28 2022 at 19:29)</a>:</h4>
+<p>because oftentimes llvm just cannot unroll a loop for certain reasons, so guaranteeing it is weird</p>
+
+
+
+<a name="269789599"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269789599" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269789599">(Jan 28 2022 at 19:30)</a>:</h4>
+<p>I don't see how its less useful, do people actually rely on loops being unrolled for soundness/other things? ive never heard of this, ive always just seen it be used for optimization</p>
+
+
+
+<a name="269798363"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269798363" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nick12 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269798363">(Jan 28 2022 at 20:33)</a>:</h4>
+<p>Making it guaranteed if that ends up being desireable and possible to do in MIR in a backend-agnostic way should be backwards compatible anyways, right?</p>
+
+
+
+<a name="269799820"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269799820" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269799820">(Jan 28 2022 at 20:44)</a>:</h4>
+<p>I don't really see the need for making it guaranteed, why would unrolling be guaranteed but not <code>inline(always)</code>? it doesn't make sense</p>
+
+
+
+<a name="269800728"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269800728" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jake <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269800728">(Jan 28 2022 at 20:52)</a>:</h4>
+<p>I don't think rustc even can guarantee it, because I don't think a loop being unrolled is observable</p>
+
+
+
+<a name="269800926"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269800926" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269800926">(Jan 28 2022 at 20:54)</a>:</h4>
+<p>Yeah exactly</p>
+
+
+
+<a name="269800994"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269800994" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269800994">(Jan 28 2022 at 20:55)</a>:</h4>
+<p><em>not</em> having unroll does not mean the loop cannot be unrolled, so why should having unroll mean the loop always unrolls?</p>
+
+
+
+<a name="269833391"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/269833391" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#269833391">(Jan 29 2022 at 03:09)</a>:</h4>
+<p>If you'd like i can draft up an RFC for this, see what people think, this will be very important for gpu stuff in rust for the long term</p>
+
+
+
+<a name="270429520"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270429520" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270429520">(Feb 02 2022 at 17:56)</a>:</h4>
+<p>Hmm, I just had a thought about how this could happen in AST-&gt;HIR, actually.</p>
+<p>Right now we have <code>for A in B</code> become (roughly) <code>while let Some(A) = B.next()</code>.  If we had a <code>next_chunk</code> method on iterators, we could notice <code>#[unroll(N)] for A in B</code> and lower it to something like</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">iter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">IntoIterator</span>::<span class="n">into_iter</span><span class="p">(</span><span class="n">B</span><span class="p">);</span><span class="w"></span>
+<span class="k">loop</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">match</span><span class="w"> </span><span class="nb">Iterator</span>::<span class="n">next_chunk</span>::<span class="o">&lt;</span><span class="n">N</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">iter</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Ok</span><span class="p">(</span><span class="n">array</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">A</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">array</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="p">},</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Err</span><span class="p">(</span><span class="n">partial</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">break</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">A</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">partial</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">..</span><span class="p">.</span><span class="w"> </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+<p>as the compiler will generally full-unroll <code>for A in array</code> anyway.</p>
+
+
+
+<a name="270429652"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270429652" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270429652">(Feb 02 2022 at 17:56)</a>:</h4>
+<p>(There are a few other complications in here, like making sure <code>break</code>s affect the outer level, but those could easily be dealt with)</p>
+
+
+
+<a name="270431176"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270431176" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270431176">(Feb 02 2022 at 18:04)</a>:</h4>
+<p>If we use external iteration then I think it needs to be 3-state. chunk, partial and finished. For some iterators it may be awkward to assemble complete chunks at times. Consider <code>Flatten</code> or <code>Chain</code>.</p>
+
+
+
+<a name="270431968"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270431968" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270431968">(Feb 02 2022 at 18:09)</a>:</h4>
+<p>Well, might not be critical... if the unroll size is large enough the extra branches required to assemble a chunk will get amortized. But it could prevent unrolling to larger vector sizes if one chose a smaller one for the chunk size.</p>
+
+
+
+<a name="270445684"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270445684" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270445684">(Feb 02 2022 at 19:42)</a>:</h4>
+<p>The infrastructure for this kind of lowering does not exist right now. You can't duplicate expressions (the loop body in this case). But there are other places where we would potentially like this kind of logic (hitting this with <code>impl Trait</code> right now). So it does need significant work, but isn't impossible.</p>
+
+
+
+<a name="270463557"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270463557" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270463557">(Feb 02 2022 at 21:49)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="330154">The 8472</span> <a href="#narrow/stream/131828-t-compiler/topic/loop.20unrolling/near/270431176">said</a>:</p>
+<blockquote>
+<p>If we use external iteration then I think it needs to be 3-state. chunk, partial and finished. For some iterators it may be awkward to assemble complete chunks at times. Consider <code>Flatten</code> or <code>Chain</code>.</p>
+</blockquote>
+<p>The code needing to handle chunk+partial every iteration in every consumer seems pretty unfortunate to me.  At that point it's basically just <code>Iterator&lt;Item = ArrayVec&gt;</code> instead.</p>
+
+
+
+<a name="270464883"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270464883" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270464883">(Feb 02 2022 at 21:59)</a>:</h4>
+<p>Not every iteration. It's the boundaries between different iterators that are being glued together.</p>
+
+
+
+<a name="270464946"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270464946" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270464946">(Feb 02 2022 at 21:59)</a>:</h4>
+<p>This wouldn't be an issue with internal iteration, which is why I suggested <code>try_fold_chunked</code> on some issue (related to this discussion?)</p>
+
+
+
+<a name="270465217"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270465217" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270465217">(Feb 02 2022 at 22:01)</a>:</h4>
+<p><a href="https://github.com/rust-lang/rust/pull/92393#discussion_r796059966">https://github.com/rust-lang/rust/pull/92393#discussion_r796059966</a></p>
+
+
+
+<a name="270465992"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270465992" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> The 8472 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270465992">(Feb 02 2022 at 22:07)</a>:</h4>
+<p>With internal iteration you could first chunk over inner iterator A except the residual. Then normally advance the second iterator a few steps until you have filled the residual to a full chunk and then chunk over B. This way you don't need the tri-state and the edge is handled in the adapter implementation instead. And for the optimizer it's easier because it has two loops and a bit of glue between the loops instead of trying to unravel the different things stuck in a big loop.</p>
+
+
+
+<a name="270475073"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270475073" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270475073">(Feb 02 2022 at 23:22)</a>:</h4>
+<p>I suppose the meta-point here is that <code>#[unroll]</code> can't go on the loop inside <code>try_fold</code> anyway, which makes me wonder about the original request...</p>
+
+
+
+<a name="270496824"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270496824" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Riccardo D&#x27;Ambrosio <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270496824">(Feb 03 2022 at 03:48)</a>:</h4>
+<p>wouldn't delegating to llvm just be the easiest way? im sure llvm is much better at unrolling than rustc could ever be without a lot of effort</p>
+
+
+
+<a name="270517564"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/loop%20unrolling/near/270517564" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> scottmcm <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/loop.20unrolling.html#270517564">(Feb 03 2022 at 09:01)</a>:</h4>
+<p>It depends.  If it needs to work with cranelift and gcc and ... too, then delegating to llvm doesn't solve the problem.  (See the conversation about guaranteed tail recursion, for example.)</p>
+<p>But I think my new concern here is that the best way to write a loop with a small loop body -- where this kind of unrolling control is most useful -- is to use <code>for_each</code>, but there's no reasonable way to flow <code>#[unroll]</code> into the underlying <code>fold</code>, the way there is for <code>loop</code> or <code>for</code>.</p>
+<p>So I'm wondering things like whether this is, in reality, a slice problem, and thus things like <code>as_chunks</code> largely cover it -- maybe with a <code>.for_each_unrolled</code> method on arrays.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

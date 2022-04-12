@@ -1,0 +1,96 @@
+<html>
+<head><meta charset="utf-8"><title>Backtraces across spawn · wg-async · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/index.html">wg-async</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html">Backtraces across spawn</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="264950503"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Backtraces%20across%20spawn/near/264950503" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html#264950503">(Dec 15 2021 at 00:44)</a>:</h4>
+<p>I posted this in <a href="https://twitter.com/theinedibleholk/status/1470914103786938372?s=20">tweet form</a>, but it's worth mentioning here for a more in-depth discussion. For async stack traces, would folks expect the trace to traverse across spawns?</p>
+<div class="inline-preview-twitter"><div class="twitter-tweet"><a href="https://twitter.com/theinedibleholk/status/1470914103786938372?s=20"><img class="twitter-avatar" src="https://uploads.zulipusercontent.net/8c1d7ec4279540b57e7631183ef1bb97a8ce6340/68747470733a2f2f7062732e7477696d672e636f6d2f70726f66696c655f696d616765732f313533373930303636392f3330393235375f3533393633303032353233335f32393230303631335f33303932323033305f3238353532353137335f6e5f6e6f726d616c2e6a7067"></a><p>I'm curious what people would like to see in the backtrace from this program: <a href="https://t.co/MnrhSZ4YuH">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=45c5290aed389dae2fda5ca325986349</a>
+
+I'll post a couple rough ideas as replies to this tweet, but let me know what you like best.</p><span>- Eric Holk (@theinedibleholk)</span></div></div><p>I have an example on the <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=0f3eb177fd94b289c70704aa3e520192">playground</a>, but here's the code:</p>
+<div class="codehilite"><pre><span></span><code>fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(foo());
+}
+
+async fn foo() {
+    tokio::spawn(bar()).await.expect(&quot;task failed&quot;);
+}
+
+async fn bar() {
+    panic!();
+}
+</code></pre></div>
+<p>It looks like right now with <code>RUST_BACKTRACE=1</code> we basically get a trace of all threads, so one shows <code>main</code>, then all the runtime setup/spawn code, and then <code>foo()</code>, and the other thread basically shows <code>bar()</code> with all the panicking and panic handler gunk. Is this structure ideal (obviously we'd like to clean up a lot of the extraneous frames)?</p>
+<p>Or, would it make sense to see a unified stack trace that looks something like this?</p>
+<div class="codehilite"><pre><span></span><code>1. bar()
+2. foo()
+3. main()
+</code></pre></div>
+<p>I suppose the unified stack trace could have some more details, like we could annotate each frame with the actual thread it is running on.</p>
+
+
+
+<a name="264962767"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Backtraces%20across%20spawn/near/264962767" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> tmandry <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html#264962767">(Dec 15 2021 at 04:03)</a>:</h4>
+<p>I think <span class="user-mention" data-user-id="124287">@mw</span> and I had talked about this some. I'd like to eventually see information about where a task was spawned in logical async stack traces. It might be confusing to include it as "just another frame" in the normal future-based stack, but it might not be. Either way I think it'd be good to capture that information at spawn time (with a config knob to enable/disable, since this can affect performance)</p>
+
+
+
+<a name="264991437"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Backtraces%20across%20spawn/near/264991437" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nick Cameron <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html#264991437">(Dec 15 2021 at 10:49)</a>:</h4>
+<p>Yeah, I agree that the backtrace should not cross spawn, but it is information that would be good to have available (and similar things like what's happening at the other end of a channel, or who is holding a lock that a task is blocked on).</p>
+
+
+
+<a name="264991567"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Backtraces%20across%20spawn/near/264991567" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Nick Cameron <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html#264991567">(Dec 15 2021 at 10:50)</a>:</h4>
+<p>This all has obvious parallels with non-async things. I'm pretty sure nobody has looked into Rust-specific stuff here, but there might be prior art in other languages which are worth looking into</p>
+
+
+
+<a name="265024843"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Backtraces%20across%20spawn/near/265024843" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html#265024843">(Dec 15 2021 at 15:22)</a>:</h4>
+<p>That's a good idea to look at prior art in other languages. I started thinking about this particular case after reading this series of blog posts: <a href="https://developers.facebook.com/blog/post/2021/09/16/async-stack-traces-folly-Introduction/">https://developers.facebook.com/blog/post/2021/09/16/async-stack-traces-folly-Introduction/</a> (there are five posts, that's just the first one but it has links to the others).</p>
+<p>It looks like they choose to have stack traces cross tasks, but the backtrace goes through the await points and not the spawn points.</p>
+
+
+
+<a name="265585912"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Backtraces%20across%20spawn/near/265585912" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Yoshua Wuyts [he/they] <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html#265585912">(Dec 20 2021 at 16:32)</a>:</h4>
+<p>V8 (Node.js / Google Chrome) added support for async backtraces in JavaScript a good while ago: <a href="https://docs.google.com/document/d/13Sy_kBIJGP0XT34V1CV3nkWya4TwYx9L3Yv45LdGB6Q/edit">https://docs.google.com/document/d/13Sy_kBIJGP0XT34V1CV3nkWya4TwYx9L3Yv45LdGB6Q/edit#</a>!</p>
+
+
+
+<a name="265586124"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Backtraces%20across%20spawn/near/265586124" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Yoshua Wuyts [he/they] <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html#265586124">(Dec 20 2021 at 16:34)</a>:</h4>
+<p>I actually started using async backtraces in JS before I moved to Rust full-time, and being able to debug async code using logical backtraces made a _huge_ difference for debugging errors.</p>
+
+
+
+<a name="265609478"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Backtraces%20across%20spawn/near/265609478" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html#265609478">(Dec 20 2021 at 20:00)</a>:</h4>
+<p>The V8 post is interesting. One thing that stood out to me is how the JS spec describes both the language and runtime, and since V8 implements both they can assume a lot more about the internals of promise chains.</p>
+
+
+
+<a name="265609530"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/187312-wg-async/topic/Backtraces%20across%20spawn/near/265609530" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eholk <a href="https://zulip-archive.rust-lang.org/stream/187312-wg-async/topic/Backtraces.20across.20spawn.html#265609530">(Dec 20 2021 at 20:01)</a>:</h4>
+<p>For Rust, I think there's a question of how much of the responsibility for stack traces falls on the language and how much falls on the runtime.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

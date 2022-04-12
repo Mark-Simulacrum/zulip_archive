@@ -1,0 +1,104 @@
+[
+    {
+        "content": "<h3>TL;DR</h3>\n<p>Rustdoc currently tries to display uses of public type aliases as the alias itself. But there are significant bugs and edge cases, and it indirectly causes a big maintenance burden. Fixing the technical issues is currently infeasible. Should we get rid of this feature given the many issues and downstream costs?</p>\n<h3>Tell me more</h3>\n<p>For example, if a user has a custom <code>Result</code> type:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">type</span> <span class=\"nb\">Result</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">std</span>::<span class=\"n\">result</span>::<span class=\"nb\">Result</span><span class=\"o\">&lt;</span><span class=\"n\">T</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">MyError</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Then a function returning <code>Result&lt;T&gt;</code> will be rendered as returning <code>Result&lt;T&gt;</code>, rather than the underlying type of <code>std::result::Result&lt;T, MyError&gt;</code>. I believe this is overall <em>good</em> for the user experience, and rustdoc has been this way for a while (perhaps since the beginning?). There is potentially an argument that it'd be helpful to always show underlying types to avoid potential confusion when an alias is only used some of the time, but I'm not sure how strong an argument it is by itself.</p>\n<p>However, there are some technical issues with rustdoc's handling of type aliases that result from implementation details. For instance, if a function returning <code>Result&lt;T&gt;</code> is re-exported in another crate, suddenly that function will be shown as returning <code>std::result::Result&lt;T, MyError&gt;</code>. In addition, rustdoc has some edge cases where the underlying type is shown rather than the alias.</p>\n<p>These are both because Rustdoc in some cases uses the <code>ty::Ty</code> representation of types and in others uses <code>hir::Ty</code>. <code>hir::Ty</code> has type alias information, while <code>ty::Ty</code> always has the alias in its expanded form with no way to get back to the original alias. Rustdoc needs to use <code>ty::Ty</code> for several reasons; in the case of cross-crate re-exports, it's because HIR is not stored in metadata.</p>\n<p>As we've discussed before, Rustdoc's duplicate code paths, <code>hir</code> and <code>ty</code>, are a huge maintenance burden, cause a lot of confusion, and trigger many bugs. However, this issue with type aliases is the main thing stopping us from merging the code paths (aside from the effort required, but that could be amortized by merging slowly). Ideally, we'd find a way to recover type alias information from <code>ty</code>, but I don't think that's happening anytime soon.</p>\n<p>Weighing the costs and benefits of this feature (showing public type aliases in their opaque form), I wonder if it's worth getting rid of it so we can reduce Rustdoc's maintenance burden and bugginess. Do you agree? And if not, what do you suggest we do?</p>",
+        "id": 273582098,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1646100431
+    },
+    {
+        "content": "<p>would this also affect showing impl methods on a type alias?</p>",
+        "id": 273594212,
+        "sender_full_name": "Lokathor",
+        "timestamp": 1646113305
+    },
+    {
+        "content": "<p>I think it is important to show type aliases. One use case is to do something like <code>pub type Foo = FooImpl&lt;Whatever, SomeHiddenDefault&gt;;</code> and showing the expanded type would be sub-optimal. The various Result aliases seem less important, but where people use type aliases to make code 'self-documenting' I think we lose a lot by not showing them.</p>",
+        "id": 273609504,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1646125831
+    },
+    {
+        "content": "<p>(As an aside, I think type aliases are a mis-feature and we should not have them in Rust, but that requires newtype-style structs to always work nicely, which they don't in some DST cases and to have an ergonomic way to derive impls from the hidden type which works properly rather than the Deref hack, which is another mis-feature IMO)</p>",
+        "id": 273609649,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1646125924
+    },
+    {
+        "content": "<p>I also think it's important to show the type aliases simply to have coherency between the docs and the code.</p>",
+        "id": 273613403,
+        "sender_full_name": "GuillaumeGomez",
+        "timestamp": 1646127862
+    },
+    {
+        "content": "<p>As diesel maintainer let me add another example here:<br>\nDiesel uses type defs quite a lot to hide complex trait implementation stuff from users. See here for a list of type defs defined by diesel. All of them hide some complex trait type that would be really hard to write by hand. Let's use <a href=\"https://docs.diesel.rs/master/diesel/dsl/type.Select.html\">Select</a> as an example. This typedef essentially simplifies the access to inner associated type. Now users cannot name the associated type directly as it's not public at all. The corresponding <a href=\"https://docs.diesel.rs/master/diesel/prelude/trait.QueryDsl.html#method.select\">method</a> shows a simple dependency between input and output. Removing the type def there would result in much harder to read documentation. Especially if you consider that you can chain the linked method and any other method in that trait arbitrarily.</p>",
+        "id": 273619376,
+        "sender_full_name": "weiznich",
+        "timestamp": 1646130822
+    },
+    {
+        "content": "<p>I would <em>like</em> to show type aliases as well, but I want to be consistent even more. What would it take to fix the re-export bug? Adding type alias data to the crate metadata?</p>",
+        "id": 273667707,
+        "sender_full_name": "Michael notriddle Howell",
+        "timestamp": 1646151963
+    },
+    {
+        "content": "<p>All right, so it seems never showing type aliases is untenable. I guess we'll have to come up with some other way to fix this inconsistency and maintenance burden.</p>",
+        "id": 273745513,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1646188760
+    },
+    {
+        "content": "<blockquote>\n<p>This typedef essentially simplifies the access to inner associated type. Now users cannot name the associated type directly as it's not public at all. </p>\n</blockquote>\n<p>I understand and agree with your overall point, <span class=\"user-mention\" data-user-id=\"215423\">@weiznich</span>, but I felt confused about this part. The associated type is part of a public trait, so I think the associated type is in fact public. It seems that having a private type in a public type alias causes a warning too.</p>",
+        "id": 273745639,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1646188826
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"224471\">Lokathor</span> <a href=\"#narrow/stream/266220-rustdoc/topic/To.20alias.20or.20not.20to.20alias/near/273594212\">said</a>:</p>\n<blockquote>\n<p>would this also affect showing impl methods on a type alias?</p>\n</blockquote>\n<p>I don't <em>think</em> so, but I'm not sure.</p>",
+        "id": 273745674,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1646188848
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"210053\">Michael notriddle Howell</span> <a href=\"#narrow/stream/266220-rustdoc/topic/To.20alias.20or.20not.20to.20alias/near/273667707\">said</a>:</p>\n<blockquote>\n<p>I would <em>like</em> to show type aliases as well, but I want to be consistent even more. What would it take to fix the re-export bug? Adding type alias data to the crate metadata?</p>\n</blockquote>\n<p>I think there are three options:</p>\n<ol>\n<li>\n<p><strong>Record HIR in metadata and always use HIR.</strong> This is probably a no-go because</p>\n<ul>\n<li>it would increase the size of metadata a lot</li>\n<li><code>ty</code> pretty much <em>has</em> to be used in some places (e.g., auto traits)</li>\n<li>HIR is harder to analyze so it seems suboptimal to use it more</li>\n</ul>\n</li>\n<li>\n<p><strong>Track type aliases in <code>ty::Ty</code>.</strong> This seems like the cleanest approach to me, but I think it'd be really hard and I don't think the compiler team would be so happy about it.</p>\n</li>\n<li><strong>Somehow record information in a side table about what aliases were used.</strong> I think this might be the least work of the three, but I'm not sure quite how we'd do it. It's also somewhat hacky, but not terrible. I guess we could maybe have some kind of tree structure that would track which layers of a type came from an alias? It still sounds quite complex.</li>\n</ol>\n<p>So basically, none of the options are good <span aria-label=\"upside down\" class=\"emoji emoji-1f643\" role=\"img\" title=\"upside down\">:upside_down:</span></p>",
+        "id": 273746018,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1646189207
+    },
+    {
+        "content": "<p>Option 3 might be easier to sell if it could also be described as improving diagnostics? Like <a href=\"https://github.com/rust-lang/rust/issues/17164\">https://github.com/rust-lang/rust/issues/17164</a> ?</p>",
+        "id": 273753514,
+        "sender_full_name": "Michael notriddle Howell",
+        "timestamp": 1646195010
+    },
+    {
+        "content": "<p>In general I feel like most of the things rustdoc cares about will be cared about by diagnostics too. Tbh I think we need to collab more with folks working on diagnostics to ensure the right info is in the compiler</p>",
+        "id": 273756318,
+        "sender_full_name": "Manish Goregaokar",
+        "timestamp": 1646197301
+    },
+    {
+        "content": "<blockquote>\n<p>I understand and agree with your overall point, @weiznich, but I felt confused about this part. The associated type is part of a public trait, so I think the associated type is in fact public. It seems that having a private type in a public type alias causes a warning too.</p>\n</blockquote>\n<p>There are ways to write types that are technically public, but cannot be named by any down stream user. For example you can implement define public types in private modules. Those types then can be used as associated type in a public trait impl, but they cannot be named inside a downstream crate: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=4bd23545bd459bc1b39ae9f4b44d94de\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=4bd23545bd459bc1b39ae9f4b44d94de</a></p>",
+        "id": 273766615,
+        "sender_full_name": "weiznich",
+        "timestamp": 1646206641
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"215423\">weiznich</span> <a href=\"#narrow/stream/266220-rustdoc/topic/To.20alias.20or.20not.20to.20alias/near/273766615\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>I understand and agree with your overall point, @weiznich, but I felt confused about this part. The associated type is part of a public trait, so I think the associated type is in fact public. It seems that having a private type in a public type alias causes a warning too.</p>\n</blockquote>\n<p>There are ways to write types that are technically public, but cannot be named by any down stream user. For example you can implement define public types in private modules. Those types then can be used as associated type in a public trait impl, but they cannot be named inside a downstream crate: <a href=\"https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=4bd23545bd459bc1b39ae9f4b44d94de\">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2021&amp;gist=4bd23545bd459bc1b39ae9f4b44d94de</a></p>\n</blockquote>\n<p>Ah, thanks for the explanation <span aria-label=\"+1\" class=\"emoji emoji-1f44d\" role=\"img\" title=\"+1\">:+1:</span></p>",
+        "id": 273859471,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1646247639
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"210053\">Michael notriddle Howell</span> <a href=\"#narrow/stream/266220-rustdoc/topic/To.20alias.20or.20not.20to.20alias/near/273753514\">said</a>:</p>\n<blockquote>\n<p>Option 3 might be easier to sell if it could also be described as improving diagnostics? Like <a href=\"https://github.com/rust-lang/rust/issues/17164\">https://github.com/rust-lang/rust/issues/17164</a> ?</p>\n</blockquote>\n<p>That's a good point. I left a comment on that issue about this.</p>",
+        "id": 273859653,
+        "sender_full_name": "Noah Lev",
+        "timestamp": 1646247717
+    },
+    {
+        "content": "<p>An aliasing/docs example just came up in the t-lang Zulip, might be an interesting example case to consider: <a href=\"#narrow/stream/213817-t-lang/topic/Documenting.20complicated.20type.20system.20shenanigans/near/275126770\">https://rust-lang.zulipchat.com/#narrow/stream/213817-t-lang/topic/Documenting.20complicated.20type.20system.20shenanigans/near/275126770</a></p>",
+        "id": 275144666,
+        "sender_full_name": "Nick Cameron",
+        "timestamp": 1647165220
+    }
+]

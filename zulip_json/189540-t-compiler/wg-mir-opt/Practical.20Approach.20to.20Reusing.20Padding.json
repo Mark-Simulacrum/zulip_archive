@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>So, a request I've seen quite a bit of is that layout algorithms re-use the padding in fields of a struct and put other fields in there. In other words, the hope is that</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span>: <span class=\"p\">(</span><span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"kt\">u16</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">b</span>: <span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>might have size 4. This unfortunately doesn't work because references are a thing, ie you need to be able to get <code>&amp;mut (u8, u16)</code> out of the above type with <code>&amp;mut s.a</code>. However, if no reference is ever taken then this is in principle possible.</p>\n<p>I thought about this the other day, and I believe there is actually a practical way to implement this kind of optimization where it is allowed. In particular, \"reusing the padding\" can be done by \"inlining\" the field. We could take the struct above and  instead \"redefine\" it to act like</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a_0</span>: <span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a_1</span>: <span class=\"kt\">u16</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">b</span>:  <span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>then just letting the standard layout algorithm do what it normally would. Afterwards, it only remains to correct the MIR to access <code>a_0</code> instead of <code>a.0</code>. This would of course be a bit of work, and there are some concerns about moves now becoming weird, since</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">y</span>: <span class=\"nc\">S</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"o\">..</span><span class=\"p\">.;</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>now has to be compiled like</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">x</span><span class=\"p\">.</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">.</span><span class=\"n\">a_0</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">x</span><span class=\"p\">.</span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"p\">.</span><span class=\"n\">a_1</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>which might be worse for performance in some cases, but in principle I don't see a reason this couldn't/shouldn't be done. I also think it should be possible to do this in a way that is transparent to much of the rest of the compiler - codegen, LLVM, borrow checking, and other MIR passes. I'm imaging an implementation strategy like this: Write a new <code>effective_adt_def</code> query that performs the analysis to see which fields are candidates for inlining and returns the resulting <code>AdtDef</code>. Then, immediately after borrowck (and other analysis) and before other MIR passes, have an MIR pass that modifies the MIR essentially as I explained above. Besides that, it should be enough to ensure that other parts of the compiler correctly choose between <code>effective_adt_def</code> and <code>adt_def</code>. Does this sound reasonable to people who have more experience here than me?</p>",
+        "id": 269419084,
+        "sender_full_name": "Jake",
+        "timestamp": 1643207107
+    },
+    {
+        "content": "<p>Also relevant: The same thing could be done with enums, ie <code>enum E { A(Option&lt;u8&gt;), B(Option&lt;u8&gt;) }</code> could be redefined as a single four variant enum, making it have size 2 instead of 3.</p>",
+        "id": 269419319,
+        "sender_full_name": "Jake",
+        "timestamp": 1643207184
+    },
+    {
+        "content": "<p>The candidate analysis also doesn't seem too bad either: As far as I can tell, you can do this to all fields that 1) aren't <code>Drop</code>, 2) never have a reference to them taken (easy to check in MIR), and 3) are not public, so downstream crates can't change 2</p>",
+        "id": 269420175,
+        "sender_full_name": "Jake",
+        "timestamp": 1643207525
+    },
+    {
+        "content": "<p>(Possibly 2 could even be checked against THIR)</p>",
+        "id": 269420261,
+        "sender_full_name": "Jake",
+        "timestamp": 1643207559
+    },
+    {
+        "content": "<p>Actually, hmm, doing this post monomorph would maybe be better because generic fields could be inlined</p>",
+        "id": 269420582,
+        "sender_full_name": "Jake",
+        "timestamp": 1643207705
+    },
+    {
+        "content": "<p>Oh, hmm, there is some <em>weird</em> unsafe code that breaks this. Unsafe code could compute the offset between <code>a.0</code> and <code>a.1</code>, then make a pointer to <code>a_0</code> and expect <code>a_1</code> to be at the pre-computed offset between the two. Hopefully there's a way to salvage this without banning all references into the inlined field, probably not though. The enum case doesn't have this problem though afaict</p>",
+        "id": 269421538,
+        "sender_full_name": "Jake",
+        "timestamp": 1643208104
+    },
+    {
+        "content": "<p>Ahhh... with asm or other methods of writing partially init memory enums also suffer from the inner reference problem</p>",
+        "id": 269426929,
+        "sender_full_name": "Jake",
+        "timestamp": 1643210050
+    },
+    {
+        "content": "<p>I'm a bit lost, how does flattening a tuple change any of the issues with regard to lay out?</p>",
+        "id": 269427604,
+        "sender_full_name": "Xavier Denis",
+        "timestamp": 1643210328
+    },
+    {
+        "content": "<p>It seems like if we have an analysis that can determine we never take a reference to a struct field, then we could re-use any lost padding without needing to transform the actual type, no?</p>",
+        "id": 269427703,
+        "sender_full_name": "Xavier Denis",
+        "timestamp": 1643210366
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"312719\">Xavier Denis</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Practical.20Approach.20to.20Reusing.20Padding/near/269427703\">said</a>:</p>\n<blockquote>\n<p>It seems like if we have an analysis that can determine we never take a reference to a struct field, then we could re-use any lost padding without needing to transform the actual type, no?</p>\n</blockquote>\n<p>True, and this is probably preferable if we can do it (as it avoids the inner reference issues), but it seems comparatively difficult to implement</p>",
+        "id": 269428882,
+        "sender_full_name": "Jake",
+        "timestamp": 1643210790
+    },
+    {
+        "content": "<p>We'd not only have to make sure that the user doesn't take the references, but also that the codegen doesn't do the wrong thing either. For example, with the above type the natural way to codegen <code>s.a = value</code> is to do a write of type <code>(u8, u16)</code> to <code>s.a</code> (LLVM works a little differently here I think, but I think it may also be a problem there), and that wouldn't be correct with padding reuse</p>",
+        "id": 269429591,
+        "sender_full_name": "Jake",
+        "timestamp": 1643211069
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Practical.20Approach.20to.20Reusing.20Padding/near/269421538\">said</a>:</p>\n<blockquote>\n<p>Oh, hmm, there is some <em>weird</em> unsafe code that breaks this. Unsafe code could compute the offset between <code>a.0</code> and <code>a.1</code>, then make a pointer to <code>a_0</code> and expect <code>a_1</code> to be at the pre-computed offset between the two. Hopefully there's a way to salvage this without banning all references into the inlined field, probably not though. The enum case doesn't have this problem though afaict</p>\n</blockquote>\n<p>Is this really the case? I thought repr(Rust) doesn't make any guarantees about layout like this, that you could rely on in unsafe code.</p>",
+        "id": 269467696,
+        "sender_full_name": "panstromek",
+        "timestamp": 1643225270
+    },
+    {
+        "content": "<p>Nomicon says (for struct) \"There is no indirection for these types; all data is stored within the struct, as you would expect in C.\". Not sure if nested struct counts as indirection, though.</p>",
+        "id": 269468325,
+        "sender_full_name": "panstromek",
+        "timestamp": 1643225518
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"208862\">panstromek</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Practical.20Approach.20to.20Reusing.20Padding/near/269467696\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Practical.20Approach.20to.20Reusing.20Padding/near/269421538\">said</a>:</p>\n<blockquote>\n<p>Oh, hmm, there is some <em>weird</em> unsafe code that breaks this. Unsafe code could compute the offset between <code>a.0</code> and <code>a.1</code>, then make a pointer to <code>a_0</code> and expect <code>a_1</code> to be at the pre-computed offset between the two. Hopefully there's a way to salvage this without banning all references into the inlined field, probably not though. The enum case doesn't have this problem though afaict</p>\n</blockquote>\n<p>Is this really the case? I thought repr(Rust) doesn't make any guarantees about layout like this, that you could rely on in unsafe code.</p>\n</blockquote>\n<p>I do definitely think its de facto specified that if a struct has <code>T</code> as a field, then some properly sized and aligned subset of the struct's memory contains a <code>T</code></p>",
+        "id": 269479294,
+        "sender_full_name": "Jake",
+        "timestamp": 1643229891
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Practical.20Approach.20to.20Reusing.20Padding/near/269479294\">said</a>:</p>\n<blockquote>\n<p>I do definitely think its de facto specified that if a struct has <code>T</code> as a field, then some properly sized and aligned subset of the struct's memory contains a <code>T</code></p>\n</blockquote>\n<p>Given that you can get a reference to it, there must be, yes.</p>\n<p>But we could have opt-in things that change that, like how <code>repr(packed)</code> makes them improperly-aligned.  So we could have a \"move-only\" opt-in that prevents taking those references (or <code>ptr::raw!</code>s) and thus we have the opportunity to run code every time someone wants to read or write it and thus can do fancier tricks.</p>",
+        "id": 269486467,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1643233138
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125270\">scottmcm</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Practical.20Approach.20to.20Reusing.20Padding/near/269486467\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Practical.20Approach.20to.20Reusing.20Padding/near/269479294\">said</a>:</p>\n<blockquote>\n<p>I do definitely think its de facto specified that if a struct has <code>T</code> as a field, then some properly sized and aligned subset of the struct's memory contains a <code>T</code></p>\n</blockquote>\n<p>Given that you can get a reference to it, there must be, yes.</p>\n<p>But we could have opt-in things that change that, like how <code>repr(packed)</code> makes them improperly-aligned.  So we could have a \"move-only\" opt-in that prevents taking those references (or <code>ptr::raw!</code>s) and thus we have the opportunity to run code every time someone wants to read or write it and thus can do fancier tricks.</p>\n</blockquote>\n<p>Yeah, I mean the idea above is to basically do a little analysis to detect when we can do this via as-if rule already. I honestly have no idea how often this optimization would kick in, might be worth checking first</p>",
+        "id": 269487374,
+        "sender_full_name": "Jake",
+        "timestamp": 1643233622
+    },
+    {
+        "content": "<p>The one thing that comes to mind about \"as-if\" here is that those cases might also be ones where LLVM applies SRoA to the address-not-taken local anyway.  So it might be relatively rare -- except in futures, perhaps?</p>",
+        "id": 269487912,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1643233909
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125270\">scottmcm</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/Practical.20Approach.20to.20Reusing.20Padding/near/269487912\">said</a>:</p>\n<blockquote>\n<p>The one thing that comes to mind about \"as-if\" here is that those cases might also be ones where LLVM applies SRoA to the address-not-taken local anyway.  So it might be relatively rare -- except in futures, perhaps?</p>\n</blockquote>\n<p>I was mostly hoping that the improvements would come in terms of smaller sizes, meaning smaller copies and less cache pressure. Might not make enough of a difference to ever be noticed though</p>",
+        "id": 269521400,
+        "sender_full_name": "Jake",
+        "timestamp": 1643254188
+    }
+]

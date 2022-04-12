@@ -1,0 +1,110 @@
+[
+    {
+        "content": "<p>I was playing with adding a benchmark for the resolver ignoring a lock-file. Working off the code for <code>generate_lockfile</code> I got:</p>\n<div class=\"codehilite\"><pre><span></span><code>                let mut registry = PackageRegistry::new(ws.config()).unwrap();\n                cargo::ops::resolve_with_previous(\n                    &amp;mut registry,\n                    ws,\n                    cli_features,\n                    *has_dev_units,\n                    None,\n                    None,\n                    specs,\n                    true,\n                )\n                .unwrap();\n</code></pre></div>\n<p>When I ran this it cloned all the git deps again. It is downloading the branch specified in the <code>Cargo.toml</code> not the commit in the <code>Cargo.lock</code>. Because I told it to ignore the lockfile. So this ends up just being a benchmark of cloning git repository's. <br>\nI tried making it use <code>offline</code>, so it no longer updates the git repos, but it also only looks at versions where we have downloaded the tarball in the temporary cargo home. Which ends up being equivalent to having a lock file.<br>\nAny thoughts on how to benchmark only the resolver without a lockfile?</p>",
+        "id": 257772505,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1634335690
+    },
+    {
+        "content": "<p>One thought I had is to just skip the workspaces with git dependencies, but I see that is almost all of the ones I chose. <span aria-label=\"grinning\" class=\"emoji emoji-1f600\" role=\"img\" title=\"grinning\">:grinning:</span></p>",
+        "id": 257773339,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1634336104
+    },
+    {
+        "content": "<p>Is it feasible to call <code>PackageRegistry::add_sources</code> for all of the git packages?  I think it would need to load <code>Cargo.lock</code> once to get the list of git packages.  I think that will force the <code>PackageRegistry</code> to think those are locked, and won't update them.</p>",
+        "id": 257773830,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1634336367
+    },
+    {
+        "content": "<p>I think something like <code>ops::load_pkg_lockfile(ws)?.unwrap().iter().map(|p| p.source_id()).filter(|sid| sid.is_git())</code> should get you a list of git source ids.</p>",
+        "id": 257774072,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1634336494
+    },
+    {
+        "content": "<p>Oh, hmm, <code>add_sources</code> might not work.  <code>add_preloaded</code> might?</p>",
+        "id": 257774444,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1634336669
+    },
+    {
+        "content": "<p>Sorry for the delay, getting back to this today.<br>\nI am not seeing how to get a <code>Box&lt;dyn Source + 'cfg&gt;</code> to pass to <code>add_preloaded</code>. Thoughts?</p>",
+        "id": 261970427,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1637260698
+    },
+    {
+        "content": "<p>Here is the ugly hack I have so far.<br>\n<a href=\"https://github.com/rust-lang/cargo/compare/master...Eh2406:resolve_without_lockfile\">https://github.com/rust-lang/cargo/compare/master...Eh2406:resolve_without_lockfile</a></p>",
+        "id": 261993035,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1637270687
+    },
+    {
+        "content": "<p>It still does a no op clone of the index pretty often</p>",
+        "id": 261993093,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1637270714
+    },
+    {
+        "content": "<p>and pages of</p>\n<div class=\"codehilite\"><pre><span></span><code>warning: Patch `packed_simd v0.3.4 (https://github.com/hsivonen/packed_simd?rev=8b4bd7d8229660a749dbe419a57ea01df9de5453#8b4bd7d8)` was not used in the crate graph.\nCheck that the patched package version and available features are compatible\nwith the dependency requirements. If the patch has a different version from\nwhat is locked in the Cargo.lock file, run `cargo update` to use the new\nversion. This may also occur with an optional dependency that is not enabled.\n</code></pre></div>",
+        "id": 261993394,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1637270864
+    },
+    {
+        "content": "<p>and pages of:</p>\n<div class=\"codehilite\"><pre><span></span><code>Benchmarking resolve_without_lockfile/rust: Warming up for 3.0000 s    Updating `local-snapshot` index\n    Updating git repository `https://github.com/rust-lang/cargo`\n    Updating git repository `https://github.com/rust-lang/rustfmt`\n    Updating git repository `https://github.com/rust-lang/cargo`\n    Updating git repository `https://github.com/rust-lang/rustfmt`\n    Updating git repository `https://github.com/rust-lang/cargo`\n    Updating git repository `https://github.com/rust-lang/rustfmt`\n</code></pre></div>",
+        "id": 261993509,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1637270914
+    },
+    {
+        "content": "<p>Hm, those are tricky problems.</p>\n<p>For the index update, I can't see a way to trick it to avoid the update. There is a set in <code>Config</code> called <a href=\"https://github.com/rust-lang/cargo/blob/59076352592712c4efe11e916cc23ad47785bab2/src/cargo/util/config/mod.rs#L174-L175\"><code>updated_sources</code></a> which will avoid updates for those sources. You can easily insert into that. However, the tricky part is getting the proper <code>SourceId</code> to insert. It needs the <code>SourceId</code> for the <em>replaced</em> source called \"local-snapshot\", but I don't see an easy way to get that. It is stuffed away in the <code>SourceConfigMap</code>, and that is private to the <code>PackageRegistry</code>.</p>\n<p>As for the <code>git</code> updates, it looks like those are due to <code>[patch]</code>. Again, that looks really difficult to avoid. When the original packages are unlocked, the code <a href=\"https://github.com/rust-lang/cargo/blob/59076352592712c4efe11e916cc23ad47785bab2/src/cargo/core/registry.rs#L587-L594\">here</a> really wants to make sure that what it is querying against is up-to-date. However, the patched dependency doesn't exist in <code>Cargo.lock</code>, and thus there is nothing to call with <code>add_preloaded</code>. Somehow you'd need to get the <code>GitSource</code> of the original before it is patched.</p>",
+        "id": 262013890,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1637283005
+    },
+    {
+        "content": "<p>Maybe the workspaces that use git sources and patches aren't good candidates for this benchmark?</p>",
+        "id": 262014071,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1637283151
+    },
+    {
+        "content": "<p>That suggests adding new workspaces that just rely on the index, or abusing the current workspaces by ignoring the parts that aren't helpful.</p>",
+        "id": 262087654,
+        "sender_full_name": "Eh2406",
+        "timestamp": 1637338278
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120179\">@Eh2406</span>  Here's a list of the largest dependency trees on <a href=\"http://crates.io\">crates.io</a>:  <a href=\"https://gist.github.com/ehuss/e6db8a578f07a1e71fbcbeb4a74aa8ce\">https://gist.github.com/ehuss/e6db8a578f07a1e71fbcbeb4a74aa8ce</a></p>\n<p>Might be worth thinking about using some of those.</p>\n<p>Another idea.  Try benchmarking all of them, and see if there are any major differences in performance, or is performance directly correlated to dependency size?</p>",
+        "id": 262484766,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1637687559
+    },
+    {
+        "content": "<p>We could then hand pick a few of the exceptional ones if it isn't linear.</p>",
+        "id": 262484808,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1637687582
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120518\">@Eric Huss</span> Very nice.</p>",
+        "id": 262484865,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1637687624
+    },
+    {
+        "content": "<p>What did you use to generate that? And how easily could the tool you used label crates that have already appeared in the dependencies of a previous crate? Some of the large crates I see there seem likely to be dependencies of larger crates higher in the list.</p>",
+        "id": 262485013,
+        "sender_full_name": "Josh Triplett",
+        "timestamp": 1637687694
+    },
+    {
+        "content": "<p>I used <code>rg -c -g '**/Cargo.lock' 'name = '</code></p>\n<p>and then sorted those numerically.</p>\n<p>It would require a bit more complexity to label ones that already include larger trees.</p>",
+        "id": 262485398,
+        "sender_full_name": "Eric Huss",
+        "timestamp": 1637687871
+    }
+]

@@ -1,0 +1,410 @@
+[
+    {
+        "content": "<p>This a thread to discuss a problem which I know exists, but which I don't know how to solve.</p>\n<p>Consider this sceenshot:</p>\n<p><a href=\"/user_uploads/4715/cglb7pthfqaRgiZmzonus8uZ/pasted_image.png\" target=\"_blank\" title=\"pasted_image.png\">pasted image</a> </p>\n<div class=\"message_inline_image\"><a href=\"/user_uploads/4715/cglb7pthfqaRgiZmzonus8uZ/pasted_image.png\" target=\"_blank\" title=\"pasted image\"><img src=\"/user_uploads/4715/cglb7pthfqaRgiZmzonus8uZ/pasted_image.png\"></a></div><p>As you see, the <code>::Hash</code> is not syntax highlighted properly, because IDE can't figure out that it is an associated type of the <code>BlockT</code> trait. The architectural problem here is that <code>hir</code> actually knows this correctly! We lose this info on the way from <code>hir</code> to <code>ide</code>, and I'd like to discuss this (pretty general I think problem)</p>",
+        "id": 183058377,
+        "sender_full_name": "matklad",
+        "timestamp": 1575984234
+    },
+    {
+        "content": "<p>Specifically, there's a code in <code>hir</code> which lowers <code>Result&lt;Vec&lt;Block::Hash&gt;&gt;</code> syntax to a type (<code>Ty::from_hir</code> (the name is bad)). <em>Inside</em> that method, we properly resolve  <code>::Hash</code>, but we then forget this bit of info: the rest of the compiler is interested only in the results of lowering as a whole, and in the subresult for <code>::Hash</code>.</p>",
+        "id": 183058923,
+        "sender_full_name": "matklad",
+        "timestamp": 1575984671
+    },
+    {
+        "content": "<p>So, when in IDE we want to compute gotodef for <code>::Hash</code>, we have two choices:</p>\n<ul>\n<li>re-derive this info</li>\n<li>lookup this info in some table</li>\n</ul>\n<p>In the first approach, you synthesize a path like <code>Block::Hash</code>, and ask <code>hir</code>: \"what would be the result of resolving this path, if it were used in this context\", where \"this context\" is a somewhat fussy concept.</p>\n<p>In the second approach, the <code>Ty::from_hir</code> would compute not only the final <code>Ty</code> value, but also an auxilary mapping, <code>&lt;PathSyntax, PathResolution&gt;</code>. This mapping won't be used by the rest of the compiler, but would be used by an IDE for goto def.</p>",
+        "id": 183059130,
+        "sender_full_name": "matklad",
+        "timestamp": 1575984892
+    },
+    {
+        "content": "<p>The current approach is obviously a broken mixture of both.</p>\n<p>Specifically, we use \"re-derive\" for \"top-level\" paths. For paths inside expressions though, we use a side-table approach, because computing the correct lexical scope is tricky. In particular, in the above screenshot we hit the \"re-derive\" path, and fail, because we don't take into account the scope with generic parameters (which is a pretty complex beast, with assoc types and projections)</p>",
+        "id": 183059359,
+        "sender_full_name": "matklad",
+        "timestamp": 1575985052
+    },
+    {
+        "content": "<p>In general, I am starting to believe that trying to re-derive things is a bad idea: that's a hidden copy-paste of code, which is bound to diverge over time, <em>especially</em> in various corner cases.</p>",
+        "id": 183059604,
+        "sender_full_name": "matklad",
+        "timestamp": 1575985215
+    },
+    {
+        "content": "<p>What type is <code>Result&lt;Vec&lt;Block::Hash&gt;&gt;</code> lowered to, and would this be any different if it was just <code>Block::Hash</code>?</p>",
+        "id": 183059623,
+        "sender_full_name": "Daniel Mcnab",
+        "timestamp": 1575985233
+    },
+    {
+        "content": "<p>I'm not even certain that those questions make sense, but if they do I hope they can clarify the issue.</p>",
+        "id": 183059779,
+        "sender_full_name": "Daniel Mcnab",
+        "timestamp": 1575985330
+    },
+    {
+        "content": "<blockquote>\n<p>In general, I am starting to believe that trying to re-derive things is a bad idea: that's a hidden copy-paste of code, which is bound to diverge over time, <em>especially</em> in various corner cases.</p>\n</blockquote>\n<p>yeah, macro expansion was another example until recently -- the <code>SourceAnalyzer</code> resolved macros again, with sometimes slightly different results</p>",
+        "id": 183059841,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575985389
+    },
+    {
+        "content": "<p>I would say that it is lower<code>Result&lt;Vec&lt;Block::Hash&gt;&gt;</code>, but with IDs instead of identifiers, and where <code>Block::Hash</code> remebers from which trait the <code>::Hash</code> bit comes. The question makes sense, but the answer is funny \"it's the same after lowering, although the meaning is completley different\"</p>",
+        "id": 183059877,
+        "sender_full_name": "matklad",
+        "timestamp": 1575985420
+    },
+    {
+        "content": "<p>I agree that long-term, anything that's not trivial to derive (i.e. just calling a query) should be remembered</p>",
+        "id": 183060012,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575985500
+    },
+    {
+        "content": "<p>this is actually kind of similar to the diagnostics problem, isn't it, in that it's some additional 'side channel' information we'd like to produce</p>",
+        "id": 183060164,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575985609
+    },
+    {
+        "content": "<p>So, let me finish the above write up...</p>\n<p>The are several problem with \"sidetable\" approach as well, I think.</p>\n<ul>\n<li>it might be tricky to figure out which query you should execute to get the required side-table. In this case, this is probably \"what is the type of function <code>leaves</code>\", but there's some non-trivial mapping needed to go from sytnax of path to the relevant container</li>\n<li>threading the side-table through all lowerings might be a pain. We should use the same table for all function arguments, etc. And if we split some of those into separate queries, we'll have to somehow unify the tables</li>\n<li>there will be a ton of different side-tables for seemingly random bits of info an IDE might need. (This one actally is solved by a <a href=\"https://github.com/rust-analyzer/rust-analyzer/blob/ee904594af174866cfa10474fd8fd3f23580b6af/crates/ra_hir_def/src/dyn_map.rs\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/blob/ee904594af174866cfa10474fd8fd3f23580b6af/crates/ra_hir_def/src/dyn_map.rs\">dyn_map</a>, which I consider a great solution to this problem,  although the conceptual complexity is high)</li>\n<li>I think we want to use syntax trees as keys in the map, and that will be a pain on many levels:<ul>\n<li>if we use literal <code>SyntaxNode</code>s, we'll retain <strong>all</strong> syntax trees via Arcs</li>\n<li>if we use <code>(File, TextRange)</code> of a node insted, we'll need significanlty more legwork to go from the actual SyntaxNode to key/value (one direction is easy, another is hard)</li>\n<li>either of the above two approaches breaks incrementality</li>\n<li>we can store something like (<code>parent_item_id</code>, <code>relative_range</code>), which helps with incremental, but makes mapping even more inderect and ...</li>\n<li>... looks like it doesn't solve the more fundamental problem that we <strong>don't</strong> need those tables most of the time at all, they are a waste of space</li>\n</ul>\n</li>\n</ul>\n<p>One thing I've tried to do is to basically make a <em>function</em> which returns a (Data, Map&lt;SyntaxNode, Stuff&gt;), which can either be called directly, or via a query which returns only <code>Data</code>.  The funny thing with this approach is that we do compute everything twice.</p>",
+        "id": 183060882,
+        "sender_full_name": "matklad",
+        "timestamp": 1575986076
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"129457\">@Florian Diebold</span> yeah, diagnostics feel similar</p>",
+        "id": 183060904,
+        "sender_full_name": "matklad",
+        "timestamp": 1575986093
+    },
+    {
+        "content": "<p>And, in fact, in Kotlin they use the same binding trace thing for both:</p>\n<ol>\n<li><a href=\"https://github.com/JetBrains/kotlin/blob/344bc33096f0a6786cfde8a85297be45fc6b9239/compiler/frontend/src/org/jetbrains/kotlin/resolve/lazy/descriptors/LazyTypeParameterDescriptor.java#L60\" target=\"_blank\" title=\"https://github.com/JetBrains/kotlin/blob/344bc33096f0a6786cfde8a85297be45fc6b9239/compiler/frontend/src/org/jetbrains/kotlin/resolve/lazy/descriptors/LazyTypeParameterDescriptor.java#L60\">https://github.com/JetBrains/kotlin/blob/344bc33096f0a6786cfde8a85297be45fc6b9239/compiler/frontend/src/org/jetbrains/kotlin/resolve/lazy/descriptors/LazyTypeParameterDescriptor.java#L60</a></li>\n<li><a href=\"https://github.com/JetBrains/kotlin/blob/344bc33096f0a6786cfde8a85297be45fc6b9239/compiler/frontend/src/org/jetbrains/kotlin/resolve/lazy/descriptors/LazyTypeParameterDescriptor.java#L67\" target=\"_blank\" title=\"https://github.com/JetBrains/kotlin/blob/344bc33096f0a6786cfde8a85297be45fc6b9239/compiler/frontend/src/org/jetbrains/kotlin/resolve/lazy/descriptors/LazyTypeParameterDescriptor.java#L67\">https://github.com/JetBrains/kotlin/blob/344bc33096f0a6786cfde8a85297be45fc6b9239/compiler/frontend/src/org/jetbrains/kotlin/resolve/lazy/descriptors/LazyTypeParameterDescriptor.java#L67</a></li>\n</ol>\n<p>1 records an association between syntax and Kotlin's HIR, 2 records an error</p>",
+        "id": 183061150,
+        "sender_full_name": "matklad",
+        "timestamp": 1575986269
+    },
+    {
+        "content": "<p>I feel like we 'just' need IDs for type refs similar to <code>ExprId</code>s and a source mapping for them... yeah, it'll be more work to get from a source location to the actual data, but it's the same thing we're already doing</p>",
+        "id": 183061160,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575986281
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"129457\">@Florian Diebold</span> I am not sure... Like, the rest of the compiler doesn't care about what bits a <code>TypeRef</code> consists of, it only cares what it lowers to, as a whole.</p>",
+        "id": 183061297,
+        "sender_full_name": "matklad",
+        "timestamp": 1575986361
+    },
+    {
+        "content": "<p>So, I think our options are:</p>\n<ul>\n<li>make sure that everything has an ID and store side-tables with such IDs as query values in salsa</li>\n<li>store tables with stable AST pointers in salsa</li>\n<li>don't store anything extra in salsa, but, in raw query function, compute a table which stores  (unstable)<code>SyntaxNode</code>s</li>\n</ul>\n<p>I am somewhat leaning towards the latter option, because it avoids the need to store stuff which we don't really need anyway.</p>",
+        "id": 183067646,
+        "sender_full_name": "matklad",
+        "timestamp": 1575990282
+    },
+    {
+        "content": "<p>Also, cc <span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> , I feel this thread an interesting question for the overall RLS 2.0 architecture .</p>",
+        "id": 183067724,
+        "sender_full_name": "matklad",
+        "timestamp": 1575990337
+    },
+    {
+        "content": "<p>we could probably do simple path-like pointers for this, like <code>root -&gt; first type param -&gt; second type param</code>, that would be incremental-friendly and not require any changes to the <code>TypeRef</code> structure itself?</p>",
+        "id": 183067859,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575990402
+    },
+    {
+        "content": "<p>and as long as the AST-&gt;HIR lowering is trivial, it would even not require a source map, though probably that won't stay that way</p>",
+        "id": 183067942,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575990451
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"129457\">@Florian Diebold</span> for ast-stable pointers? Yeah, that's an option, though I think <code>(parent_item_id, relative_range)</code> might be a more-general, less code option.</p>",
+        "id": 183067977,
+        "sender_full_name": "matklad",
+        "timestamp": 1575990478
+    },
+    {
+        "content": "<p>ranges, even relative ones, aren't as stable though... but probably that's fine</p>",
+        "id": 183068051,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575990515
+    },
+    {
+        "content": "<p>Hm, actually I am confused here: if you are talkig about type <strong>parameters</strong>, that's already somewhat handled since couple of days ago. If you are talking about type <strong>arguments</strong> (and that are arguments in the initial screenshot), then the concept of <code>root</code>  is slighly fuzzy. </p>\n<p>Relative ranges should be ok -- you re-run lowering code anyway if the syntax node changes. A somewhat painful moment here is that just range is not enough, there could be macros, so you'll need something like <code>InFile&lt;TextRange&gt;</code>...</p>",
+        "id": 183068221,
+        "sender_full_name": "matklad",
+        "timestamp": 1575990624
+    },
+    {
+        "content": "<p>yeah, I mean type arguments</p>",
+        "id": 183068242,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575990639
+    },
+    {
+        "content": "<p>basically, to be able to address any part of a type ref like <code>Result&lt;Vec&lt;Block::Hash&gt;&gt;</code></p>",
+        "id": 183068279,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575990668
+    },
+    {
+        "content": "<blockquote>\n<p>you re-run lowering code anyway if the syntax node changes</p>\n</blockquote>",
+        "id": 183068303,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575990684
+    },
+    {
+        "content": "<p>you re-run AST-&gt;HIR lowering, not necessarily HIR-&gt;type</p>",
+        "id": 183068335,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575990705
+    },
+    {
+        "content": "<p>If AST-&gt;HIR stays the same, it's probably the case that relative ranges are the same as well. You loose optimizations on typing whitesapce, but that doesn't seem important</p>",
+        "id": 183068441,
+        "sender_full_name": "matklad",
+        "timestamp": 1575990768
+    },
+    {
+        "content": "<p>yeah, that's what I was thinking of, but you're right, it doesn't seem important</p>",
+        "id": 183069633,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575991476
+    },
+    {
+        "content": "<p>unless people start having huge type references spanning multiple lines I guess <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 183069863,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575991607
+    },
+    {
+        "content": "<blockquote>\n<p>then the concept of root is slighly fuzzy.</p>\n</blockquote>\n<p>I think there should always be a clear root from the query that actually does the lowering -- i.e. if you're lowering the return type in a function signature, that's where your root is, etc.</p>",
+        "id": 183070080,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575991747
+    },
+    {
+        "content": "<p>Aha, I understand now, that's basically our <code>AstIdMap</code>, but extended to the bodies of the items. So, the id is something like \"the nth descendant of a specific type\". That would work, but would require threading the relevant mapping of syntax nodes to positional ids everywhere. </p>\n<p>I sort of feel the core question is \"do we store such a map in salsa at all?\". If we do, we should pick <em>any</em> id scheme and be done with it. If we don't we can use syntax nodes themselves, which seems like it'd reduce complexity by a large constant factor.</p>",
+        "id": 183071722,
+        "sender_full_name": "matklad",
+        "timestamp": 1575992785
+    },
+    {
+        "content": "<p>I'm not sure I understand how it would work without storing the map</p>",
+        "id": 183074103,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1575994212
+    },
+    {
+        "content": "<p>Some of the newer hir source-maps work this way: <a href=\"https://github.com/rust-analyzer/rust-analyzer/blob/ee904594af174866cfa10474fd8fd3f23580b6af/crates/ra_hir_def/src/child_by_source.rs#L105-L124\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/blob/ee904594af174866cfa10474fd8fd3f23580b6af/crates/ra_hir_def/src/child_by_source.rs#L105-L124\">https://github.com/rust-analyzer/rust-analyzer/blob/ee904594af174866cfa10474fd8fd3f23580b6af/crates/ra_hir_def/src/child_by_source.rs#L105-L124</a></p>",
+        "id": 183074201,
+        "sender_full_name": "matklad",
+        "timestamp": 1575994309
+    },
+    {
+        "content": "<p>Like, we basically have the same two queries (<code>foo</code> and <code>foo_with_source_map</code>), but <code>foo_with_source_map</code> is <code>#[salsa::transparent]</code>, so it can return <code>SyntaxNode</code>s directly</p>",
+        "id": 183074281,
+        "sender_full_name": "matklad",
+        "timestamp": 1575994349
+    },
+    {
+        "content": "<p>basically == the actual implementation at the moment goes via a couple of abstractions which are probably overly-complex for the task at hand...</p>",
+        "id": 183074339,
+        "sender_full_name": "matklad",
+        "timestamp": 1575994394
+    },
+    {
+        "content": "<p>in this case, we have two steps, though (AST -&gt; HIR and HIR -&gt; resolved type). We can't have the second step use <code>SyntaxNode</code>s directly, right?</p>",
+        "id": 183105989,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1576014389
+    },
+    {
+        "content": "<p>Hrm, you are correct...</p>",
+        "id": 183109860,
+        "sender_full_name": "matklad",
+        "timestamp": 1576017195
+    },
+    {
+        "content": "<p>this... actually reminds me of another thing was thinking about recently. Current unresolved TypeRef doesn’t seem too useful</p>",
+        "id": 183109961,
+        "sender_full_name": "matklad",
+        "timestamp": 1576017285
+    },
+    {
+        "content": "<p>the lowering code in Ty spends a lot of effor on path resolution, which ideally belongs to the hir_def crate. I wonder if we can get rid of TypeRef altogether? I am not exactly sure that it helps with incrementality</p>",
+        "id": 183110085,
+        "sender_full_name": "matklad",
+        "timestamp": 1576017385
+    },
+    {
+        "content": "<p>Even more generally: hir::Path is convenient, because it’s a value type. But, to implement side tables, we’ll have to change it from value-type to a type with identity (by assigning ids to segments, or by using ast::Path directly). </p>\n<p>We want two exactly opposite things at the same time :-(</p>",
+        "id": 183111041,
+        "sender_full_name": "matklad",
+        "timestamp": 1576018229
+    },
+    {
+        "content": "<p>doing name resolution directly on the AST feels a bit weird ;) but maybe that's fine. I think type inference will need a way to refer to specific user-written types anyway though, so I don't think it gets us around that</p>",
+        "id": 183111087,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1576018273
+    },
+    {
+        "content": "<p>I'm not convinced that we need to give paths etc. identities for that though</p>",
+        "id": 183111217,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1576018345
+    },
+    {
+        "content": "<p>I guess in a sense, giving them an ID gives them an identity by definition, what I mean is it can stay a value type anyway</p>",
+        "id": 183111374,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1576018471
+    },
+    {
+        "content": "<p>Yeah, in my terminology a path with id is not a value type. To be less ambitious, today we have a property that <code>foo::bar</code> is indistinguishable from any other <code>foo::bar</code>. This seems to be a theoretically useful property: with it, you guarantee that name resolution looks only at the essential information and cant’ make different choices depending on, say, position of path within the file. With ids, <code>foo#1::bar#2</code> is not Eq to <code>foo#3::bar#4</code>, and we should manually ensure that resolver doesn’t care about specific ids....</p>",
+        "id": 183112282,
+        "sender_full_name": "matklad",
+        "timestamp": 1576019181
+    },
+    {
+        "content": "<p>Again, a sort of theoretical way out of the problem is to use positional ids: number all segments in increasing order and, when passing a sub path to some method, appropriately increment indexes in the return of this method.</p>",
+        "id": 183112466,
+        "sender_full_name": "matklad",
+        "timestamp": 1576019386
+    },
+    {
+        "content": "<p>Interesting!</p>\n<p>Thinking about this more, the most interesting problem seems to be how do we implement goto def for imports (<code>use std::collections::HashMap</code>). This is the place where we want to avoid storing auxiliary info, if possible: <code>CrateDefMap</code> is already a costly data structure. </p>\n<p>It's also interesting that Kotlin's imports <em>optionally</em> carry syntax with them, and side-table is recorded only for imports which carry syntax: </p>\n<ul>\n<li><a href=\"https://github.com/JetBrains/kotlin/blob/e2010cb90d6b6f420fb6b0cfecc9d7bb3754d342/compiler/psi/src/org/jetbrains/kotlin/psi/KtImportInfo.kt\" target=\"_blank\" title=\"https://github.com/JetBrains/kotlin/blob/e2010cb90d6b6f420fb6b0cfecc9d7bb3754d342/compiler/psi/src/org/jetbrains/kotlin/psi/KtImportInfo.kt\">https://github.com/JetBrains/kotlin/blob/e2010cb90d6b6f420fb6b0cfecc9d7bb3754d342/compiler/psi/src/org/jetbrains/kotlin/psi/KtImportInfo.kt</a></li>\n<li><a href=\"https://github.com/JetBrains/kotlin/blob/e2010cb90d6b6f420fb6b0cfecc9d7bb3754d342/compiler/frontend/src/org/jetbrains/kotlin/resolve/QualifiedExpressionResolver.kt#L153\" target=\"_blank\" title=\"https://github.com/JetBrains/kotlin/blob/e2010cb90d6b6f420fb6b0cfecc9d7bb3754d342/compiler/frontend/src/org/jetbrains/kotlin/resolve/QualifiedExpressionResolver.kt#L153\">https://github.com/JetBrains/kotlin/blob/e2010cb90d6b6f420fb6b0cfecc9d7bb3754d342/compiler/frontend/src/org/jetbrains/kotlin/resolve/QualifiedExpressionResolver.kt#L153</a> (<code>lastPart.expression</code> can be null)</li>\n</ul>",
+        "id": 183143328,
+        "sender_full_name": "matklad",
+        "timestamp": 1576059697
+    },
+    {
+        "content": "<blockquote>\n<p>Again, a sort of theoretical way out of the problem is to use positional ids: number all segments in increasing order and, when passing a sub path to some method, appropriately increment indexes in the return of this method.</p>\n</blockquote>\n<p>that seems like a (theoretically ;) ) nice approach to me</p>",
+        "id": 183145995,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1576061978
+    },
+    {
+        "content": "<p>Note: this will require to add \"size of sub tree\" field to hir::Path and friends.</p>",
+        "id": 183180969,
+        "sender_full_name": "matklad",
+        "timestamp": 1576085936
+    },
+    {
+        "content": "<p>can't we just calculate that on the fly?</p>",
+        "id": 183189005,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1576090906
+    },
+    {
+        "content": "<p>That will work in one direction, but not in the other. Finding nth node in the tree needs subtree sizes, or it’ll be linear (which maybe is ok?)</p>",
+        "id": 183196837,
+        "sender_full_name": "matklad",
+        "timestamp": 1576095220
+    },
+    {
+        "content": "<p>I'm assuming it'd be ok since paths and typerefs aren't going to be very big</p>",
+        "id": 183197521,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1576095606
+    },
+    {
+        "content": "<p>... and would we actually need to ever find the nth node? I think we just need to have the current ID while walking the whole thing, and find the ID from the node</p>",
+        "id": 183244272,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1576144537
+    },
+    {
+        "content": "<p>Maybe i am thinking about somehting different?</p>\n<p>Consider something like <code>VariantData</code>, which stores a type ref for each field. I <em>think</em> we want to have \"ids\" of segments of paths in <em>different</em> fields be different, because we lower at variant granularity (ids might be the same between different structs though).</p>\n<p>In this setup, when we zoom into a specific field, we need to know the largest ID int he preceeding fields</p>",
+        "id": 183244753,
+        "sender_full_name": "matklad",
+        "timestamp": 1576144959
+    },
+    {
+        "content": "<p>TBH, I can't imagine in full details how the scheme would work. I wonder if we should start trying things out? So far, I see these three alternatives (one of which isn't)</p>\n<ul>\n<li>get rid of <code>TypeRef</code> and try to lower ast to types directly (this won't work, because <code>TypeRef</code>s are stored in <code>Body</code> (for casts, for example), and we absolutely can't get rid of body lowering step)</li>\n<li>Add a numeric ID to each path segment, local to each item. and maintain a <code>Map&lt;SegID, ast::Path&gt;</code> and <code>Map&lt;SegID, Resolution&gt;</code> maps</li>\n<li>Don't  add a <em>explicit</em> numeric ID to each path, but still construct maps exactly as a above, by relying on implicit positional IDs.</li>\n</ul>\n<p>That is, the actual IDs should be exactly the same in both cases, the question is how do we store them.<br>\nNote that the last two approaches probably wont' work for paths in modules (for uses and top-level macros), because that would make crate def map more brittle and large. But I think it's ok to use re-derive approach for module paths, expecially if we separate \"paths with ::&lt;&gt;\" for use-style paths</p>",
+        "id": 183245561,
+        "sender_full_name": "matklad",
+        "timestamp": 1576145628
+    },
+    {
+        "content": "<p>Found an interesting case here. Currently the <code>hir::Path</code> doesn't handle nested supers, like <code>super::super::super</code>. A <em>natural</em> way to model that is</p>\n<div class=\"codehilite\"><pre><span></span>enum PathAnchor {\n  Super(u8), // Super(0) == self::\n}\n</pre></div>\n\n\n<p>That is, we lower a sequence of identifiers to a number... This seems like a case where implicit numbering of segments would be the most convenient</p>",
+        "id": 183646677,
+        "sender_full_name": "matklad",
+        "timestamp": 1576588547
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"133169\">@matklad</span> (I'm catching up here -- I've been feeling quite guilty about dropping salsa development on the floor, but I definitely had thoughts about \"side channels\" for diagnostics, I forget if we ever discussed them, I guess they might plausibly apply here too)</p>",
+        "id": 183658832,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1576596640
+    },
+    {
+        "content": "<p>I'll try finish reading but maybe we could also have some sync time for a deeper discussion</p>",
+        "id": 183658881,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1576596667
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> sync time would be valuable, I think! So far, we have two questions:</p>\n<ul>\n<li>the one in this thread</li>\n<li>the one about eager macros</li>\n</ul>\n<p>And there's also the borrowed key work, which I anticipate a lot :)</p>",
+        "id": 183691328,
+        "sender_full_name": "matklad",
+        "timestamp": 1576616592
+    },
+    {
+        "content": "<p>Opened <a href=\"https://github.com/rust-analyzer/rust-analyzer/issues/3407\" target=\"_blank\" title=\"https://github.com/rust-analyzer/rust-analyzer/issues/3407\">https://github.com/rust-analyzer/rust-analyzer/issues/3407</a> to not forget about this.</p>",
+        "id": 189523082,
+        "sender_full_name": "matklad",
+        "timestamp": 1583175255
+    },
+    {
+        "content": "<p>With side tables it might be possible to store them on disk. Maybe that would be easier than implementing persistence in salsa?</p>",
+        "id": 189523350,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1583175395
+    },
+    {
+        "content": "<p>CC <a href=\"https://github.com/salsa-rs/salsa/issues/10\" target=\"_blank\" title=\"https://github.com/salsa-rs/salsa/issues/10\">https://github.com/salsa-rs/salsa/issues/10</a>, of course</p>",
+        "id": 189523408,
+        "sender_full_name": "Laurențiu",
+        "timestamp": 1583175434
+    },
+    {
+        "content": "<p>I think these are mostly orthogonal issues.</p>",
+        "id": 189523484,
+        "sender_full_name": "matklad",
+        "timestamp": 1583175479
+    },
+    {
+        "content": "<p>I also wonder if we can somehow apply the tree identity trick of <code>hir::Semantics</code> here...</p>",
+        "id": 189523555,
+        "sender_full_name": "matklad",
+        "timestamp": 1583175496
+    },
+    {
+        "content": "<p>In one of your posts you said that being lazy and not storing hash-tables is what makes and IDE vs compiler. What changed?</p>",
+        "id": 189524391,
+        "sender_full_name": "std::Veetaha",
+        "timestamp": 1583175963
+    },
+    {
+        "content": "<blockquote>\n<p>not storing hash-tables</p>\n</blockquote>\n<p>Not storing hash tables where you can use an array</p>",
+        "id": 189524711,
+        "sender_full_name": "matklad",
+        "timestamp": 1583176159
+    },
+    {
+        "content": "<blockquote>\n<p>In one of your posts you said that being lazy and not storing hash-tables is what makes and IDE vs compiler. What changed?</p>\n</blockquote>\n<p>I must say I don't really understand this question, as i don't see any kind of contradiction between this discussion and sorbet discussion</p>",
+        "id": 189524836,
+        "sender_full_name": "matklad",
+        "timestamp": 1583176232
+    },
+    {
+        "content": "<p>Sorry, I might've missed the point, I was referring to <a href=\"https://rust-analyzer.github.io/blog/2019/11/13/find-usages.html#compilers-approach\" target=\"_blank\" title=\"https://rust-analyzer.github.io/blog/2019/11/13/find-usages.html#compilers-approach\">this post</a></p>",
+        "id": 189526895,
+        "sender_full_name": "std::Veetaha",
+        "timestamp": 1583177347
+    }
+]

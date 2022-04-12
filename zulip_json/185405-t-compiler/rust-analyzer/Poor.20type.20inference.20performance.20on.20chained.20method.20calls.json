@@ -1,0 +1,92 @@
+[
+    {
+        "content": "<p>I noticed that type inference for r-a's <code>on_request</code> method shows up in profiles a lot:</p>\n<div class=\"codehilite\"><pre><span></span><code>                 9870ms - infer:wait @ on_request\n                     9870ms - infer_query\n                            0ms - body_with_source_map_query (1 calls)\n                            0ms - crate_def_map:wait (560 calls)\n                            0ms - generic_params_query (43 calls)\n                         9824ms - trait_solve_query (337 calls)\n</code></pre></div>\n\n\n<p>It contains a lot of chained method calls, and rustc has historically had problems with that. Maybe chalk does too?</p>",
+        "id": 212456915,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1602004025
+    },
+    {
+        "content": "<p>Not only rustc: kotlinc OOMs on IntelliJ Rust here: <a href=\"https://github.com/intellij-rust/intellij-rust/blob/master/src/main/kotlin/org/rust/ide/formatter/impl/spacing.kt#L35-L36\">https://github.com/intellij-rust/intellij-rust/blob/master/src/main/kotlin/org/rust/ide/formatter/impl/spacing.kt#L35-L36</a></p>",
+        "id": 212457407,
+        "sender_full_name": "matklad",
+        "timestamp": 1602004298
+    },
+    {
+        "content": "<p>Interesting! Would love to have a repro so we can use it as a chalk benchmark, but that might be hard with the amount of types involved</p>",
+        "id": 212478359,
+        "sender_full_name": "detrumi",
+        "timestamp": 1602014822
+    },
+    {
+        "content": "<p>Simply chaining some method calls does not do the trick, but maybe there's some blowup somewhere with all the type parameters and callbacks</p>",
+        "id": 212478853,
+        "sender_full_name": "detrumi",
+        "timestamp": 1602015005
+    },
+    {
+        "content": "<p>Oh, every single method call in the chain ends with a <code>?</code>, that might explain it</p>",
+        "id": 212480202,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1602015566
+    },
+    {
+        "content": "<p>There aren't really many type params involved, and no deeply nested types should be created by this, but I can see why all the <code>?</code> chaining might be bad</p>",
+        "id": 212480380,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1602015644
+    },
+    {
+        "content": "<p>Hmm, so here's a more detailed profile:</p>\n<div class=\"codehilite\"><pre><span></span><code>                 7328ms - infer:wait @ on_request\n                     7328ms - infer_query\n                          198ms - trait_solve_query @ Debug\n                                0ms - crate_def_map:wait (64 calls)\n                                0ms - generic_params_query (4 calls)\n                                0ms - impl_datum (1 calls)\n                                0ms - item_tree_query (16 calls)\n                                1ms - parse_macro_query (17 calls)\n                              196ms - ???\n                          181ms - trait_solve_query @ Debug\n                          184ms - trait_solve_query @ Debug\n                          178ms - trait_solve_query @ Debug\n                          183ms - trait_solve_query @ Debug\n                          179ms - trait_solve_query @ Debug\n                          181ms - trait_solve_query @ Debug\n                          179ms - trait_solve_query @ Debug\n                          180ms - trait_solve_query @ Debug\n                          179ms - trait_solve_query @ Debug\n                          181ms - trait_solve_query @ Debug\n                          179ms - trait_solve_query @ Debug\n                          181ms - trait_solve_query @ Debug\n                          182ms - trait_solve_query @ Debug\n                          182ms - trait_solve_query @ Debug\n                          179ms - trait_solve_query @ Debug\n                          183ms - trait_solve_query @ Debug\n                          180ms - trait_solve_query @ Debug\n                          185ms - trait_solve_query @ Debug\n                          179ms - trait_solve_query @ Debug\n                          181ms - trait_solve_query @ Debug\n                          178ms - trait_solve_query @ Debug\n                          180ms - trait_solve_query @ Debug\n                          181ms - trait_solve_query @ Debug\n                          180ms - trait_solve_query @ Debug\n                          182ms - trait_solve_query @ Debug\n                          182ms - trait_solve_query @ Debug\n                          179ms - trait_solve_query @ Debug\n                          181ms - trait_solve_query @ Debug\n                          181ms - trait_solve_query @ Debug\n                          184ms - trait_solve_query @ Debug\n                          181ms - trait_solve_query @ Debug\n                          183ms - trait_solve_query @ Debug\n                          181ms - trait_solve_query @ Debug\n                          184ms - trait_solve_query @ Debug\n                          179ms - trait_solve_query @ Debug\n                          183ms - trait_solve_query @ Debug\n                          180ms - trait_solve_query @ Debug\n                          180ms - trait_solve_query @ Debug\n                            0ms - body_with_source_map_query (1 calls)\n                            0ms - crate_def_map:wait (542 calls)\n                            0ms - generic_params_query (39 calls)\n                          225ms - trait_solve_query (293 calls)\n</code></pre></div>\n\n\n<p>I guess all the time is spent proving that the request parameters implement <code>Debug</code>?</p>",
+        "id": 212481374,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1602016128
+    },
+    {
+        "content": "<p>Probably the Debug bound here:</p>\n<div class=\"codehilite\"><pre><span></span><code>    pub(crate) fn on&lt;R&gt;(\n        &amp;mut self,\n        f: fn(GlobalStateSnapshot, R::Params) -&gt; Result&lt;R::Result&gt;,\n    ) -&gt; Result&lt;&amp;mut Self&gt;\n    where\n        R: lsp_types::request::Request + &#39;static,\n        R::Params: DeserializeOwned + Send + fmt::Debug + &#39;static,\n        R::Result: Serialize + &#39;static,\n    {\n</code></pre></div>",
+        "id": 212481586,
+        "sender_full_name": "detrumi",
+        "timestamp": 1602016241
+    },
+    {
+        "content": "<p>yeah</p>",
+        "id": 212481723,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1602016315
+    },
+    {
+        "content": "<p>I feel like this shouldn't take that long? All the <code>Debug</code>s are derived on non-generic types, so I'd expect almost all of them to be proven immediately (unless I grossly misunderstand how the trait system works)</p>",
+        "id": 212481918,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1602016395
+    },
+    {
+        "content": "<p>There's some log output like <code>impls_for_trait returned 4822 impls</code>, but it's hard to judge the amount of work being done with such huge output</p>",
+        "id": 212482556,
+        "sender_full_name": "detrumi",
+        "timestamp": 1602016708
+    },
+    {
+        "content": "<p>More verbose logs look like this:</p>\n<div class=\"codehilite\"><pre><span></span><code>  185ms - trait_solve_query @ &lt;&lt;SelectionRangeRequest as Request&gt;::Params as Debug&gt;\n  180ms - trait_solve_query @ &lt;&lt;MatchingBrace as Request&gt;::Params as Debug&gt;\n  182ms - trait_solve_query @ &lt;&lt;MemoryUsage as Request&gt;::Params as Debug&gt;\n  182ms - trait_solve_query @ &lt;&lt;AnalyzerStatus as Request&gt;::Params as Debug&gt;\n  177ms - trait_solve_query @ &lt;&lt;SyntaxTree as Request&gt;::Params as Debug&gt;\n  188ms - trait_solve_query @ &lt;&lt;ExpandMacro as Request&gt;::Params as Debug&gt;\n</code></pre></div>\n\n\n<p>It seems like it might just be doing a bunch of work for <em>every single</em> <code>Debug</code> impl?</p>",
+        "id": 212482908,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1602016890
+    },
+    {
+        "content": "<p>Yeah, it might be searching all types in scope to check for possible answers there</p>",
+        "id": 212484007,
+        "sender_full_name": "detrumi",
+        "timestamp": 1602017481
+    },
+    {
+        "content": "<p>starting to look more like a bug than a perf problem</p>",
+        "id": 212484050,
+        "sender_full_name": "detrumi",
+        "timestamp": 1602017512
+    },
+    {
+        "content": "<p>it's probably the same problem that slows Diesel down, which has been waiting on <a href=\"https://github.com/rust-lang/chalk/pull/401\">https://github.com/rust-lang/chalk/pull/401</a> to be fixed</p>",
+        "id": 212523078,
+        "sender_full_name": "Florian Diebold",
+        "timestamp": 1602055906
+    }
+]

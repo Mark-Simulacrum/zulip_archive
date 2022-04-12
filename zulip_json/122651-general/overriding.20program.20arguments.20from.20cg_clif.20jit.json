@@ -1,0 +1,56 @@
+[
+    {
+        "content": "<p>When using the jit mode of cg_clif I want to pass arguments different from the compiler invocation to the jitted program. On most unix OSes this is a matter of calling the main function with the right argc/argv. On Linux (with glibc) and macOS however this doesn't work. On Linux with glibc an <code>.init_array</code> function is used that is called by the dynamic linker and sets the right global. (<a href=\"https://github.com/rust-lang/rust/blob/0644cc1242dbeebb69b1b2496562751ba5d23ffb/library/std/src/sys/unix/args.rs#L106-L126\">https://github.com/rust-lang/rust/blob/0644cc1242dbeebb69b1b2496562751ba5d23ffb/library/std/src/sys/unix/args.rs#L106-L126</a>) On macOS <code>_NSGetArgc</code> and <code>_NSGetArgv</code> are called. Would it be ok to make <a href=\"https://github.com/rust-lang/rust/blob/0644cc1242dbeebb69b1b2496562751ba5d23ffb/library/std/src/sys/unix/args.rs#L91\"><code>really_init</code></a> <code>#[no_mangle]</code> and public, so that cg_clif can call it with the arguments for the jitted program?</p>\n<p>Another option would be to always store the arguments passed to <code>main</code> and only use the <code>.init_array</code>/<code>_NSGetArgc</code>,<code>_NSGetArgv</code> arguments as fallback when we are a dynamic library.</p>",
+        "id": 212230542,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1601829740
+    },
+    {
+        "content": "<p>Ping?</p>",
+        "id": 212328828,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1601917722
+    },
+    {
+        "content": "<p>Wouldn't that only work for non <code>macos</code>/<code>ios</code> as only this targets do have a <code>really_init</code> function which initialized/sets <code>argc</code>/<code>argv</code>.</p>\n<p>On <code>macos</code> any call to <code>args()</code> will call <code>_NSGetArgc</code>  &amp; <code>_NSGetArgv</code>, one ios something similar but more complex.</p>\n<p>So should a new public no_mangle <code>really_init</code> be platform specific, or should it be available for all platforms including macos/ios?</p>",
+        "id": 212331258,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1601919047
+    },
+    {
+        "content": "<p>I prefer it to be available on all OSes that allow JIT compilation. (aka no need for wasm or ios support)</p>",
+        "id": 212332033,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1601919441
+    },
+    {
+        "content": "<p>The alternative as I already mentioned is to always prefer the <code>main</code> args over any other form of getting the arguments.</p>",
+        "id": 212332168,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1601919503
+    },
+    {
+        "content": "<p>As far as I can tell on all unix platforms (including <code>macos</code>) we should be able to have something like a <code>#[no_mangle]</code>,<code>pub</code>  <code>__rust_libstd_internal_set_arguments</code>  function (or whatever prefix is used for rust libstd <br>\ninternal <code>no_mangle</code> things).  Through <code>macos</code> we would need to call <code>_NSGetArgc</code> and <code>_NSGetArgv</code> and then call the <code>really_init</code> function with that results. But what I can tell from <a href=\"https://opensource.apple.com/source/Libc/Libc-1158.50.2/sys/crt_externs.c.auto.html\">the impl of them</a> this should be no relevant overhead.</p>\n<ul>\n<li>\n<p>On <code>ios</code> the overhead of getting the args is higher, through probably not high enough to be a problem.</p>\n</li>\n<li>\n<p>On <code>windows</code> it's a problem as windows only passes in a single string and then you have to apply windows program arguments parsing algorithm. Currently we do that <em>every time</em> <code>args()</code> is called as far as I can tell which is a bit wasteful.  On the other hand assuming that programs not using <code>args()</code> don't get any args  doing it once always at the beginning of the program seems fine <em>except that we would increase mem consumtion</em>. (As we need to store the parsed args during the lifetime of the program).</p>\n</li>\n<li>\n<p><code>cloudabi</code> has no args</p>\n</li>\n<li>\n<p><code>Wasm</code> has  no args</p>\n</li>\n<li>\n<p>On <code>wasi</code>  there is no <code>argsv</code> but a copy <code>argsv</code> into buffer so similar to windows we would need to store a  additional version of the arguments in program memory</p>\n</li>\n<li>\n<p><code>vxworks</code> does nearly the same as gnu/linux but instead of using  atomics for the <code>ARGV</code>/<code>ARGC</code> they use plain <code>static mut</code></p>\n</li>\n<li>\n<p><code>hermit</code> does what <code>vxworks</code> does</p>\n</li>\n<li>\n<p><code>sgx</code> already does read args on init and stores them in a read form in a global variable (but uses a atomic usize of an pointer to a  <code>Box&lt;Vec&lt;OsString&gt;&gt;</code></p>\n</li>\n<li>\n<p><code>unsupported</code> has obviously no args either</p>\n</li>\n</ul>",
+        "id": 212336469,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1601921644
+    },
+    {
+        "content": "<hr>\n<p><strong>TL;DR:</strong> On some platforms having a general <code>really_init</code>/<code>set_programm_arguments</code> functions can:</p>\n<ul>\n<li>lead to memory overhead (roughly of the size of the args + a view bytes)</li>\n<li>lead to computation overhead (winodws, only if many args are passed in but <code>args()</code> was never called so it doesn't matter)</li>\n</ul>",
+        "id": 212336802,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1601921828
+    },
+    {
+        "content": "<p>I think If we change the parameters of <code>really_init</code> to accept a single <code>LPWSTR</code> on windows  instead of <code>argc</code>/<code>argv</code> then for all platforms except WASI we can eliminate the additional memory cost I think.</p>\n<p>And wasi is no JIT target so not having a <code>really_init</code> function should be fine.</p>",
+        "id": 212338285,
+        "sender_full_name": "Philipp Korber",
+        "timestamp": 1601922504
+    },
+    {
+        "content": "<p>Maybe we could have an <code>__rust_libstd_internals_set_arguments</code> function that is only used for jit execution and on platforms where storing argc/argv is cheap and when that function is not called fallback to a platform specific implementation without caching the results.</p>",
+        "id": 212345817,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1601926173
+    }
+]

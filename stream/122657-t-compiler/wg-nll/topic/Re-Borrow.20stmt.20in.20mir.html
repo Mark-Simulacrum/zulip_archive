@@ -1,0 +1,118 @@
+<html>
+<head><meta charset="utf-8"><title>Re-Borrow stmt in mir · t-compiler/wg-nll · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122657-t-compiler/wg-nll/index.html">t-compiler/wg-nll</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122657-t-compiler/wg-nll/topic/Re-Borrow.20stmt.20in.20mir.html">Re-Borrow stmt in mir</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="217435456"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122657-t-compiler/wg-nll/topic/Re-Borrow%20stmt%20in%20mir/near/217435456" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> BN <a href="https://zulip-archive.rust-lang.org/stream/122657-t-compiler/wg-nll/topic/Re-Borrow.20stmt.20in.20mir.html#217435456">(Nov 20 2020 at 17:47)</a>:</h4>
+<p>Hi, I'm working on <a href="https://github.com/rust-lang/rust/issues/74706">#74706</a>, Ive talked to Niko about this and he suggested I post here.</p>
+<p>This is the example of the issue:</p>
+<div class="codehilite"><pre><span></span><code>struct Foo;
+struct Wrapper&lt;T&gt;(T);
+
+fn use_val&lt;T&gt;(_: &amp;mut T) {}
+
+impl Foo {
+    fn call_it(&amp;mut self) {
+        use_val(&amp;mut Wrapper(self));
+        self;
+    }
+}
+</code></pre></div>
+<p>The goal is to be able to suggest a re-borrow in <code>use_val(&amp;mut Wrapper(self))</code>. The original idea was to replace the move statement in the mir body with a re-borrow, update the local_decls of the body, run move analysis on the new body and create the borrow set. Then I wanted to use <code>generate_invalidates</code>  to check whether the re-borrow would violate any other borrows, but the function is not doing what I expected it to do.</p>
+<p>The re-borrow statement is created  in the following way: </p>
+<div class="codehilite"><pre><span></span><code>        match move_stmt.kind {
+            StatementKind::Assign(box (lhs, Rvalue::Use(Operand::Move(moved_place)))) =&gt; {
+                let borrow_kind = BorrowKind::Mut { allow_two_phase_borrow: false };
+                let projection = List::from_arena(tcx.arena, &amp;[PlaceElem::Deref]);
+                let new_place = Place { local: moved_place.local, projection };
+
+                let reborrow_stmt = Statement {
+                    source_info: move_stmt.source_info,
+                    kind: StatementKind::Assign(Box::new((
+                        lhs,
+                        Rvalue::Ref(region, borrow_kind, new_place),
+                    ))),
+                };
+</code></pre></div>
+<p>where region is the same as that of the mutable reference, that is moved in the original program. Then we create a new LocalDecl for the assigned place using the same type as the LocalDecl of the moved value. The resulting body is the same body, with the exception of some source information, we get if we use a re-borrow in the original program instead of the move of the mutable reference:</p>
+<p>This are the basic blocks of the program:</p>
+<div class="codehilite"><pre><span></span><code>2:rustc    basic_blocks: [
+2:rustc        BasicBlockData {
+2:rustc            statements: [
+2:rustc                StorageLive(_2),
+2:rustc                StorageLive(_3),
+2:rustc                _3 = &amp;mut (*_1),
+2:rustc                _2 = Wrapper::&lt;&amp;mut Foo&gt;(move _3),
+2:rustc                StorageDead(_3),
+2:rustc                FakeRead(ForLet, _2),
+2:rustc                StorageLive(_4),
+2:rustc                StorageLive(_5),
+2:rustc                StorageLive(_6),
+2:rustc                _6 = &amp;mut _2,
+2:rustc                _5 = &amp;mut (*_6),
+2:rustc            ],
+2:rustc            terminator: Some(
+2:rustc                Terminator {
+2:rustc                    source_info: SourceInfo {
+2:rustc                        span: /Users/bn/Documents/Rust/rust_error_samples/74706.rs:10:7: 10:28 (#0),
+2:rustc                        scope: scope[1],
+2:rustc                    },
+2:rustc                    kind: _4 = use_val::&lt;Wrapper&lt;&amp;mut Foo&gt;&gt;(move _5) -&gt; [return: bb1, unwind: bb2],
+2:rustc                },
+2:rustc            ),
+2:rustc            is_cleanup: false,
+2:rustc        },
+2:rustc        BasicBlockData {
+2:rustc            statements: [
+2:rustc                StorageDead(_5),
+2:rustc                StorageDead(_6),
+2:rustc                StorageDead(_4),
+2:rustc                StorageLive(_7),
+2:rustc                _7 = move _2,
+2:rustc                FakeRead(ForLet, _7),
+2:rustc                StorageLive(_8),
+2:rustc                _8 = move _1,
+2:rustc                StorageDead(_8),
+2:rustc                _0 = const (),
+2:rustc                StorageDead(_7),
+2:rustc                StorageDead(_2),
+2:rustc            ],
+2:rustc            terminator: Some(
+2:rustc                Terminator {
+2:rustc                    source_info: SourceInfo {
+2:rustc                        span: /Users/bn/Documents/Rust/rust_error_samples/74706.rs:19:6: 19:6 (#0),
+2:rustc                        scope: scope[0],
+2:rustc                    },
+2:rustc                    kind: return,
+2:rustc                },
+2:rustc            ),
+2:rustc            is_cleanup: false,
+2:rustc        },
+2:rustc        BasicBlockData {
+2:rustc            statements: [],
+2:rustc            terminator: Some(
+2:rustc                Terminator {
+2:rustc                    source_info: SourceInfo {
+2:rustc                        span: /Users/bn/Documents/Rust/rust_error_samples/74706.rs:8:5: 19:6 (#0),
+2:rustc                        scope: scope[0],
+2:rustc                    },
+2:rustc                    kind: resume,
+2:rustc                },
+2:rustc            ),
+2:rustc            is_cleanup: true,
+2:rustc        },
+2:rustc    ],
+</code></pre></div>
+<p>The borrowck analysis that is done inside the <code>ResultsVisitor</code> of <code>MirBorrowckCtxt</code> doesn't find a conflict in the new body, but <code>generate_invalidates</code> does. From looking at the function it should perform the same conflict analysis as the Visitor, but since we already created the borrow_set prior to running it, it catches the borrow of the access_place (*_1). Can anybody maybe suggest some options here? Is there still a way to use the functionality of <code>generate_invalidates</code> or is the only option to extract the 'conflict detection' part of <code>ResultsVisitor</code> into a new analysis function?</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

@@ -1,0 +1,293 @@
+<html>
+<head><meta charset="utf-8"><title>constants in patterns · t-compiler · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/index.html">t-compiler</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html">constants in patterns</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="192783049"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783049" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783049">(Apr 03 2020 at 10:14)</a>:</h4>
+<p>TLDR: I'm wondering if we should keep the "lazy constant pattern" approach around, which ensures that we don't expand a <code>const FOO: &amp;[u8] = include_bytes!(super_large_file);</code> if used in a pattern. It has a significant cost to keep around, but saves some compile time for large constants.</p>
+<p>While working on <a href="https://github.com/rust-lang/rust/pull/70699" title="https://github.com/rust-lang/rust/pull/70699">https://github.com/rust-lang/rust/pull/70699</a> I've tried to analyze our entire setup for how constants are used in patterns. We have a very whacky scheme that I've just bolted on more parts over the years. I think we should implement a really thought through scheme once and for all instead of playing whack-a-mole with ICEs and weird "unreachable pattern" bugs. Right now we have both <a href="https://github.com/rust-lang/rust/blob/master/src/librustc_mir_build/hair/pattern/const_to_pat.rs#L20" title="https://github.com/rust-lang/rust/blob/master/src/librustc_mir_build/hair/pattern/const_to_pat.rs#L20">https://github.com/rust-lang/rust/blob/master/src/librustc_mir_build/hair/pattern/const_to_pat.rs#L20</a> and <a href="https://github.com/rust-lang/rust/blob/master/src/librustc_mir_build/hair/pattern/_match.rs#L260" title="https://github.com/rust-lang/rust/blob/master/src/librustc_mir_build/hair/pattern/_match.rs#L260">https://github.com/rust-lang/rust/blob/master/src/librustc_mir_build/hair/pattern/_match.rs#L260</a> which expand different parts of constants to patterns. Amusingly nowadays both of these are just invoked from <a href="https://github.com/rust-lang/rust/blob/master/src/librustc_mir_build/hair/pattern/check_match.rs#L136" title="https://github.com/rust-lang/rust/blob/master/src/librustc_mir_build/hair/pattern/check_match.rs#L136">https://github.com/rust-lang/rust/blob/master/src/librustc_mir_build/hair/pattern/check_match.rs#L136</a> right after each other, so merging them will strictly be an improvement.</p>
+<p>But even beyond that, we don't actually expand all constants fully into their components. There is/was a worry that if we expanded a <code>const FOO: &amp;[u8] = include_bytes!(some_huge_file);</code> that compilation would get very slow (as we'd create a slice pattern with one sub-pattern per byte in that file. As const eval gets more powerful, other, similarly large constants may exist. Out of that reason we have a lazy way to expand constants only when needed, but that is a rather buggy scheme (whether a const pattern comes before or after a slice pattern makes compilation behave differently) that I don't really grok (as in I understand all parts of it but I have never managed to hold the entire thing in my head at once).</p>
+<p>So... one way to go forward would be to just expand all constants to their component patterns. This would be the easiest way, as we have all the support for user-written patterns already existing. It would be a nicely modular way to keep handling of constants out of the pattern match code.<br>
+This also gets very problematic in the presence of slices of zsts, as the user can specify a constant with a repeat expression, which creates a very small constant, but expanding it to a full slice pattern gives us a sub-pattern per slice element.</p>
+<p>If we want to keep a lazy scheme, everything becomes a bit more complex. The problem is our exhaustiveness checks. The exhaustiveness checks need to look at all fields. Right now they do this in the hybrid system where some things are expanded and some are not. This is also where the ordering problem comes from. If a constant is used before a slice pattern, the constant did not get expanded and was treated as a single unknown value. So even if a following slice pattern had the exact same value as the constant, we treated it as separate and did not emit an unreachable pattern lint. If the constant comes after, we already know that we are looking at slice patterns of certain lengths and check the constant against that. If we want to fix these things correctly, we'll need to fetch the length of const slice patterns without looking at their elements. The current implementation treats constants as non-aggregate (<a href="https://github.com/rust-lang/rust/blob/548afdbe1a600ba868ac00acc4e94cca0242b001/src/librustc_mir_build/hair/pattern/_match.rs#L956" title="https://github.com/rust-lang/rust/blob/548afdbe1a600ba868ac00acc4e94cca0242b001/src/librustc_mir_build/hair/pattern/_match.rs#L956">https://github.com/rust-lang/rust/blob/548afdbe1a600ba868ac00acc4e94cca0242b001/src/librustc_mir_build/hair/pattern/_match.rs#L956</a>).</p>
+<p>So my question is whether I should put in work into fixing the lazy const scheme we have or make it dead code by expanding all constants into their smallest components and then removing it.</p>
+
+
+
+<a name="192783185"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783185" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783185">(Apr 03 2020 at 10:15)</a>:</h4>
+<p>wouldn't it better, for byte slices specifically, to represent their elements as <code>Vec&lt;Pat&gt; | &amp;'tcx [u8]</code> or w/e it is?</p>
+
+
+
+<a name="192783210"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783210" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783210">(Apr 03 2020 at 10:15)</a>:</h4>
+<p>wrap that in a type and provide element querying methods</p>
+
+
+
+<a name="192783277"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783277" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783277">(Apr 03 2020 at 10:16)</a>:</h4>
+<p>you can easily generate other huge slice patterns</p>
+
+
+
+<a name="192783296"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783296" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783296">(Apr 03 2020 at 10:16)</a>:</h4>
+<p>can you?</p>
+
+
+
+<a name="192783298"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783298" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783298">(Apr 03 2020 at 10:16)</a>:</h4>
+<p>ZST arrays in constants created via repeat expressions are one thing</p>
+
+
+
+<a name="192783318"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783318" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783318">(Apr 03 2020 at 10:16)</a>:</h4>
+<p>okay so repeats and byte slices</p>
+
+
+
+<a name="192783321"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783321" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783321">(Apr 03 2020 at 10:16)</a>:</h4>
+<p>but with const eval you can basically generate any huge constant you want at some point</p>
+
+
+
+<a name="192783337"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783337" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783337">(Apr 03 2020 at 10:16)</a>:</h4>
+<p>oh I see that's the concern</p>
+
+
+
+<a name="192783365"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783365" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783365">(Apr 03 2020 at 10:17)</a>:</h4>
+<p>and you can convert <code>include_bytes!</code> (which give you an array) to any super huge type of your own</p>
+
+
+
+<a name="192783402"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783402" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783402">(Apr 03 2020 at 10:17)</a>:</h4>
+<p>the last thing works with unions right now</p>
+
+
+
+<a name="192783421"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783421" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783421">(Apr 03 2020 at 10:17)</a>:</h4>
+<p>okay but I guess that gets into how we rely on "structural match"</p>
+
+
+
+<a name="192783508"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783508" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783508">(Apr 03 2020 at 10:18)</a>:</h4>
+<p>do we use <code>==</code> and assume we don't know the pattern? do we only try to convert the const into a pattern if we can polymorphically evaluate it?</p>
+
+
+
+<a name="192783533"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783533" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783533">(Apr 03 2020 at 10:18)</a>:</h4>
+<p>yes and no</p>
+
+
+
+<a name="192783542"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783542" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783542">(Apr 03 2020 at 10:18)</a>:</h4>
+<p>it's fairly arbitrary</p>
+
+
+
+<a name="192783566"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783566" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783566">(Apr 03 2020 at 10:18)</a>:</h4>
+<p>that's what I'm trying to say, the current status quo is a mess</p>
+
+
+
+<a name="192783587"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783587" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783587">(Apr 03 2020 at 10:19)</a>:</h4>
+<p>sometimes you can break things just by introducing another level of indirection in the type that you match on</p>
+
+
+
+<a name="192783705"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783705" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783705">(Apr 03 2020 at 10:20)</a>:</h4>
+<p>also we error if we can't evaluate a constant</p>
+
+
+
+<a name="192783744"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783744" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783744">(Apr 03 2020 at 10:20)</a>:</h4>
+<p>so generic parameters of any kind are not a concern</p>
+
+
+
+<a name="192783757"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783757" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783757">(Apr 03 2020 at 10:21)</a>:</h4>
+<p>unless we want to support this at some point</p>
+
+
+
+<a name="192783792"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192783792" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192783792">(Apr 03 2020 at 10:21)</a>:</h4>
+<p>then we do need the lazy approach anyway</p>
+
+
+
+<a name="192789360"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789360" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> varkor <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789360">(Apr 03 2020 at 11:24)</a>:</h4>
+<p>are people doing things like <code>const FOO: &amp;[u8] = include_bytes!(super_large_file);</code>?</p>
+
+
+
+<a name="192789368"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789368" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> varkor <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789368">(Apr 03 2020 at 11:24)</a>:</h4>
+<p>this seems like something that ought not to be a problem in practice</p>
+
+
+
+<a name="192789382"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789382" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789382">(Apr 03 2020 at 11:25)</a>:</h4>
+<p>it likely isn't</p>
+
+
+
+<a name="192789395"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789395" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> varkor <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789395">(Apr 03 2020 at 11:25)</a>:</h4>
+<p>that is, it would be a nice surprise to users if it turned out rustc optimised for it, but there's no good reason it should</p>
+
+
+
+<a name="192789420"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789420" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> varkor <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789420">(Apr 03 2020 at 11:25)</a>:</h4>
+<p>considering how long pattern matching on consts has been buggy, I think it'd be better to drop the lazy handling and just fix up the existing issues</p>
+
+
+
+<a name="192789428"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789428" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789428">(Apr 03 2020 at 11:25)</a>:</h4>
+<p>we could also warn on constants in patterns that get expanded to more than SOME_LIMIT elements</p>
+
+
+
+<a name="192789432"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789432" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> varkor <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789432">(Apr 03 2020 at 11:25)</a>:</h4>
+<p>if loading in large consts is the only concern</p>
+
+
+
+<a name="192789472"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789472" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789472">(Apr 03 2020 at 11:26)</a>:</h4>
+<p>it is</p>
+
+
+
+<a name="192789473"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789473" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> varkor <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789473">(Apr 03 2020 at 11:26)</a>:</h4>
+<p>ah, that's a good idea too</p>
+
+
+
+<a name="192789504"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789504" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> varkor <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789504">(Apr 03 2020 at 11:26)</a>:</h4>
+<p>it's going to be obvious the compiler is taking a long time to do something if a user accidentally includes something gargantuan too</p>
+
+
+
+<a name="192789524"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789524" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> varkor <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789524">(Apr 03 2020 at 11:26)</a>:</h4>
+<p>I can only really see this happening by accident</p>
+
+
+
+<a name="192789757"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789757" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789757">(Apr 03 2020 at 11:30)</a>:</h4>
+<p>I've seen a few people do it intentionally</p>
+
+
+
+<a name="192789765"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789765" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789765">(Apr 03 2020 at 11:30)</a>:</h4>
+<p>it seems like a pretty obvious way to bundle large blobs with an application</p>
+
+
+
+<a name="192789771"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789771" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789771">(Apr 03 2020 at 11:30)</a>:</h4>
+<p>In priroda I did it intentionally to include all resources in a static bundle: <a href="https://github.com/oli-obk/priroda/blob/753b539752b7267ff76bea7366035cc1b97ea789/src/main.rs#L217-L241" title="https://github.com/oli-obk/priroda/blob/753b539752b7267ff76bea7366035cc1b97ea789/src/main.rs#L217-L241">https://github.com/oli-obk/priroda/blob/753b539752b7267ff76bea7366035cc1b97ea789/src/main.rs#L217-L241</a></p>
+
+
+
+<a name="192789772"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789772" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> eddyb <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789772">(Apr 03 2020 at 11:30)</a>:</h4>
+<p>yeah but not used for patterns</p>
+
+
+
+<a name="192789915"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789915" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789915">(Apr 03 2020 at 11:32)</a>:</h4>
+<p>It's not just slow in patterns</p>
+
+
+
+<a name="192789924"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192789924" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Jonas Schievink  [he/him] <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192789924">(Apr 03 2020 at 11:32)</a>:</h4>
+<p>Or, well, was</p>
+
+
+
+<a name="192858577"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192858577" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192858577">(Apr 03 2020 at 20:17)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="124288">oli</span> <a href="#narrow/stream/131828-t-compiler/topic/constants.20in.20patterns/near/192783744" title="#narrow/stream/131828-t-compiler/topic/constants.20in.20patterns/near/192783744">said</a>:</p>
+<blockquote>
+<p>so generic parameters of any kind are not a concern</p>
+</blockquote>
+<p>Do you mean generic constants here, e.g., <code>const Foo&lt;T&gt;: u8 = expr;</code>?</p>
+
+
+
+<a name="192858642"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192858642" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192858642">(Apr 03 2020 at 20:18)</a>:</h4>
+<p>Presumably those would be handled as associated constants are, namely, they result in an error</p>
+
+
+
+<a name="192901190"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192901190" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192901190">(Apr 04 2020 at 10:30)</a>:</h4>
+<p>No I mean both associated constants and const generic parameters of the current function</p>
+
+
+
+<a name="192901196"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192901196" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oli <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192901196">(Apr 04 2020 at 10:30)</a>:</h4>
+<p>But in the RFC for <a href="https://github.com/rust-lang/rust/issues/31434" title="https://github.com/rust-lang/rust/issues/31434">https://github.com/rust-lang/rust/issues/31434</a> there's talk about allowing such constants</p>
+
+
+
+<a name="192909321"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192909321" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192909321">(Apr 04 2020 at 14:10)</a>:</h4>
+<p>Ah; If associated or generic constants would be mentionable in patterns, then they'd need to be some sort of opaque pattern; but that's I think something that definitely would need an RFC</p>
+
+
+
+<a name="192909377"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/192909377" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> centril <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#192909377">(Apr 04 2020 at 14:10)</a>:</h4>
+<p><span class="user-mention" data-user-id="124288">@oli</span> so I wouldn't worry about it this year</p>
+
+
+
+<a name="193037130"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/131828-t-compiler/topic/constants%20in%20patterns/near/193037130" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> varkor <a href="https://zulip-archive.rust-lang.org/stream/131828-t-compiler/topic/constants.20in.20patterns.html#193037130">(Apr 06 2020 at 12:59)</a>:</h4>
+<p>so far, all const generics are disallowed in patterns, so it's something we can not think about entirely for now</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

@@ -1,0 +1,104 @@
+[
+    {
+        "content": "<p>Hi! I need some help for an invalid predicate check on blanket impls in rustdoc (done <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustdoc/clean/blanket_impl.rs#L39-L93\">here</a>). So with the following code:</p>\n<div class=\"codehilite\"><pre><span></span><code>pub struct Foo(*const i8);\npub trait Whatever: Send {}\nimpl&lt;T: Send + ?Sized&gt; Whatever for T {}\n</code></pre></div>\n<p>It considers that <code>Whatever</code> is implemented on <code>Foo</code> whereas <code>Foo</code> is <code>!Send</code>. I think the obligations are incomplete but I'm bit lost at how to force the compiler to check \"better\". I replaced the drop from here with the following code (following <span class=\"user-mention\" data-user-id=\"124288\">@oli</span> recommendation):</p>\n<div class=\"codehilite\"><pre><span></span><code>for obligation in obligations {\n    match infcx.evaluate_obligation(&amp;obligation) {\n        Ok(eval_result) if eval_result.may_apply() =&gt; {}\n        Err(traits::OverflowError::Canonical) =&gt; {}\n        Err(traits::OverflowError::ErrorReporting) =&gt; {}\n        _ =&gt; {\n            return false;\n        }\n    }\n}\n</code></pre></div>\n<p>Unfortunately, it didn't solve the issue. Any idea why? Any help would be very appreciated <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 272404633,
+        "sender_full_name": "GuillaumeGomez",
+        "timestamp": 1645192815
+    },
+    {
+        "content": "<p>Is the problem that it returns false wrongly or that it returns true wrongly?</p>",
+        "id": 272408696,
+        "sender_full_name": "oli",
+        "timestamp": 1645194885
+    },
+    {
+        "content": "<p>It returns true wrongly. It shouldn't be validated.</p>",
+        "id": 272412423,
+        "sender_full_name": "GuillaumeGomez",
+        "timestamp": 1645196729
+    },
+    {
+        "content": "<p>I guess the <code>may_apply</code> is wrong and should be <code>false</code> instead.</p>",
+        "id": 272412469,
+        "sender_full_name": "GuillaumeGomez",
+        "timestamp": 1645196755
+    },
+    {
+        "content": "<p>Well... <code>may_apply</code> does not mean <code>applies</code> so there are indeed some things that hit the may_apply path that should return false, but not sure without a deeper review if we can get a proper answer</p>",
+        "id": 272419055,
+        "sender_full_name": "oli",
+        "timestamp": 1645199886
+    },
+    {
+        "content": "<p>You may have to spin up a selectioncontext and put all the obligations into it and see if we can resolve everything</p>",
+        "id": 272419110,
+        "sender_full_name": "oli",
+        "timestamp": 1645199919
+    },
+    {
+        "content": "<p>By using <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_trait_selection/traits/struct.SelectionContext.html#method.confirm_candidate\">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_trait_selection/traits/struct.SelectionContext.html#method.confirm_candidate</a> ?</p>",
+        "id": 272420153,
+        "sender_full_name": "GuillaumeGomez",
+        "timestamp": 1645200375
+    },
+    {
+        "content": "<p>Or do you have another method in mind?</p>",
+        "id": 272420169,
+        "sender_full_name": "GuillaumeGomez",
+        "timestamp": 1645200383
+    },
+    {
+        "content": "<p>Ah, I gave you the low level interface, sorry. Use <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_infer/traits/trait.TraitEngine.html#tymethod.register_predicate_obligation\">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_infer/traits/trait.TraitEngine.html#tymethod.register_predicate_obligation</a> to register all obligations and <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_infer/traits/trait.TraitEngine.html#tymethod.select_all_or_error\">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_infer/traits/trait.TraitEngine.html#tymethod.select_all_or_error</a> to solve them all together.</p>",
+        "id": 272507038,
+        "sender_full_name": "oli",
+        "timestamp": 1645263753
+    },
+    {
+        "content": "<p>If you get a nonempty vec, then it didnt apply</p>",
+        "id": 272507060,
+        "sender_full_name": "oli",
+        "timestamp": 1645263797
+    },
+    {
+        "content": "<p>You get a trait engine via <code>&lt;dyn TraitEngine&lt;'_&gt;&gt;::new(tcx</code></p>",
+        "id": 272507194,
+        "sender_full_name": "oli",
+        "timestamp": 1645263960
+    },
+    {
+        "content": "<p>Nice, thanks for the explanations! I will give it a try shortly</p>",
+        "id": 272516639,
+        "sender_full_name": "GuillaumeGomez",
+        "timestamp": 1645275079
+    },
+    {
+        "content": "<p>So I replaced the <code>drop(obligations)</code> with:</p>\n<div class=\"codehilite\"><pre><span></span><code>let mut fcx = FulfillmentContext::new();\nfor obligation in obligations {\n    fcx.register_predicate_obligation(&amp;infcx, obligation);\n}\nif !fcx.select_all_or_error(&amp;infcx).is_empty() {\n    return false;\n}\n</code></pre></div>\n<p>Still not working. I gave a try to use <code>register_predicate_obligation</code> in the loop below, but the only result was the removal of a few other blanket impls (which are valid) but not the one we're trying to remove. So my main hypothesis is that I badly used the code you provided to me. Any idea what I did badly?</p>",
+        "id": 272518120,
+        "sender_full_name": "GuillaumeGomez",
+        "timestamp": 1645276910
+    },
+    {
+        "content": "<p>Huh, more got removed? Did you duplicate the select_all_or_error? If so, try only having a single one after you added all obligations</p>",
+        "id": 272520649,
+        "sender_full_name": "oli",
+        "timestamp": 1645279749
+    },
+    {
+        "content": "<p>In any case, I don't see a way forward but to dig into some logs and figure out where things go sideways</p>",
+        "id": 272520663,
+        "sender_full_name": "oli",
+        "timestamp": 1645279777
+    },
+    {
+        "content": "<p>No, didn't duplicate, simply changed where it was filled and called (in the loop below the drop). I'll gather some logs if you want :)</p>",
+        "id": 272590128,
+        "sender_full_name": "GuillaumeGomez",
+        "timestamp": 1645361072
+    },
+    {
+        "content": "<p>This is more of a case of me or you needing to read logs and source at the same time and figuring out what's going on, less of a you producing logs and me being any use in reading them</p>",
+        "id": 272592615,
+        "sender_full_name": "oli",
+        "timestamp": 1645363998
+    }
+]

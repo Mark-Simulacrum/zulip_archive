@@ -1,0 +1,361 @@
+<html>
+<head><meta charset="utf-8"><title>serde enums w/ other (issue 912) · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html">serde enums w/ other (issue 912)</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="230797746"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230797746" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230797746">(Mar 18 2021 at 01:21)</a>:</h4>
+<p>Hi all,</p>
+<p>I was looking at implementing something to fix <a href="https://github.com/serde-rs/serde/issues/912">Issue 912</a> for serde, since it would be really nice to have for the project I'm working on. I got a very minimal version working for serialization for what I need it to do which is handle this case</p>
+<div class="codehilite"><pre><span></span><code>#[derive(Serialize)]
+enum Foo {
+    Bar,
+    Baz,
+    #[serde(other)]
+    Other(String),
+}
+</code></pre></div>
+<p>Where I want any unknown string to get captured in the <code>Other</code> variant. Implementing my specific use case wasn't bad for serialization and I'd imagine deserialization won't be bad either. But then i started thinking about how it should interact with all the different combinations of enum representation and variant types since in theory it would make sense to handle the broader use cases.  I came up with these two tables to show all the different combinations of potential serialization and deserialization behavior, but I really wasn't sure about whether I chose the right behavior. I liked the idea of all of them ending up at the same type going through a serialization and deserialization loop, but for externally tagged enums in particular there is a more obvious serialization of { "Other": T } that I didn't do that would ruin my thinking.  (Also, some of these options probably could leave the option open to store an unknown variant name in another variable maybe through some sort of attribute but that would add complexity and didn't seem necessary to add some useful functionality.)</p>
+<h1>Serde Serialization Behavior</h1>
+<table>
+<thead>
+<tr>
+<th align="left">Representation::Type</th>
+<th align="left">Normal JSON Serialization</th>
+<th align="left">Current w/ #[serde(other)]</th>
+<th align="left">Desired w/ #[serde(other)]</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">External::Other</td>
+<td align="left">"Other"</td>
+<td align="left">"Other"</td>
+<td align="left">"Other"</td>
+</tr>
+<tr>
+<td align="left">External::Other(T)</td>
+<td align="left">{ "Other": T }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* T</td>
+</tr>
+<tr>
+<td align="left">External::Other(T,)</td>
+<td align="left">{ "Other": [T, ] }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* [T, ]</td>
+</tr>
+<tr>
+<td align="left">External::Other{..T}</td>
+<td align="left">{ "Other": {..T} }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* {..T}</td>
+</tr>
+<tr>
+<td align="left">Internal::Other</td>
+<td align="left">{ "type": "Other" }</td>
+<td align="left">{ "type": "Other" }</td>
+<td align="left">{ "type": "Other" }</td>
+</tr>
+<tr>
+<td align="left">Internal::Other(T)</td>
+<td align="left">{ "type": "Other", ..T }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* { "type": "Other", ..T }</td>
+</tr>
+<tr>
+<td align="left">Internal::Other(T,)</td>
+<td align="left">Not Allowed</td>
+<td align="left">Not Allowed</td>
+<td align="left">Not Allowed</td>
+</tr>
+<tr>
+<td align="left">Internal::Other{..T}</td>
+<td align="left">{ "type": "Other", ..T }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* { "type": "Other", ..T }</td>
+</tr>
+<tr>
+<td align="left">Adjacent::Other</td>
+<td align="left">{ "type": "Other"}</td>
+<td align="left">{ "type": "Other" }</td>
+<td align="left">{ "type": "Other" }</td>
+</tr>
+<tr>
+<td align="left">Adjacent::Other(T)</td>
+<td align="left">{ "type": "Other", "content": T }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* { "type": "Other" : "content": T }</td>
+</tr>
+<tr>
+<td align="left">Adjacent::Other(T,)</td>
+<td align="left">{ "type": "Other", "content": [T, ] }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* { "type": "Other" : "content": [T, ] }</td>
+</tr>
+<tr>
+<td align="left">Adjacent::Other{..T}</td>
+<td align="left">{ "type": "Other", "content": {..T} }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* { "type": "Other" : "content": {..T} }</td>
+</tr>
+<tr>
+<td align="left">Untagged::Other</td>
+<td align="left">null</td>
+<td align="left">Not Allowed</td>
+<td align="left">* null</td>
+</tr>
+<tr>
+<td align="left">Untagged::Other(T)</td>
+<td align="left">T</td>
+<td align="left">Not Allowed</td>
+<td align="left">* T</td>
+</tr>
+<tr>
+<td align="left">Untagged::Other(T,)</td>
+<td align="left">[T, ]</td>
+<td align="left">Not Allowed</td>
+<td align="left">* [T, ]</td>
+</tr>
+<tr>
+<td align="left">Untagged::Other{..T}</td>
+<td align="left">{..T}</td>
+<td align="left">Not Allowed</td>
+<td align="left">* {..T}</td>
+</tr>
+</tbody>
+</table>
+<h1>Serde Deserialization Behavior</h1>
+<table>
+<thead>
+<tr>
+<th align="left">Representation::Type</th>
+<th align="left">JSON Representation</th>
+<th align="left">Current w/ #[serde(other)]</th>
+<th align="left">Desired w/ #[serde(other)]</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">External::Other</td>
+<td align="left">null or "Unknown"</td>
+<td align="left">External::Other</td>
+<td align="left">External::Other</td>
+</tr>
+<tr>
+<td align="left">External::Other(T)</td>
+<td align="left">T</td>
+<td align="left">Not Allowed</td>
+<td align="left">* External::Other(T)</td>
+</tr>
+<tr>
+<td align="left">External::Other(T,)</td>
+<td align="left">[T,]</td>
+<td align="left">Not Allowed</td>
+<td align="left">* External::Other(T,)</td>
+</tr>
+<tr>
+<td align="left">External::Other{..T}</td>
+<td align="left">{..T}</td>
+<td align="left">Not Allowed</td>
+<td align="left">* External::Other{..T}</td>
+</tr>
+<tr>
+<td align="left">Internal::Other</td>
+<td align="left">{ "type": "Unknown" }</td>
+<td align="left">Internal::Other</td>
+<td align="left">Internal::Other</td>
+</tr>
+<tr>
+<td align="left">Internal::Other(T)</td>
+<td align="left">{ "type": "Unknown", ..T }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* Internal::Other(T)</td>
+</tr>
+<tr>
+<td align="left">Internal::Other(T,)</td>
+<td align="left">Not Allowed</td>
+<td align="left">Not Allowed</td>
+<td align="left">Not Allowed</td>
+</tr>
+<tr>
+<td align="left">Internal::Other{..T}</td>
+<td align="left">{ "type": "Unknown", ..T }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* Internal::Other{..T}</td>
+</tr>
+<tr>
+<td align="left">Adjacent::Other</td>
+<td align="left">{ "type": "Unknown"}</td>
+<td align="left">Adjacent::Other</td>
+<td align="left">Adjacent::Other</td>
+</tr>
+<tr>
+<td align="left">Adjacent::Other(T)</td>
+<td align="left">{ "type": "Unknown", "content": T }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* Adjacent::Other(T)</td>
+</tr>
+<tr>
+<td align="left">Adjacent::Other(T,)</td>
+<td align="left">{ "type": "Unknown", "content": [T, ] }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* Adjacent::Other(T,)</td>
+</tr>
+<tr>
+<td align="left">Adjacent::Other{..T}</td>
+<td align="left">{ "type": "Unknown", "content": {..T } }</td>
+<td align="left">Not Allowed</td>
+<td align="left">* Adjacent::Other{..T}</td>
+</tr>
+<tr>
+<td align="left">Untagged::Other</td>
+<td align="left">null  or "Unknown"</td>
+<td align="left">Not Allowed</td>
+<td align="left">* Untagged::Other</td>
+</tr>
+<tr>
+<td align="left">Untagged::Other(T)</td>
+<td align="left">T</td>
+<td align="left">Not Allowed</td>
+<td align="left">* Untagged::Other(T)</td>
+</tr>
+<tr>
+<td align="left">Untagged::Other(T,)</td>
+<td align="left">[T, ]</td>
+<td align="left">Not Allowed</td>
+<td align="left">* Untagged::Other(T,)</td>
+</tr>
+<tr>
+<td align="left">Untagged::Other{..T}</td>
+<td align="left">{..T}</td>
+<td align="left">Not Allowed</td>
+<td align="left">* Untagged::Other{..T}</td>
+</tr>
+</tbody>
+</table>
+<p>*indicates a change from the current behavior</p>
+<p>Anyway, I was hoping someone was around who's familiar with serde that could tell me whether this is a good idea, whether my thinking on how things would map make sense and if there are any obvious reasons why this can't be done. </p>
+<p>Thanks</p>
+
+
+
+<a name="230806894"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230806894" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230806894">(Mar 18 2021 at 02:56)</a>:</h4>
+<blockquote>
+<p>for externally tagged enums in particular there is a more obvious serialization of { "Other": T } that I didn't do that would ruin my thinking</p>
+</blockquote>
+<p>what do you mean by this?</p>
+
+
+
+<a name="230807025"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230807025" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230807025">(Mar 18 2021 at 02:59)</a>:</h4>
+<p>If I have</p>
+<div class="codehilite"><pre><span></span><code>#[derive(Serialize,Deserialize)]
+enum Foo {
+    Bar,
+    #[serde(other)]
+    Other(String)
+}
+</code></pre></div>
+<p>On deserialize, I want <code>"Baz"</code> to map to <code>Other("Baz")</code> and serialize back to <code>"Baz"</code> both for my use case and because its symmetric. But, it could also serialize to <code>{ "Other": "Baz" }</code>. In this case i think the former version makes more sense, but I'm just not positive this is always what people would expect</p>
+
+
+
+<a name="230807204"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230807204" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230807204">(Mar 18 2021 at 03:01)</a>:</h4>
+<p>I guess the part where I said it would ruin my thinking was just saying that it would lose the symmetry if that did serialize to <code>{ "Other" : "Baz" }</code></p>
+
+
+
+<a name="230807600"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230807600" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230807600">(Mar 18 2021 at 03:08)</a>:</h4>
+<p>I guess the former makes more sense because that's a Rust representation of the data, though the latter may be closer to reality since that is what is produced, so when you mention looking at 'them ending up at the same type' where is that to you?</p>
+
+
+
+<a name="230808591"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230808591" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230808591">(Mar 18 2021 at 03:25)</a>:</h4>
+<p>Yea, i guess my thinking got a little muddled since at times i was thinking value1 -&gt; serialize -&gt; deserialize -&gt; value2 and similarly serialized_value1 -&gt; deserialize -&gt; serialize -&gt; serialized_value2 at different times. I think ideally both value1 == value2 and serialized_value1 == serialized_value2, which in this case it seems like doing what i listed in my table so <code>Other("Baz")</code> would serialized to <code>"Baz"</code> for consistency.</p>
+<p>And i was also thinking that there should be a consistent set of rules wrt to how <code>serde(other)</code> works so that the behavior is clear.  If  <code>"Baz"</code> deserialized to <code>Other("Baz")</code> and <code>Other("Baz")</code> serialized to <code>{ "Other": "Baz" }</code> then the implementation would have to both <code>{ "Other": "Baz" }</code> and <code>"Baz"</code> deserialize to <code>Other("Baz")</code></p>
+
+
+
+<a name="230808806"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230808806" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230808806">(Mar 18 2021 at 03:28)</a>:</h4>
+<p>Really i'm not entirely sure <code>other</code> is the right word for what my table is doing, but that attribute already exists and in certain cases it makes a lot of sense</p>
+
+
+
+<a name="230808956"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230808956" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230808956">(Mar 18 2021 at 03:30)</a>:</h4>
+<p>I guess what I'm basically describing is an <code>untagged</code> variant</p>
+
+
+
+<a name="230809331"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230809331" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230809331">(Mar 18 2021 at 03:35)</a>:</h4>
+<p>what about the deserializing of <code>Other("Baz")</code>?</p>
+
+
+
+<a name="230809417"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230809417" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230809417">(Mar 18 2021 at 03:37)</a>:</h4>
+<p>I'm not sure what you're asking</p>
+
+
+
+<a name="230809434"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230809434" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230809434">(Mar 18 2021 at 03:37)</a>:</h4>
+<p>I think you've described eveything but what you expect from deserializing <code>Other("Baz")</code></p>
+
+
+
+<a name="230809495"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230809495" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> oliver <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230809495">(Mar 18 2021 at 03:38)</a>:</h4>
+<p>unless I'm missing it</p>
+
+
+
+<a name="230809501"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230809501" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230809501">(Mar 18 2021 at 03:38)</a>:</h4>
+<p>I'm thinking that whatever this thing is called whether its <code>serde(other)</code> or <code>serde(untagged)</code>, <code>{ "Other": "Baz" }</code> would fail to deserialize</p>
+
+
+
+<a name="230809521"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230809521" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230809521">(Mar 18 2021 at 03:39)</a>:</h4>
+<p>and that this attribute applied to a variant would cause that variant to always serialize and deserialize to the inner type</p>
+
+
+
+<a name="230809609"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230809609" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230809609">(Mar 18 2021 at 03:40)</a>:</h4>
+<p>its a pretty clean definition that way and would solve my use case</p>
+
+
+
+<a name="230809985"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/serde%20enums%20w/%20other%20%28issue%20912%29/near/230809985" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> drewkett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/serde.20enums.20w.2F.20other.20(issue.20912).html#230809985">(Mar 18 2021 at 03:46)</a>:</h4>
+<p>and I think if eventually we wanted to handle another scenario I think i saw listed in the github issue, you might be able to do it with something like this, where an unknown tag gets stored in the final variant of the enum. Though I haven't given this any real thought to see how it interacts with all the permutations</p>
+<div class="codehilite"><pre><span></span><code>#[serde(Serialize, Deserialize)]
+#[tag = &quot;type&quot;]
+enum Foo {
+    Bar { data: String , extra: u64 }  ,
+    Baz { data: String }  ,
+    #[serde( tag = &quot;type&quot;)]
+    Other{ type: String, data: String }
+}
+</code></pre></div>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

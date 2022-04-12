@@ -1,0 +1,1106 @@
+[
+    {
+        "content": "<p>cc <span class=\"user-group-mention\" data-user-group-id=\"1162\">@WG-mir-opt</span> <span class=\"user-mention\" data-user-id=\"310518\">@Jake</span> </p>\n<p>I always thought <code>SetDiscriminant</code> was the thing that marked an enum as fully initialized (so requiring all fields to have been initialized before that). Under the same logic, I assumed that some day we'd use it to mark structs as initialized (and again, assuming all their fields had been initialized).</p>\n<p>This PR swaps this around, by requiring <code>SetDiscriminant</code> to be called first, but now we'll never know that the enum/struct is fully initialized without tracking  all fields somehow (and even then, without having put too much thought into it, I worry about <code>(i32, !)</code> types and how they behave under such a scheme).</p>\n<p>So, I would like to clarify our semantics here, as obviously (considering the PR) they were unclear. I'm not saying my mental model (init fields, then discrimiant) is the right one, but so far I have not been able to grok the (discriminant, then init fields) scheme.</p>",
+        "id": 274390252,
+        "sender_full_name": "oli",
+        "timestamp": 1646659469
+    },
+    {
+        "content": "<p>specifically</p>\n<blockquote>\n<p>Deaggregation of enums is now unambiguously non-lossy. Previously, deaggregation of enums would set both the fields and the discriminant - however, under some interpretations of the semantics of SetDiscriminant this would be lossy, since now possibly padding has to be preserved.</p>\n</blockquote>\n<p>How are they lossy at present? The <code>SetDiscriminant</code> statement only sets the tag field (if necessary at all, in case of no explicit tag field, this operation does nothing). This is also how miri handles discriminants, so I don't see how preserving padding is an issue here.</p>\n<p>Also from the PR:</p>\n<blockquote>\n<p>The MaybeLiveLocals analysis was previously somewhat broken in that it marked locals killed on SetDiscriminant, although this was obviously not true for any fields that had been set previously. This change makes that decision completely justified, without requiring any changes to the code.</p>\n</blockquote>\n<p>Does anything speak against fixing <code>MaybeLiveLocals</code>?</p>\n<blockquote>\n<p>In a future PR, we can start emitting SetDiscriminant for structs as well, with the same semantics. This will have the benefit of making deaggregation for structs also non-lossy.</p>\n</blockquote>\n<p>why can't we do this under today's model?</p>",
+        "id": 274391001,
+        "sender_full_name": "oli",
+        "timestamp": 1646659820
+    },
+    {
+        "content": "<p>So, just putting down my thoughts in rough order of the things mentioned above:</p>\n<ol>\n<li>\"Is fully initialized\" is, as far as I can tell, not that useful a concept for the main consumers of <code>SetDiscriminant</code> - probably this means I'm missing something. It seems like optimizations and codegen backends generally don't care if you fail to initialize your things - they'll just be happy about the potentially increased UB. (and MIRI is smarter about this anyway, although I forget if it sees deaggregation)</li>\n<li>Under the current semantics, I believe deaggregation is lossy for the following reason:</li>\n</ol>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">struct</span> <span class=\"nc\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span>: <span class=\"kt\">i16</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">b</span>: <span class=\"kt\">i8</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">initialize</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">t</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">initialize</span><span class=\"p\">();</span><span class=\"w\"></span>\n\n<span class=\"n\">s</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"nc\">t</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"nc\">t</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"c1\">// ^ has different behavior from</span>\n<span class=\"n\">s</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">t</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">s</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">t</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>The difference is whether padding is overwritten or not. Deaggregation on structs essentially turns the first into the second. Going the other is way is an illegal optimization. Now, depending on the semantics of <code>SetDiscriminant</code>, we have the same problem for enums. <em>If</em> we were to choose \"writes the minimum bytes to mark the discriminant of the enum in the layout\", then we leave some padding bytes unwritten. For example, this makes the <code>SimplifyArmIdentity</code> pass (which basically does re-aggregation) fundamentally incorrect. This leaves us with what I believe is closest to the current semantics, which is \"SetDiscriminant overwrites all non-field bytes of the variant.\" That allows emitting <code>SetDiscriminant</code> as a part of struct and enum deaggregation, while also allowing passes like <code>SimplifyArmIdentity</code>.</p>\n<ol start=\"3\">\n<li>For <code>MaybeLiveLocals</code>, it's current behavior is to mark a place as killed when it sees <code>SetDiscriminant</code>. This has two potential issues: a) Even if all field assignments are present before the <code>SetDiscriminant</code>, it's clearly wrong-ish, since one could try to use this to DSE those field assignments. The comment in the pass before my PR notes exactly this, and basically just says \"the things we currently use it for don't mind.\" b) <code>MaybeLiveLocals</code>does not actually <em>check</em> that all field assignments are present before the <code>SetDiscriminant</code> - right now that doesn't matter, because I don't think there are any optimizations that could cause this, but it certainly seems unfortunate. The fix for this would be to add such a check to <code>MaybeLiveLocals</code> - that is <em>possible</em>, but it's messy, and seems difficult to do in a <code>GenKillAnalysis</code>.</li>\n</ol>",
+        "id": 274436506,
+        "sender_full_name": "Jake",
+        "timestamp": 1646677792
+    },
+    {
+        "content": "<blockquote>\n<p>The difference is whether padding is overwritten or not.</p>\n</blockquote>\n<p>Isn't it UB to observe padding bytes, and hence optimizations are free to go either way on this?</p>",
+        "id": 274445517,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646681634
+    },
+    {
+        "content": "<p>I don't think we need to preserve padding in any way, not even in repr(C) structs.</p>",
+        "id": 274445523,
+        "sender_full_name": "oli",
+        "timestamp": 1646681637
+    },
+    {
+        "content": "<p>Great timing <span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span></p>",
+        "id": 274445608,
+        "sender_full_name": "oli",
+        "timestamp": 1646681668
+    },
+    {
+        "content": "<p>Why can we use SetDiscriminant to DSE the preceding field assignments? It's essentially just an operation working on an unknown part of the place</p>",
+        "id": 274445871,
+        "sender_full_name": "oli",
+        "timestamp": 1646681779
+    },
+    {
+        "content": "<p>Miri works on deaggregated MIR for the most part. MIR with aggregate Rvalues only exists as an optimization, because deaggregating arrays can be a pain</p>",
+        "id": 274446128,
+        "sender_full_name": "oli",
+        "timestamp": 1646681915
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274445517\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>The difference is whether padding is overwritten or not.</p>\n</blockquote>\n<p>Isn't it UB to observe padding bytes, and hence optimizations are free to go either way on this?</p>\n</blockquote>\n<p>Not if I explicitly write to them.</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[repr(C)]</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span>: <span class=\"kt\">u16</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">b</span>: <span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"mi\">1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">S</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">).</span><span class=\"n\">wrapping_add</span><span class=\"p\">(</span><span class=\"mi\">3</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"n\">s</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">s</span><span class=\"p\">.</span><span class=\"n\">b</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">4</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"fm\">dbg!</span><span class=\"p\">(</span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"p\">});</span><span class=\"w\"></span>\n</code></pre></div>\n<p>is DB and passes MIRI. In general, we have to assume during our optimizations that the user may have done this. Of course, because of struct deaggregation,</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"cp\">#[repr(C)]</span><span class=\"w\"></span>\n<span class=\"k\">struct</span> <span class=\"nc\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">a</span>: <span class=\"kt\">u16</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">b</span>: <span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"mi\">1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">S</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">).</span><span class=\"n\">wrapping_add</span><span class=\"p\">(</span><span class=\"mi\">3</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"n\">s</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"mi\">3</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"mi\">4</span><span class=\"w\"> </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">(</span><span class=\"o\">&amp;</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">s</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">S</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"kt\">u8</span><span class=\"p\">).</span><span class=\"n\">wrapping_add</span><span class=\"p\">(</span><span class=\"mi\">3</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"fm\">dbg!</span><span class=\"p\">(</span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"o\">*</span><span class=\"n\">p</span><span class=\"w\"> </span><span class=\"p\">});</span><span class=\"w\"></span>\n</code></pre></div>\n<p>also passes MIRI. I think that is pretty clearly missed UB though (this is similar to, but not the same as, <a href=\"https://github.com/rust-lang/miri/issues/845\">https://github.com/rust-lang/miri/issues/845</a>. cc <span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> )</p>",
+        "id": 274447837,
+        "sender_full_name": "Jake",
+        "timestamp": 1646682671
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274445871\">said</a>:</p>\n<blockquote>\n<p>Why can we use SetDiscriminant to DSE the preceding field assignments? It's essentially just an operation working on an unknown part of the place</p>\n</blockquote>\n<p>Well, we can't right now. After my change we could</p>",
+        "id": 274447932,
+        "sender_full_name": "Jake",
+        "timestamp": 1646682722
+    },
+    {
+        "content": "<blockquote>\n<p>I think that is pretty clearly missed UB though (this is similar to, but not the same as, <a href=\"https://github.com/rust-lang/miri/issues/845\">https://github.com/rust-lang/miri/issues/845</a>. cc @RalfJ )</p>\n</blockquote>\n<p>I think it is the same?</p>",
+        "id": 274449462,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646683371
+    },
+    {
+        "content": "<p>well I guess it's not even clear on the MIR any more what happens. we'd want to run Miri without deaggregation to have a chance to catch this.</p>",
+        "id": 274449533,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646683407
+    },
+    {
+        "content": "<p>I don't think it is the same. Doing a full copy of the <code>S { a: 3, b: 4 }</code> rvalue would yield the UB. The problem is that after deaggregation, we no longer do a full copy but just a by-field copy</p>",
+        "id": 274449669,
+        "sender_full_name": "Jake",
+        "timestamp": 1646683449
+    },
+    {
+        "content": "<p>right, so the after-deaggregation MIR actually has DB</p>",
+        "id": 274449736,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646683479
+    },
+    {
+        "content": "<p>deaggregation as a pass removes UB</p>",
+        "id": 274449749,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646683485
+    },
+    {
+        "content": "<p>which is legal but potentially undesirable</p>",
+        "id": 274449762,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646683491
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274449533\">said</a>:</p>\n<blockquote>\n<p>well I guess it's not even clear on the MIR any more what happens. we'd want to run Miri without deaggregation to have a chance to catch this.</p>\n</blockquote>\n<p>Yes, this would be one option. The other one would be emitting the <code>SetDiscriminant</code> (under the semantics I proposed) as part of deaggregation, which preserves the UB</p>",
+        "id": 274449821,
+        "sender_full_name": "Jake",
+        "timestamp": 1646683526
+    },
+    {
+        "content": "<p>but a MIR transformation should be justified against MIR semantics, not \"which kind of surface Rust might have generated this code\", and on that level both examples have DB</p>",
+        "id": 274449845,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646683542
+    },
+    {
+        "content": "<p>i.e. if we want MIR opts to exploit the UB in the 2nd program, those opts have to run pre-deaggregation. (or we find some way to preserve the UB.)</p>",
+        "id": 274449993,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646683597
+    },
+    {
+        "content": "<p>Yep, fully agreed</p>",
+        "id": 274450020,
+        "sender_full_name": "Jake",
+        "timestamp": 1646683618
+    },
+    {
+        "content": "<blockquote>\n<p>Initialize the place with the given variant and all fields uninit.</p>\n</blockquote>\n<p>no strong opinion on whether or not that's a better semantics, but if the PR makes that the semantics then it should also adjust <code>interpret</code> to implement that semantics</p>",
+        "id": 274450269,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646683743
+    },
+    {
+        "content": "<p>I always assumed it would be legal to randomly inject  overwrites of padding bytes of locals. Indirect operations on some memory place are another story, but locals have types...</p>",
+        "id": 274454834,
+        "sender_full_name": "oli",
+        "timestamp": 1646686052
+    },
+    {
+        "content": "<p>I don't think that is the current status of things. I'm not sure if this has been discussed</p>",
+        "id": 274456021,
+        "sender_full_name": "Jake",
+        "timestamp": 1646686653
+    },
+    {
+        "content": "<p>Well... any surface language discussion always said \"you can't rely on padding being preserved\", and is assumed \"across assignments\" wasn't the only thing</p>",
+        "id": 274456327,
+        "sender_full_name": "oli",
+        "timestamp": 1646686787
+    },
+    {
+        "content": "<p>Since we are allowed to do random things to the layout, you can't even know where the padding is, so idk how you could rely on it</p>",
+        "id": 274456524,
+        "sender_full_name": "oli",
+        "timestamp": 1646686831
+    },
+    {
+        "content": "<p>Now, I get the point that we avoid the UB in MIR by deaggregating, but why should <code>SetDiscriminant</code> now introduce new UB?</p>",
+        "id": 274457067,
+        "sender_full_name": "oli",
+        "timestamp": 1646687068
+    },
+    {
+        "content": "<p>Can't it essentially be a field assignment to a field you can't name and possibly doesn't actually assign anything without extra semantics?</p>",
+        "id": 274457204,
+        "sender_full_name": "oli",
+        "timestamp": 1646687127
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274456524\">said</a>:</p>\n<blockquote>\n<p>Since we are allowed to do random things to the layout, you can't even know where the padding is, so idk how you could rely on it</p>\n</blockquote>\n<p>Well, you can always compute struct layouts at runtime. But you can also do things like</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">T</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"nb\">Default</span>::<span class=\"n\">default</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"c1\">// write `[0; size_of::&lt;T&gt;]` to `x`</span>\n<span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">int_field</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"c1\">// read `x` as `[u8; size_of::&lt;T&gt;]`</span>\n</code></pre></div>\n<p>In general though, I think this is just a logical consequence of not having typed memory</p>",
+        "id": 274457283,
+        "sender_full_name": "Jake",
+        "timestamp": 1646687162
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274457067\">said</a>:</p>\n<blockquote>\n<p>Now, I get the point that we avoid the UB in MIR by deaggregating, but why should <code>SetDiscriminant</code> now introduce new UB?</p>\n</blockquote>\n<p>I don't quite follow; what makes you say this introduces new UB?</p>",
+        "id": 274457380,
+        "sender_full_name": "Jake",
+        "timestamp": 1646687199
+    },
+    {
+        "content": "<p>We could then DSE preceding field assignments, even though SetDiscriminant (at least in miri right now, and in how I see it) is just a field assignment at best, a no-op in case of single variant adts or niches</p>",
+        "id": 274457652,
+        "sender_full_name": "oli",
+        "timestamp": 1646687323
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274457204\">said</a>:</p>\n<blockquote>\n<p>Can't it essentially be a field assignment to a field you can't name and possibly doesn't actually assign anything without extra semantics?</p>\n</blockquote>\n<p>This is one of the options I mentioned above. The problem is that this makes the <code>SimplifyArmIdentity</code>, which turns</p>\n<div class=\"codehilite\"><pre><span></span><code>(P as Some).0 = (Q as Some).0;\nSetDiscriminant(P) = Some;\n</code></pre></div>\n<p>into</p>\n<div class=\"codehilite\"><pre><span></span><code>P = Q;\n</code></pre></div>\n<p>incorrect, since now we overwrite padding bytes. Even if we add in extra rules for locals, this still does not recover the case where <code>P.is_indirect()</code></p>",
+        "id": 274457858,
+        "sender_full_name": "Jake",
+        "timestamp": 1646687402
+    },
+    {
+        "content": "<p>But why do typed operations have to care about padding? I get that memory is untyped, but especially SetDiscriminant is typed</p>",
+        "id": 274458042,
+        "sender_full_name": "oli",
+        "timestamp": 1646687471
+    },
+    {
+        "content": "<p>Typed for what place though? If there may exist bytes in <code>T</code> that are not within <code>SetDiscriminant</code> or a field, then there can still be padding left. If we require that all bytes that are not in fields are within the discriminant, then I think we're back to the alternative I proposed at the beginning of this topic</p>",
+        "id": 274458348,
+        "sender_full_name": "Jake",
+        "timestamp": 1646687606
+    },
+    {
+        "content": "<p>This still means we have to complicate <code>MaybeLiveLocals</code> to check that all fields are assigned before marking the place as killed. In other words, although</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"p\">(</span><span class=\"n\">P</span><span class=\"w\"> </span><span class=\"k\">as</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">).</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">Rvalue</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">SetDiscriminant</span><span class=\"p\">(</span><span class=\"n\">P</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"nb\">Some</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>as a <em>whole</em> kills <code>P</code>, neither statement does on its own</p>",
+        "id": 274458585,
+        "sender_full_name": "Jake",
+        "timestamp": 1646687706
+    },
+    {
+        "content": "<p>Essentially, I think there are three options for which bytes <code>SetDiscriminant</code> writes to:</p>\n<ol>\n<li>All of them. This is my proposal.</li>\n<li>All that aren't within a field. I think this is technically ok, but more complicated (for example in <code>MaybeLiveLocals</code>)</li>\n<li>The bare minimum, whatever that is for the layout. This means padding bytes are preserved (this is what const eval seems to currently implement)</li>\n</ol>",
+        "id": 274459303,
+        "sender_full_name": "Jake",
+        "timestamp": 1646687997
+    },
+    {
+        "content": "<p>Hmm... I like the simplicity of 1., but it does mean we'll never know when a place is fully initialized. I remember that being important somehow.</p>",
+        "id": 274459669,
+        "sender_full_name": "oli",
+        "timestamp": 1646688140
+    },
+    {
+        "content": "<p>Yeah, I would love to know when this matters. I can't think of an example, but if it exists it definitely seems like a concern</p>",
+        "id": 274459996,
+        "sender_full_name": "Jake",
+        "timestamp": 1646688271
+    },
+    {
+        "content": "<p>Like, such a thing definitely matters for static analysis, but that isn't relevant for us as far as I can tell, because <code>SetDiscriminant</code> isn't around then</p>",
+        "id": 274460151,
+        "sender_full_name": "Jake",
+        "timestamp": 1646688345
+    },
+    {
+        "content": "<p>cc <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> I'm hoping your long term memory didn't just throw out the old info like mine did</p>",
+        "id": 274461375,
+        "sender_full_name": "oli",
+        "timestamp": 1646688908
+    },
+    {
+        "content": "<p>Initialization checking is MIR-level flow-sensitive these days, right?  I'd be nice if that could one day grow to be compatible with field-level writes.</p>\n<p>(It's a pretty common confusion, AFAIK, that you can move out of a field but not then initialize it again.)</p>",
+        "id": 274471589,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1646694103
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"125270\">scottmcm</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274471589\">said</a>:</p>\n<blockquote>\n<p>Initialization checking is MIR-level flow-sensitive these days, right?  I'd be nice if that could one day grow to be compatible with field-level writes.</p>\n<p>(It's a pretty common confusion, AFAIK, that you can move out of a field but not then initialize it again.)</p>\n</blockquote>\n<p>Do you have a quick example to show what you mean? In any case, I don't think it's affected. Borrowck and friends run well before <code>SetDiscriminant</code> is legal in MIR</p>",
+        "id": 274474907,
+        "sender_full_name": "Jake",
+        "timestamp": 1646696295
+    },
+    {
+        "content": "<p>That reminds me actually; needing to be able to identify initalized-ness post-deaggregation seems to be a bit of a dangerous road to go down in any case. Even if the user wrote</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"mi\">1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"mi\">2</span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"fm\">dbg!</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>\n<p>an optimization might come along and remove the dead store to <code>x.b</code>, while the <code>SetDiscriminant</code> stays. Anything that depends on the <code>SetDiscriminant</code> to indicate initialized-ness would need to deal with that (or we would have to restrict such optimizations to run after wherever this is needed)</p>",
+        "id": 274475150,
+        "sender_full_name": "Jake",
+        "timestamp": 1646696502
+    },
+    {
+        "content": "<p>That optimization sounds pretty sketchy. The <code>SetDiscriminant</code> operation could be depending on all the fields being initialized, and if not it might end up smearing that undefinedness over the other bytes, which would have an observable effect.</p>",
+        "id": 274475633,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646696834
+    },
+    {
+        "content": "<p>I think an optimization like that should be required to remove the <code>SetDiscriminant</code> as well, in order to indicate that the struct/enum is only piecewise initialized</p>",
+        "id": 274475761,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646696933
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274475633\">said</a>:</p>\n<blockquote>\n<p>That optimization sounds pretty sketchy. The <code>SetDiscriminant</code> operation could be depending on all the fields being initialized, and if not it might end up smearing that undefinedness over the other bytes, which would have an observable effect.</p>\n</blockquote>\n<p>Hm, I would be very concerned if <code>SetDiscriminant</code> did any reading whatsoever</p>",
+        "id": 274475844,
+        "sender_full_name": "Jake",
+        "timestamp": 1646697002
+    },
+    {
+        "content": "<p>Not sure why you have that intuition; encoding complex niches could certainly require reading</p>",
+        "id": 274475940,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697054
+    },
+    {
+        "content": "<p>Can you give an example?</p>",
+        "id": 274475987,
+        "sender_full_name": "Jake",
+        "timestamp": 1646697089
+    },
+    {
+        "content": "<p>It's a contrived example, but let's say that the enum is a <code>[u8; 2]</code> layout and it has two variants, with the first variant being <code>[x, x]</code> and the second variant <code>[x, y]</code> where <code>x != y</code>. Then <code>SetDiscriminant(x) = 0</code> would copy the first byte to the second</p>",
+        "id": 274476160,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697227
+    },
+    {
+        "content": "<p>(Obviously rustc doesn't do any niche encoding nearly as complex as this at the moment, but AFAIK it would be legal to do so)</p>",
+        "id": 274476346,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697321
+    },
+    {
+        "content": "<p>The point is that a discriminant is a property of <em>all</em> the bytes, it is not localized to any subpart of the layout in general. So <code>SetDiscriminant</code> on a type with uninitialized fields is not a safe operation to do</p>",
+        "id": 274476560,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697456
+    },
+    {
+        "content": "<p>What sort of type does this correspond to? The closest thing I can think of is</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">E</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">A</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"kt\">u8</span> <span class=\"p\">},</span><span class=\"w\"> </span><span class=\"c1\">// laid out as `[x, x]`</span>\n<span class=\"w\">    </span><span class=\"n\">B</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">y</span>: <span class=\"kt\">u8</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">z</span>: <span class=\"kt\">u8</span> <span class=\"p\">},</span><span class=\"w\"> </span><span class=\"k\">unsafe</span><span class=\"w\"> </span><span class=\"n\">assert</span><span class=\"w\"> </span><span class=\"n\">y</span><span class=\"w\"> </span><span class=\"o\">!=</span><span class=\"w\"> </span><span class=\"n\">z</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"c1\">// laid out as `[y, z]`</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>But even then, this is not a legal layout because you need to be able to get a <code>&amp;mut u8</code> pointing to <code>x</code>. And even if we ignore that, you don't need <code>SetDiscriminant</code> do to a read because setting the <code>x</code> field should set both bytes</p>",
+        "id": 274476745,
+        "sender_full_name": "Jake",
+        "timestamp": 1646697570
+    },
+    {
+        "content": "<p>Yes, the type is <code>enum E { A(u8), B(U16ButWithDifferentBytes) }</code></p>",
+        "id": 274476831,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697607
+    },
+    {
+        "content": "<p>in a magical future rustc that noticed that <code>U16ButWithDifferentBytes</code> has exactly 256 niches in the right places to apply this niche optimization</p>",
+        "id": 274476960,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697648
+    },
+    {
+        "content": "<p>In \"pre-initialized variant A\" state, the layout is <code>[x, uninit]</code> where <code>x</code> is a valid <code>u8</code></p>",
+        "id": 274477031,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697687
+    },
+    {
+        "content": "<p>and in \"pre-initialized variant B\" state the layout is <code>[x, y]</code> where <code>[x, y]</code> is a valid <code>U16ButWithDifferentBytes</code></p>",
+        "id": 274477078,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697717
+    },
+    {
+        "content": "<p>But they're not in the right places, since you need to be able to get a <code>&amp;mut u8</code>. And as soon as you make your type</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">E</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"p\">(</span><span class=\"n\">U16ButWithSameBytes</span><span class=\"p\">),</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">(</span><span class=\"n\">U16ButWithDifferentBytes</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>your <code>SetDiscriminant</code> is a nop for all variants</p>",
+        "id": 274477082,
+        "sender_full_name": "Jake",
+        "timestamp": 1646697718
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274477031\">said</a>:</p>\n<blockquote>\n<p>In \"pre-initialized variant A\" state, the layout is <code>[x, uninit]</code> where <code>x</code> is a valid <code>u8</code></p>\n</blockquote>\n<p>Why are we giving preference to the first byte over the second here?</p>",
+        "id": 274477169,
+        "sender_full_name": "Jake",
+        "timestamp": 1646697742
+    },
+    {
+        "content": "<p>Distinguishing between them seems to be quite arbitrary</p>",
+        "id": 274477199,
+        "sender_full_name": "Jake",
+        "timestamp": 1646697759
+    },
+    {
+        "content": "<p>It's an arbitrary choice of the layout design</p>",
+        "id": 274477205,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697762
+    },
+    {
+        "content": "<p>Well, yes, but at this point all you've shown is that this doesn't work with if we allow layout designs that are broken</p>",
+        "id": 274477266,
+        "sender_full_name": "Jake",
+        "timestamp": 1646697807
+    },
+    {
+        "content": "<p>how so?</p>",
+        "id": 274477279,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697815
+    },
+    {
+        "content": "<p>You still need to be able to get a <code>&amp;mut x</code></p>",
+        "id": 274477296,
+        "sender_full_name": "Jake",
+        "timestamp": 1646697829
+    },
+    {
+        "content": "<p>You can, the first byte is such</p>",
+        "id": 274477311,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697837
+    },
+    {
+        "content": "<p>But then when you write to it, and go and read the enum, its variant has changed</p>",
+        "id": 274477369,
+        "sender_full_name": "Jake",
+        "timestamp": 1646697854
+    },
+    {
+        "content": "<p>The <code>SetDiscriminant</code> is supposed to fix up the layout before it is observable as a whole</p>",
+        "id": 274477472,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646697912
+    },
+    {
+        "content": "<p>No, what I mean is code like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">E</span>::<span class=\"n\">A</span><span class=\"p\">(</span><span class=\"mi\">5_</span><span class=\"k\">u8</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"c1\">// `(x as A).0 = 5;`</span>\n<span class=\"c1\">//  `SetDiscriminant(x) = A;</span>\n<span class=\"k\">if</span><span class=\"w\"> </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">E</span>::<span class=\"n\">A</span><span class=\"p\">(</span><span class=\"n\">r</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"o\">*</span><span class=\"n\">r</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">10</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"c1\">// No `SetDiscriminant` here. This code might be in a different function, so it can't know to do such a thing</span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"fm\">dbg!</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"p\">);</span><span class=\"w\"> </span><span class=\"c1\">// prints B(10, 5)</span>\n</code></pre></div>",
+        "id": 274477709,
+        "sender_full_name": "Jake",
+        "timestamp": 1646698062
+    },
+    {
+        "content": "<p>The behavior of <code>SetDiscriminant</code> has to cause a read of the discriminant to be well behaved regardless of what values the fields have; this essentially guarantees that reading those fields cannot be useful to it - besides the things it knows statically about the fields anyway (niches) everything else can change</p>",
+        "id": 274477837,
+        "sender_full_name": "Jake",
+        "timestamp": 1646698138
+    },
+    {
+        "content": "<p>Hm, you're right. It's possible that adding some more <code>SetDiscriminant</code>s in the right place could fix that (for example at the end of the <code>if let</code>) but it seems like the current codegen wouldn't support layouts like that</p>",
+        "id": 274478031,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646698250
+    },
+    {
+        "content": "<p>Still, I don't know that it is important to ensure that <code>SetDiscriminant</code> doesn't read</p>",
+        "id": 274478178,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646698339
+    },
+    {
+        "content": "<p>I mean, my argument from before applies more generally. Any useful information you get from reading the fields might have been changed by the time a discriminant is read, so you can't actually depend on it anyway</p>",
+        "id": 274478246,
+        "sender_full_name": "Jake",
+        "timestamp": 1646698402
+    },
+    {
+        "content": "<p>You essentially have to ban taking a <code>&amp;mut field</code> and at that point there are better ways to express this (like having <code>(x as A).0 = 5</code> write to both bytes)</p>",
+        "id": 274478421,
+        "sender_full_name": "Jake",
+        "timestamp": 1646698527
+    },
+    {
+        "content": "<p>The way I would put it is that from the \"fully initialized, variant A\" state, valid variant A field writes cannot take the enum out of this state</p>",
+        "id": 274478449,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646698552
+    },
+    {
+        "content": "<p>In the example writing to <code>x</code> works in the \"partially initialized, variant A\" state but not the fully initialized version</p>",
+        "id": 274478546,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646698611
+    },
+    {
+        "content": "<p>Yes, essentially, the <code>SetDiscriminant</code> statement can only make use of those properties that are preserved by the <code>*r = opaquevalue;</code> write. But all these properties are statically known anyway - it has no need to read</p>",
+        "id": 274478676,
+        "sender_full_name": "Jake",
+        "timestamp": 1646698714
+    },
+    {
+        "content": "<p>Does this imply that a discriminant write cannot touch any field bytes (of the active variant)?</p>",
+        "id": 274478805,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646698813
+    },
+    {
+        "content": "<p>Yes, since those bytes will be overwritten by a future write to the field</p>",
+        "id": 274479013,
+        "sender_full_name": "Jake",
+        "timestamp": 1646698974
+    },
+    {
+        "content": "<p>Yes: A field is potentially restricted to a subset of all values for the underlying bytes, but the discriminant write cannot stash any information there since any value in the subset (and no value outside that subset) is legal for the field, so there is no space for additional data.</p>",
+        "id": 274479032,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646699005
+    },
+    {
+        "content": "<p>Indeed. Reading the discriminant later can make use of the information about the restricted subset (this is what niche optimizations are) but no such analogue exists for writes</p>",
+        "id": 274479230,
+        "sender_full_name": "Jake",
+        "timestamp": 1646699148
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274475150\">said</a>:</p>\n<blockquote>\n<p>That reminds me actually; needing to be able to identify initalized-ness post-deaggregation seems to be a bit of a dangerous road to go down in any case. Even if the user wrote</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">x</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">S</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"> </span><span class=\"n\">a</span>: <span class=\"mi\">1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">b</span>: <span class=\"mi\">2</span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"fm\">dbg!</span><span class=\"p\">(</span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"n\">a</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>\n<p>an optimization might come along and remove the dead store to <code>x.b</code>, while the <code>SetDiscriminant</code> stays. Anything that depends on the <code>SetDiscriminant</code> to indicate initialized-ness would need to deal with that (or we would have to restrict such optimizations to run after wherever this is needed)</p>\n</blockquote>\n<p>Coming back to this, I think that <code>SetDiscriminant</code> should just be defined to have no effect on partially initialized variants then. That is, if you are in state \"partially initialized variant A, a init, b uninit\" then <code>SetDiscriminant(x) = S::A</code> will leave it in this state because it's not fully initialized</p>",
+        "id": 274479669,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646699453
+    },
+    {
+        "content": "<p>In the case where the discriminant is a tag field, in the \"partially initialized\" state this field is allowed to have any value, so even though we wrote to it it still has \"don't care\" value</p>",
+        "id": 274479739,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646699519
+    },
+    {
+        "content": "<p>I don't think defining the behavior of this operation in terms of \"initialization states\" is a good way forward. It's unclear to me how this maps to actual memory operations and states</p>",
+        "id": 274480567,
+        "sender_full_name": "Jake",
+        "timestamp": 1646700097
+    },
+    {
+        "content": "<p>At least, I'm having trouble coming up with a clear definition of this that does not indirectly create some kind of typed memory, which we imo should not try to have at MIR level if it doesn't exist at Rust level</p>",
+        "id": 274480684,
+        "sender_full_name": "Jake",
+        "timestamp": 1646700178
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274474907\">said</a>:</p>\n<blockquote>\n<p>Do you have a quick example to show what you mean? In any case, I don't think it's affected. Borrowck and friends run well before <code>SetDiscriminant</code> is legal in MIR</p>\n</blockquote>\n<p>Hmm, looks like we made a breaking change at some point.</p>\n<p>This works in 1.5: &lt;<a href=\"https://rust.godbolt.org/z/qzsWh87od\">https://rust.godbolt.org/z/qzsWh87od</a>&gt;</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"w\">    </span><span class=\"k\">struct</span> <span class=\"nc\">Foo</span><span class=\"p\">(</span><span class=\"nb\">String</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"nb\">String</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"k\">mut</span><span class=\"w\"> </span><span class=\"n\">x</span>: <span class=\"nc\">Foo</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"s\">\"asdf\"</span><span class=\"p\">.</span><span class=\"n\">into</span><span class=\"p\">();</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">x</span><span class=\"p\">.</span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"s\">\"hjkl\"</span><span class=\"p\">.</span><span class=\"n\">into</span><span class=\"p\">();</span><span class=\"w\"></span>\n</code></pre></div>\n<p>But it doesn't in 1.59, even in edition 2015.</p>\n<p>Regardless, it would make sense to me to one day consider that initialized (without the <code>mut</code>, ideally).</p>\n<p>Maybe that's irrelevant to SetDiscriminant, though.</p>\n<p>(EDIT: probably for <code>!Drop</code> types only, though.)</p>",
+        "id": 274486540,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1646705085
+    },
+    {
+        "content": "<p>Yeah, I do think that is unrelated</p>",
+        "id": 274486751,
+        "sender_full_name": "Jake",
+        "timestamp": 1646705350
+    },
+    {
+        "content": "<p>Wow, bisecting in godbolt is super convenient. Looks like this was introduced as a compatibility hazard warning on 1.36 and became an error on 1.38, so I guess this was intentional</p>",
+        "id": 274486769,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646705381
+    },
+    {
+        "content": "<p>As a matter of fact, I think the proposed change actually works in favor of allowing this kind of code. If we required <code>SetDiscriminant</code> to indicate initialized-ness, there'd be no clear place to put it</p>",
+        "id": 274486863,
+        "sender_full_name": "Jake",
+        "timestamp": 1646705488
+    },
+    {
+        "content": "<p>What about enums with one variant that nevertheless have a tag field? For example I think enum variant types would act like this</p>",
+        "id": 274486952,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646705592
+    },
+    {
+        "content": "<p>I think you need the <code>SetDiscriminant</code> whenever the layout has a tag field, even if at the rust surface level it looks like a struct</p>",
+        "id": 274487026,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646705677
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274486952\">said</a>:</p>\n<blockquote>\n<p>What about enums with one variant that nevertheless have a tag field? For example I think enum variant types would act like this</p>\n</blockquote>\n<p>We don't emit <code>SetDiscriminant</code> for those either today afaik. I would like to start emitting it for all ADTs regardless of the number of variants though</p>",
+        "id": 274487135,
+        "sender_full_name": "Jake",
+        "timestamp": 1646705777
+    },
+    {
+        "content": "<p>I mean, suppose that a struct has layout <code>[1, x, y]</code> where the first byte has to be 1 and the others are fields. If you piecewise initialize this struct you get <code>[?, x, y]</code> instead, so you have to set the tag at some point. I think this speaks in favor of always emitting <code>SetDiscriminant</code> and disallowing Scott's trick. Or at least, there should be some class of \"tagless\" structs which allow this kind of behavior (and includes all structs constructible today AFAIK)</p>",
+        "id": 274487235,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646705885
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274450269\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>Initialize the place with the given variant and all fields uninit.</p>\n</blockquote>\n<p>no strong opinion on whether or not that's a better semantics, but if the PR makes that the semantics then it should also adjust <code>interpret</code> to implement that semantics</p>\n</blockquote>\n<p>I was looking at this, but there doesn't seem to be a great way to implement it. Afaik there is no way to completely overwrite a place with uninit that doesn't involve creating an allocation full of uninit solely for this purpose (which seems bad). Any tips on how/where to add this? <strong>Edit:</strong> Hm, it seems that this requires a new function on <code>Memory</code>, I'll take a look at that</p>",
+        "id": 274487364,
+        "sender_full_name": "Jake",
+        "timestamp": 1646706059
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274487235\">said</a>:</p>\n<blockquote>\n<p>I mean, suppose that a struct has layout <code>[1, x, y]</code> where the first byte has to be 1 and the others are fields. If you piecewise initialize this struct you get <code>[?, x, y]</code> instead, so you have to set the tag at some point. I think this speaks in favor of always emitting <code>SetDiscriminant</code> and disallowing Scott's trick. Or at least, there should be some class of \"tagless\" structs which allow this kind of behavior (and includes all structs constructible today AFAIK)</p>\n</blockquote>\n<p>Right, so you need to emit a <code>SetDiscriminant</code> for this place. I believe we don't currently do this, which means we cannot have layouts like you propose. I agree that we should, in the future, start always emitting <code>SetDiscriminant</code>. The nice thing is that if that operation does what I propose, we don't have to disallow Scott's trick. We can emit the <code>SetDiscriminant</code> when the struct/single variant enum is declared, and then never have to worry about it again</p>",
+        "id": 274487505,
+        "sender_full_name": "Jake",
+        "timestamp": 1646706242
+    },
+    {
+        "content": "<p>BTW one more side observation about <code>SetDiscriminant</code>: since the discriminant write doesn't touch field bytes, we know that it commutes with field writes, so this can conclusively answer whether <code>SetDiscriminant</code> needs to be first or last - it doesn't matter</p>",
+        "id": 274487767,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646706558
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274487767\">said</a>:</p>\n<blockquote>\n<p>BTW one more side observation about <code>SetDiscriminant</code>: since the discriminant write doesn't touch field bytes, we know that it commutes with field writes, so this can conclusively answer whether <code>SetDiscriminant</code> needs to be first or last - it doesn't matter</p>\n</blockquote>\n<p>Well, it doesn't <em>need to</em> touch field bytes. I'm specifically proposing that <code>SetDiscriminant</code> overwrite field bytes with uninit</p>",
+        "id": 274487913,
+        "sender_full_name": "Jake",
+        "timestamp": 1646706680
+    },
+    {
+        "content": "<p>If the goal you are after is to have fields in the other variants be unset by a <code>SetDiscriminant</code>, I think you can make that work by instead having the fields get set to uninit whenever the active variant changes, with the <code>SetDiscriminant</code> setting the active variant but is otherwise a no-op. That way setting <code>SetDiscriminant</code> twice wouldn't clear the fields if it's already set to the right variant</p>",
+        "id": 274488172,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646706962
+    },
+    {
+        "content": "<p>Again, I don't think you can actually define this without having some kind of typed memory</p>",
+        "id": 274488523,
+        "sender_full_name": "Jake",
+        "timestamp": 1646707353
+    },
+    {
+        "content": "<p>The type state I'm talking about is only in the compiler and MIR type system, the abstract machine is just seeing a write to the discriminant field if there is one</p>",
+        "id": 274489010,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646707860
+    },
+    {
+        "content": "<p>I guess your worry is that this could preserve padding bytes?</p>",
+        "id": 274489120,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646707966
+    },
+    {
+        "content": "<p>Well, not really though. Because MIRI and const eval have to implement the abstract machine, and they need to know which to do. Const eval at least doesn't have to care that much because it doesn't have to detect UB, but MIRI does</p>",
+        "id": 274489128,
+        "sender_full_name": "Jake",
+        "timestamp": 1646707976
+    },
+    {
+        "content": "<p>Would it be a problem if, say, <code>SetDiscriminant</code> on a simple tagged enum like <code>Result&lt;u8, u8&gt;</code> just set the tag and did not make the other field uninit? The compiler / MIR type system would still treat it as uninit but unsafe code could make use of the fact that it is not without causing UB, and this seems fine to me</p>",
+        "id": 274489275,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708145
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489275\">said</a>:</p>\n<blockquote>\n<p>Would it be a problem if, say, <code>SetDiscriminant</code> on a simple tagged enum like <code>Result&lt;u8, u8&gt;</code> just set the tag and did not make the other field uninit? The compiler / MIR type system would still treat it as uninit but unsafe code could make use of the fact that it is not without causing UB, and this seems fine to me</p>\n</blockquote>\n<p>Something being \"uninit\" in MIR when it isn't actually uninit sounds like it is bound to cause incorrect optimizations</p>",
+        "id": 274489351,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708204
+    },
+    {
+        "content": "<p>Miri would implement the behavior of the abstract machine, meaning that it would not touch the field byte and would not give an error on code that read it</p>",
+        "id": 274489354,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708206
+    },
+    {
+        "content": "<p>If I may ask more generally; what problem are you trying to solve right now?</p>",
+        "id": 274489377,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708249
+    },
+    {
+        "content": "<p>the MIR type system is (necessarily) an underapproximation of the true definedness of the machine. Things get more defined as you get more concrete</p>",
+        "id": 274489378,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708249
+    },
+    {
+        "content": "<p>I'm trying to determine what the spec for the MIR operations is, in the context of the MIR type system (that doesn't exist yet)</p>",
+        "id": 274489443,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708300
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489378\">said</a>:</p>\n<blockquote>\n<p>the MIR type system is (necessarily) an underapproximation of the true definedness of the machine. Things get more defined as you get more concrete</p>\n</blockquote>\n<p>But having something be <code>uninit</code> when it isn't is not making it underdefined. It's making it be very clearly defined in a wrong way</p>",
+        "id": 274489464,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708337
+    },
+    {
+        "content": "<p>Underdefined would be \"this is some unknown opaque value\"</p>",
+        "id": 274489473,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708349
+    },
+    {
+        "content": "<p>Hm, I would expect that the compiler does not distinguish between \"don't care\" and \"uninit\"</p>",
+        "id": 274489486,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708395
+    },
+    {
+        "content": "<p>I can't think of any example where it would be correct to do so</p>",
+        "id": 274489549,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708411
+    },
+    {
+        "content": "<p>\"uninit\" does exist in the AM but the compiler doesn't directly deal with it</p>",
+        "id": 274489588,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708426
+    },
+    {
+        "content": "<p>\"don't know\" and \"uninit\" are <em>very, very</em> different things. <code>let x = uninit;</code> can be \"optimized\" to <code>let x = 3;</code>. <code>let x = dontknow</code> cannot be optimized</p>",
+        "id": 274489639,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708447
+    },
+    {
+        "content": "<p>Ah, I don't mean \"don't know\" I mean \"any value can be present here and I have no obligation to preserve it\"</p>",
+        "id": 274489686,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708510
+    },
+    {
+        "content": "<p>that is how I understand the compiler's conception of \"uninit\"</p>",
+        "id": 274489757,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708543
+    },
+    {
+        "content": "<p>which is to say, maybe actual <code>uninit</code> and maybe something else</p>",
+        "id": 274489766,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708557
+    },
+    {
+        "content": "<p>That's what uninit is</p>",
+        "id": 274489782,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708580
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489275\">said</a>:</p>\n<blockquote>\n<p>Would it be a problem if, say, <code>SetDiscriminant</code> on a simple tagged enum like <code>Result&lt;u8, u8&gt;</code> just set the tag and did not make the other field uninit? The compiler / MIR type system would still treat it as uninit but unsafe code could make use of the fact that it is not without causing UB, and this seems fine to me</p>\n</blockquote>\n<p>You'd have to specify what the other option here is</p>",
+        "id": 274489801,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708596
+    },
+    {
+        "content": "<p>The compiler's uninit doesn't have to be AM uninit though</p>",
+        "id": 274489805,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708601
+    },
+    {
+        "content": "<p>What do you mean by \"the compiler's uninit\"</p>",
+        "id": 274489829,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708635
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489443\">said</a>:</p>\n<blockquote>\n<p>I'm trying to determine what the spec for the MIR operations is, in the context of the MIR type system (that doesn't exist yet)</p>\n</blockquote>\n<p>Also, addressing this more generally real quick; I don't think MIR can have a type system that we expect to be able to statically verify in all cases. After all, we have to lower Rust to MIR and Rust <code>unsafe</code> doesn't have such a type system</p>",
+        "id": 274489910,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708701
+    },
+    {
+        "content": "<p>To the extent that the compiler has knowledge about what values exist where in dataflow analyses and so on, it can say that values are uninit or not. I forget the name of the pass but it's like <code>MaybeUninitLocals</code> IIRC</p>",
+        "id": 274489928,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708738
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489910\">said</a>:</p>\n<blockquote>\n<p>Also, addressing this more generally real quick; I don't think MIR can have a type system that we expect to be able to statically verify in all cases. After all, we have to lower Rust to MIR and Rust <code>unsafe</code> doesn't have such a type system</p>\n</blockquote>\n<p>Rust has a type system even though there is <code>unsafe</code>, so I don't see the issue. The main claim would be that the type system is sound if there is no unsafe code, or if the unsafe code that is present satisfies some laundry list of conditions</p>",
+        "id": 274490064,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646708878
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489928\">said</a>:</p>\n<blockquote>\n<p>To the extent that the compiler has knowledge about what values exist where in dataflow analyses and so on, it can say that values are uninit or not. I forget the name of the pass but it's like <code>MaybeUninitLocals</code> IIRC</p>\n</blockquote>\n<p>So, I do not think we should have two definitions of MIR like this. In order to allow this we would need to, for each operation in MIR, 1) define what it does on the AM (after all this is what codegen needs to know), and 2) define what it does in terms of  \"what the compiler is allowed to do\" (or whatever you're proposing here)</p>",
+        "id": 274490189,
+        "sender_full_name": "Jake",
+        "timestamp": 1646708965
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274490064\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274489910\">said</a>:</p>\n<blockquote>\n<p>Also, addressing this more generally real quick; I don't think MIR can have a type system that we expect to be able to statically verify in all cases. After all, we have to lower Rust to MIR and Rust <code>unsafe</code> doesn't have such a type system</p>\n</blockquote>\n<p>Rust has a type system even though there is <code>unsafe</code>, so I don't see the issue. The main claim would be that the type system is sound if there is no unsafe code, or if the unsafe code that is present satisfies some laundry list of conditions</p>\n</blockquote>\n<p>It is not possible to statically prove that all Rust code obeys the type system's rules; my point is that we should not expect this of MIR either</p>",
+        "id": 274490288,
+        "sender_full_name": "Jake",
+        "timestamp": 1646709072
+    },
+    {
+        "content": "<p>The target is no more or less than what Rust is already doing with its type system. It's a somewhat comprehensive static analysis along certain axes with a deliberate escape hatch.</p>",
+        "id": 274490373,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646709143
+    },
+    {
+        "content": "<p>Hm, I still don't quite understand. Are you suggesting that the MIR produced by optimizations must pass static analysis (of whatever kind the type system mandates)?</p>",
+        "id": 274490470,
+        "sender_full_name": "Jake",
+        "timestamp": 1646709237
+    },
+    {
+        "content": "<p>I would love to know what kinds of optimizations can't be done in a type preserving way though. I can believe they exist, but if possible I would certainly like to keep up the type system all the way through</p>",
+        "id": 274490528,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646709268
+    },
+    {
+        "content": "<p>Yes, that's the hope. Still not sure to what extent this is achievable</p>",
+        "id": 274490541,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646709279
+    },
+    {
+        "content": "<p>I mean, various kinds of dead store elimination make it impossible to reason about initializedness in general. It also seems extremely difficult to make use of alias analysis in a way that requires MIR continue to pass borrowck (or some analogue), instead of just the runtime aliasing model</p>",
+        "id": 274490670,
+        "sender_full_name": "Jake",
+        "timestamp": 1646709374
+    },
+    {
+        "content": "<p>As far as I can tell, initializedness is a complex but solvable problem, no matter what semantics and order of operations is done for things like <code>SetDiscriminant</code></p>",
+        "id": 274490730,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646709438
+    },
+    {
+        "content": "<p>This may be a good question to bring up with T-Semantics at some point. Maybe I'm underestimating the degree to which this is achievable, but at least my instinct tells me that it's not very much</p>",
+        "id": 274490752,
+        "sender_full_name": "Jake",
+        "timestamp": 1646709460
+    },
+    {
+        "content": "<p>Yeah I'm basically projecting what I imagine T-semantics will be doing</p>",
+        "id": 274490835,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646709505
+    },
+    {
+        "content": "<p>I was almost convinced by Oli's argument that we only really need a type system for the input MIR before optimizations, but Miri runs on optimized MIR so a preservation + progress style argument for miri would be really tough if it's disconnected from the original MIR</p>",
+        "id": 274490920,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646709602
+    },
+    {
+        "content": "<p>So to summarize the question real quick: \"Optimized MIR will obviously be required to pass at least some basic well-formedness constraints. How strong is the type system/static analysis that we can require it adhere to?\"</p>",
+        "id": 274491031,
+        "sender_full_name": "Jake",
+        "timestamp": 1646709713
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274490920\">said</a>:</p>\n<blockquote>\n<p>I was almost convinced by Oli's argument that we only really need a type system for the input MIR before optimizations, but Miri runs on optimized MIR so a preservation + progress style argument for miri would be really tough if it's disconnected from the original MIR</p>\n</blockquote>\n<p>I would much rather we address this by doing less optimizations (or transformations more generally) before MIRI</p>",
+        "id": 274491244,
+        "sender_full_name": "Jake",
+        "timestamp": 1646709862
+    },
+    {
+        "content": "<p>I think we should be able to typecheck structural transformations like deaggregation, but code motion stuff is particularly hard on the typechecker</p>",
+        "id": 274491312,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646709938
+    },
+    {
+        "content": "<p>Yeah. I mean, analyzing the deaggregation that I proposed is not particularly hard anyway; it's actually made somewhat easier by the fact that <code>SetDiscriminant</code> sets the place it refers to to a very well-defined state in a context-free way</p>",
+        "id": 274491398,
+        "sender_full_name": "Jake",
+        "timestamp": 1646710013
+    },
+    {
+        "content": "<p>Although, it would be super cool if this caught bugs in mir-opt. I've seen several of Simon Peyton Jones's talks where he highly lauds the decision to have types through all the compiler IRs of Haskell and how effective they are at finding compiler bugs</p>",
+        "id": 274491510,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646710125
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274491510\">said</a>:</p>\n<blockquote>\n<p>Although, it would be super cool if this caught bugs in mir-opt. I've seen several of Simon Peyton Jones's talks where he highly lauds the decision to have types through all the compiler IRs of Haskell and how effective they are at finding compiler bugs</p>\n</blockquote>\n<p>I mean, the little MIR validation that we have right now has done that for me already <span aria-label=\"laughing\" class=\"emoji emoji-1f606\" role=\"img\" title=\"laughing\">:laughing:</span> . But I just do not think it is possible for many kinds of optimizations</p>",
+        "id": 274491751,
+        "sender_full_name": "Jake",
+        "timestamp": 1646710292
+    },
+    {
+        "content": "<p>well, it's always <em>possible</em>, it just might not be economical <span aria-label=\"laughing\" class=\"emoji emoji-1f606\" role=\"img\" title=\"laughing\">:laughing:</span></p>",
+        "id": 274491957,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1646710466
+    },
+    {
+        "content": "<p>I've added a commit to the PR that implements these changes in const eval</p>",
+        "id": 274496579,
+        "sender_full_name": "Jake",
+        "timestamp": 1646715215
+    },
+    {
+        "content": "<p>I tend to think <code>SetDiscriminant</code> should make direct padding (that is padding not part of fields) uninit, but not touch any fields.</p>",
+        "id": 274501034,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1646720082
+    },
+    {
+        "content": "<blockquote>\n<p>I would much rather we address this by doing less optimizations (or transformations more generally) before MIRI</p>\n</blockquote>\n<p>I don't think this is a good idea. Miri implements the dynamic checks that \"we\" believe MIR must satisfy. Anything lower level is LLVM IR or other backend IR. All backends can rely on the model implemented by miri. If we break from this it means MIR becomes uncheckable and thus imo we stop having a reasonable model.</p>",
+        "id": 274511036,
+        "sender_full_name": "oli",
+        "timestamp": 1646729157
+    },
+    {
+        "content": "<p>Oh, sorry, i had misunderstood the comment (I thought the concern was about missing UB). Yes, i agree that optimized MIR should pass Miri.</p>",
+        "id": 274511951,
+        "sender_full_name": "Jake",
+        "timestamp": 1646729802
+    },
+    {
+        "content": "<p>A great <span aria-label=\"big smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"big smile\">:big_smile:</span>! Yea, miri runs on unoptimized and optimized mir, because opts will remove UB by making decisions where there was UB, and we want to catch both misoptimizations and UB before opts</p>",
+        "id": 274513372,
+        "sender_full_name": "oli",
+        "timestamp": 1646730711
+    },
+    {
+        "content": "<p>The only opt that your proposed scheme makes impossible is one where we go from one variant to another while keeping the field data.</p>\n<p>On the \"having to know when stuff is fully initialized\" side I'm wondering how this plays into the validity checks that miri performs on locals. I think we run validity checks on places before reading them, but I need to check if that's actually how it works. I think your change is completely fine in that regard.</p>",
+        "id": 274514416,
+        "sender_full_name": "oli",
+        "timestamp": 1646731434
+    },
+    {
+        "content": "<p>The deaggregator is run even with mir optimizations disabled as the codegen backends can't handle aggregates. This necessarily means that the optimized_mir encoded in the crate metadata as read by miri the tool also sees the deaggregated version.</p>",
+        "id": 274518968,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1646733949
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274514416\">said</a>:</p>\n<blockquote>\n<p>The only opt that your proposed scheme makes impossible is one where we go from one variant to another while keeping the field data.</p>\n<p>On the \"having to know when stuff is fully initialized\" side I'm wondering how this plays into the validity checks that miri performs on locals. I think we run validity checks on places before reading them, but I need to check if that's actually how it works. I think your change is completely fine in that regard.</p>\n</blockquote>\n<p>Regarding the first point, yes. This is sort of by design. I had actually started this conversation by asking if such a thing was supposed to be legal (<a href=\"#narrow/stream/131828-t-compiler/topic/Semantics.20of.20.60SetDiscriminant.60.20in.20MIR/near/273749927\">link</a>).</p>",
+        "id": 274612553,
+        "sender_full_name": "Jake",
+        "timestamp": 1646776245
+    },
+    {
+        "content": "<p>This is also the kind of optimization that LLVM can do (at least in principle), so I don't mind leaving it for there</p>",
+        "id": 274612624,
+        "sender_full_name": "Jake",
+        "timestamp": 1646776286
+    },
+    {
+        "content": "<p>That being said, there was a good point brought up in the thread that should probably be discussed explicitly here. This change can only apply to ADTs, not to generators, since generators need to preserve some of their fields. Ralf indicated that his intuition was that these two statements are generally alike, and that such a difference in behavior was maybe surprising. This does indeed give me some pause. However, I think it is the <code>SetDiscriminant</code> for generators that is the odd one out here, not the other way around. For generators specifically, I think <span class=\"user-mention\" data-user-id=\"125250\">@Wesley Wiser</span> 's idea of making the discriminant a field projection might be the right way forward.</p>\n<p>For example, this makes reasoning about aliasing somewhat easier:</p>\n<div class=\"codehilite\"><pre><span></span><code>P.field = value;\nSetDiscriminant(P);\nuse P.field;\n</code></pre></div>\n<p>A precise analysis to track aliasing would need to treat the <code>SetDiscriminant</code> specially for generators, and essentially have to make up a <code>generator</code> projection from which it could then prove that the <code>P.field</code> and <code>SetDiscriminant</code> don't alias. Putting this projection into MIR directly seems like a good way to simplify this sort of thing</p>",
+        "id": 274616966,
+        "sender_full_name": "Jake",
+        "timestamp": 1646778413
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274456524\">said</a>:</p>\n<blockquote>\n<p>Since we are allowed to do random things to the layout, you can't even know where the padding is, so idk how you could rely on it</p>\n</blockquote>\n<p>you can use <code>repr(C)</code> though, or determine the layout at runtime with <code>offset_of!</code>.<br>\nultimately in memory it's all just bytes (I object to making the Rust memory model more complicated by actually having type structure in memory). only when that memory is accessed with a given type, does that type play a role -- such as when doing an assignment.</p>",
+        "id": 274618115,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646779126
+    },
+    {
+        "content": "<p>Yes... I realize now that Operands on the full typed place are the most frequent situation where the place actually needs to be valid. Whether we set the discriminant first or last is pretty much irrelevant. Locals themselves, while having types, don't actually have any invariants to enforce on their value.</p>",
+        "id": 274618500,
+        "sender_full_name": "oli",
+        "timestamp": 1646779387
+    },
+    {
+        "content": "<p>So... generators get a magic field for their state? Seems ok unless we want some weirder way to track state than just a plain field. I don't think we'll go all niche-encoding on generators, but I don't actually know the plans people have for generators</p>",
+        "id": 274618828,
+        "sender_full_name": "oli",
+        "timestamp": 1646779606
+    },
+    {
+        "content": "<p>yes, locals are just pointers</p>",
+        "id": 274618846,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1646779619
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/274618828\">said</a>:</p>\n<blockquote>\n<p>So... generators get a magic field for their state? Seems ok unless we want some weirder way to track state than just a plain field. I don't think we'll go all niche-encoding on generators, but I don't actually know the plans people have for generators</p>\n</blockquote>\n<p>Even if we decide to do this, it doesn't prevent using the <code>.discriminant</code> field projection for the generator state. That particular projection will just have to be... a little magic (ie can't take references to it)</p>",
+        "id": 274621474,
+        "sender_full_name": "Jake",
+        "timestamp": 1646781205
+    },
+    {
+        "content": "<p>So I thought about this again, and I have an alternative proposal that may or may not be better: <code>SetDiscriminant</code> is no longer permitted on ADTs; instead, we introduce a new <code>RValue</code>. Specifically, deaggregation for <code>P</code> outputs MIR like this:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"n\">P</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">UninitVariant</span><span class=\"p\">(</span><span class=\"n\">variant_idx</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"n\">P</span><span class=\"p\">.</span><span class=\"n\">field_1</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">operand_1</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">P</span><span class=\"p\">.</span><span class=\"n\">field_2</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">operand_2</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Semantically, the <code>P = UninitVariant(variant_idx);</code> is no different from what I proposed <code>SetDiscriminant(P) = variant_idx;</code> should mean. However:</p>\n<ol>\n<li>There is no confusion with <code>SetDiscriminant</code> having different meanings for generators vs ADTs. <code>SetDiscriminant</code> has a consistent meaning regardless of the type, and what its exact properties are can be decided in the future, with no need to ever concern ourselves with such inconsistencies.</li>\n<li>This brings the \"shape\" of MIR much more in line with what the behavior of the statement is. I didn't realize this until now, but the version of <code>SetDiscriminant</code> I proposed has always had the semantics of an assignment.</li>\n<li>As a result, reasoning about MIR becomes simpler. <code>P = UninitVariant</code> is an assignment to <code>P</code>, and hence <code>P</code> is dead immediately before the assignment - no need to reason about two different <code>StatementKind</code>s. Similarly, the variant of a place <code>P</code> can only ever change with an <code>Assign</code>ment to that place (or another place that overlaps it).</li>\n</ol>\n<p>The main downside is that this is a more invasive change. Possibly we could do a two-phase approach to this, beginning with the changes in the current PR, and then adding the <code>RValue</code> in a follow-up. I'm not sure if that would be simpler or more complicated though.</p>",
+        "id": 275191376,
+        "sender_full_name": "Jake",
+        "timestamp": 1647229610
+    },
+    {
+        "content": "<p>Can we codegen such an assignment properly? For miri it's not an issue, but I don't want codegen to end go generating the whole uninit value and copying it into the local</p>",
+        "id": 275200342,
+        "sender_full_name": "oli",
+        "timestamp": 1647242011
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"124288\">oli</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/275200342\">said</a>:</p>\n<blockquote>\n<p>Can we codegen such an assignment properly? For miri it's not an issue, but I don't want codegen to end go generating the whole uninit value and copying it into the local</p>\n</blockquote>\n<p>The old codegen for <code>SetDiscriminant</code> is a correct implementation of the semantics of that assignment, so it shouldn't be a problem</p>",
+        "id": 275200671,
+        "sender_full_name": "Jake",
+        "timestamp": 1647242402
+    },
+    {
+        "content": "<p>If in the future we identify instances where it might help optimization, we can then emit the additional <code>uninit</code> to LLVM in just those cases</p>",
+        "id": 275201327,
+        "sender_full_name": "Jake",
+        "timestamp": 1647243134
+    },
+    {
+        "content": "<p>Oh I'm not worried about correctness, but for for now rvalues are actual values of the correct size and not just a magic field assignment. At this point we can get rid of special rvalues and statements and just use a constant that has the right bytes set. We'll need to address <a href=\"https://github.com/rust-lang/rust/issues/63159\">https://github.com/rust-lang/rust/issues/63159</a> and <a href=\"https://github.com/rust-lang/rust/issues/54360\">https://github.com/rust-lang/rust/issues/54360</a> first though</p>",
+        "id": 275206299,
+        "sender_full_name": "oli",
+        "timestamp": 1647247181
+    },
+    {
+        "content": "<p>Sorry, you've lost me here a little bit. Is the concern whether this will be reasonably implementable in current codegen?</p>",
+        "id": 275216412,
+        "sender_full_name": "Jake",
+        "timestamp": 1647253364
+    },
+    {
+        "content": "<p>Yes. codegen will have to special case <code>Assign(_, Rvalue::UninitVariant(..))</code> in order to keep just setting the tag and not actually write a gazillion bytes for large enums</p>",
+        "id": 275217015,
+        "sender_full_name": "oli",
+        "timestamp": 1647253688
+    },
+    {
+        "content": "<p>Right, I see. If this is complexity that we don't want to deal with, then maybe sticking with the current version and revisiting this idea in the future is best</p>",
+        "id": 275217559,
+        "sender_full_name": "Jake",
+        "timestamp": 1647253982
+    },
+    {
+        "content": "<p>Well... there may be precedent, or it maybe entirely efficient to just generate the large enum rvalue. Without experimentation, I don't think we can tell</p>",
+        "id": 275217947,
+        "sender_full_name": "oli",
+        "timestamp": 1647254228
+    },
+    {
+        "content": "<p>Yeah, I can try and get a branch up today or tomorrow that makes this change</p>",
+        "id": 275219164,
+        "sender_full_name": "Jake",
+        "timestamp": 1647254967
+    },
+    {
+        "content": "<p>aha! I found the discussion about using <code>SetDiscriminant</code>: <a href=\"https://github.com/rust-lang/rust/issues/49199\">https://github.com/rust-lang/rust/issues/49199</a></p>",
+        "id": 275400372,
+        "sender_full_name": "oli",
+        "timestamp": 1647362719
+    },
+    {
+        "content": "<p>but we can work around that by adding some form of <code>ThisIsInitializedNow</code> statement that we remove after borrowck</p>",
+        "id": 275400430,
+        "sender_full_name": "oli",
+        "timestamp": 1647362743
+    },
+    {
+        "content": "<p>Yeah, i would greatly prefer that. I don't think we should be overloading statements more than we have to</p>",
+        "id": 275432776,
+        "sender_full_name": "Jake",
+        "timestamp": 1647377091
+    },
+    {
+        "content": "<p>Sort of unrelated, but is there a way that I can be added to the mir-opt ping group on GH? I don't know what the procedures are for joining the WG, if that's the easiest way of going about it - mostly I just want to be able to keep up on PRs and changes and such</p>",
+        "id": 275441084,
+        "sender_full_name": "Jake",
+        "timestamp": 1647381296
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jake</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/275219164\">said</a>:</p>\n<blockquote>\n<p>Yeah, I can try and get a branch up today or tomorrow that makes this change</p>\n</blockquote>\n<p>Well, longer than expected, but <a href=\"https://github.com/rust-lang/rust/issues/95125\">#95125</a> is up</p>",
+        "id": 275934466,
+        "sender_full_name": "Jake",
+        "timestamp": 1647730467
+    },
+    {
+        "content": "<p>So, after <span class=\"user-mention\" data-user-id=\"116009\">@nikomatsakis</span> 's request, I've decided to write up what I think is the question and the possible solutions: <a href=\"https://hackmd.io/@2S4Crel_Q9OwC_vamlwXmw/SyiViEAM5/edit\">https://hackmd.io/@2S4Crel_Q9OwC_vamlwXmw/SyiViEAM5/edit</a> This definitely suffers from the \"if I had more time, I would've written a shorter letter\" effect, but whatever. cc <span class=\"user-mention\" data-user-id=\"124288\">@oli</span> , <span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> , <span class=\"user-mention\" data-user-id=\"119009\">@eddyb</span> .</p>\n<p>The tldr is this: There seem to be three interesting \"basic primitives\" - <code>Deinit</code>, <code>SetDiscriminant</code> and <code>Finalize</code> - and they can be combined in a number of ways. It feels like all but two of those ways are strictly worse than others (among the ones I could come up with). I'm undecided on which of them is better; neither of those options are the same as either of the two current PRs. It probably depends on the question of whether we want to support MIR like:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">enum</span> <span class=\"nc\">E</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">A</span><span class=\"p\">(</span><span class=\"kt\">u8</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">B</span><span class=\"p\">(</span><span class=\"kt\">u8</span><span class=\"p\">),</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"n\">_1</span><span class=\"p\">.</span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">SetDiscriminant</span><span class=\"p\">(</span><span class=\"n\">_1</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">A</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"c1\">// other code</span>\n<span class=\"n\">SetDiscriminant</span><span class=\"p\">(</span><span class=\"n\">_1</span><span class=\"p\">)</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">B</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"c1\">// use `_1` as a fully initialized value</span>\n</code></pre></div>\n<p>There seemed to be disagreement about this in the PR. My opinion is that we shouldn't support it in MIR if we don't intend to support it in Rust</p>",
+        "id": 276814140,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1648424629
+    },
+    {
+        "content": "<p>This is a great summary! I'm still in the \"Do all three\" team, but we can just ignore <code>Finalize</code> and moving earlier for now and figure it out separately later.</p>\n<p>I think running <code>SetDiscriminant</code> twice on an initialized value should be fine, if only for the reason that removing <code>Deinit</code> statements is technically a fine operation as it removes UB (at which point you could encounter multiple SetDiscriminant statements for the same place). I think we'll also want to drop all <code>Deinit</code> calls before going into LLVM (and maybe convert some of them into <code>StorageLive</code> statements)</p>",
+        "id": 276836892,
+        "sender_full_name": "oli",
+        "timestamp": 1648453224
+    },
+    {
+        "content": "<p>Hmm, yeah, this is a good point. Doing all three is also growing on me actually. It does seem like the most straightforward and future proof solution to the problem at hand. I'll hold off for another few days though, let the idea simmer a little bit and give anyone else who wants to time to weigh in</p>",
+        "id": 276945439,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1648512988
+    },
+    {
+        "content": "<p>I dont quite get why (3) <em>requires</em> (2), but dont mind it either</p>",
+        "id": 277049929,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648580059
+    },
+    {
+        "content": "<blockquote>\n<p>The correctness of such MIR is fundamentally layout dependent</p>\n</blockquote>\n<p>is it? not any more than, say, using ptr arithmetic to mess with struct fields (which can even be expressed in Rust, and hence in MIR)</p>",
+        "id": 277050036,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648580127
+    },
+    {
+        "content": "<blockquote>\n<p>One possible mitigation here (if we don’t want goal 6) would be a rule that states that for enums, SetDiscriminant may only appear immediately after a Deinit for the same place.</p>\n</blockquote>\n<p>I dont mind having such a rule as part of what we consider \"canonical MIR\", but I think we should describe MIR semantics (and implement Miri) in a way that even MIR not following this rule 'makes sense'. IOW I wouldnt want such non-local effects to affect our operational semantics.</p>",
+        "id": 277050371,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648580300
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277049929\">said</a>:</p>\n<blockquote>\n<p>I dont quite get why (3) <em>requires</em> (2), but dont mind it either</p>\n</blockquote>\n<p>It specifically requires the \"easy to reason about initialization\" thing. borrowck and drop elaboration need to be able to figure out when things are initialized</p>",
+        "id": 277062652,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1648586801
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277050036\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>The correctness of such MIR is fundamentally layout dependent</p>\n</blockquote>\n<p>is it? not any more than, say, using ptr arithmetic to mess with struct fields (which can even be expressed in Rust, and hence in MIR)</p>\n</blockquote>\n<p>Well, yes, that also is. Rust code can fundamentally be layout dependent, and of course there is nothing that MIR can or should do about that. I would only prefer if we do our best to not introduce more layout specific things than there already are</p>",
+        "id": 277062751,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1648586871
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277050371\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>One possible mitigation here (if we don’t want goal 6) would be a rule that states that for enums, SetDiscriminant may only appear immediately after a Deinit for the same place.</p>\n</blockquote>\n<p>I dont mind having such a rule as part of what we consider \"canonical MIR\", but I think we should describe MIR semantics (and implement Miri) in a way that even MIR not following this rule 'makes sense'. IOW I wouldnt want such non-local effects to affect our operational semantics.</p>\n</blockquote>\n<p>I agree - I am not suggesting that this would affect our operational semantics, and miri should accept such code in any case. I'm arguing that maybe the validator shouldn't. This is in effect no different from the requirement that <code>copy</code> operands have <code>Copy</code> types - the operational semantics are completely ok with us just dropping that requirement, but we have it anyway</p>",
+        "id": 277062874,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1648586961
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jak{e,ob} Degen</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277062751\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277050036\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>The correctness of such MIR is fundamentally layout dependent</p>\n</blockquote>\n<p>is it? not any more than, say, using ptr arithmetic to mess with struct fields (which can even be expressed in Rust, and hence in MIR)</p>\n</blockquote>\n<p>Well, yes, that also is. Rust code can fundamentally be layout dependent, and of course there is nothing that MIR can or should do about that. I would only prefer if we do our best to not introduce more layout specific things than there already are</p>\n</blockquote>\n<p>right so I am asking in which sense this is introducing new kinds of layout dependencies.<br>\noverwriting the discriminant in an enum without de-initing the fields is like overwriting a union field, it is not a new kind of layout dependency.</p>",
+        "id": 277317724,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648749344
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277317724\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jak{e,ob} Degen</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277062751\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277050036\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>The correctness of such MIR is fundamentally layout dependent</p>\n</blockquote>\n<p>is it? not any more than, say, using ptr arithmetic to mess with struct fields (which can even be expressed in Rust, and hence in MIR)</p>\n</blockquote>\n<p>Well, yes, that also is. Rust code can fundamentally be layout dependent, and of course there is nothing that MIR can or should do about that. I would only prefer if we do our best to not introduce more layout specific things than there already are</p>\n</blockquote>\n<p>right so I am asking in which sense this is introducing new kinds of layout dependencies.<br>\noverwriting the discriminant in an enum without de-initing the fields is like overwriting a union field, it is not a new kind of layout dependency.</p>\n</blockquote>\n<p>I don't mean to imply that it's a \"new layout dependency\" in the sense of a new language feature - what I mean is that if we allow such code, optimizations might be encouraged to take code for which we could previously prove some analysis result in a layout independent way, and turn it into code for which we can only prove that analysis result by accessing layout information</p>",
+        "id": 277342632,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1648762048
+    },
+    {
+        "content": "<p>I would like to avoid accessing layout information in as many parts of MIR as possible (because I'm hopeful that it will simplify things), and so this is something that I'm a little weary of</p>",
+        "id": 277342722,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1648762091
+    },
+    {
+        "content": "<p>That being said, I've thought about this more and at this point I'm completely on board with the approach of emitting all three. I'll try and update the PR over the next day or so - it'll probably be some time before it lands, so concerns can still be filed</p>",
+        "id": 277343284,
+        "sender_full_name": "Jak{e,ob} Degen",
+        "timestamp": 1648762508
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"310518\">Jak{e,ob} Degen</span> <a href=\"#narrow/stream/189540-t-compiler.2Fwg-mir-opt/topic/SetDiscriminant.20and.20aggregate.20initialization.20.2394590/near/277342722\">said</a>:</p>\n<blockquote>\n<p>I would like to avoid accessing layout information in as many parts of MIR as possible (because I'm hopeful that it will simplify things), and so this is something that I'm a little weary of</p>\n</blockquote>\n<p>FWIW, I agree with the general concern, I am just not sure it applies here. I would have asked for a concrete example next. But it seems we actually agree on which primitives to provide so never mind ;)</p>",
+        "id": 277363451,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648779497
+    },
+    {
+        "content": "<p>in particular not accessing layout info is crucial to be able to do pre-mono optimizations on generic code</p>",
+        "id": 277363459,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1648779521
+    }
+]

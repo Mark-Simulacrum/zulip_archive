@@ -1,0 +1,177 @@
+<html>
+<head><meta charset="utf-8"><title>Correct parsing of `None`-delimited groups · t-lang · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/index.html">t-lang</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html">Correct parsing of `None`-delimited groups</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="237688163"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237688163" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237688163">(May 06 2021 at 16:24)</a>:</h4>
+<p>Currently, the parser completely ignores <code>None</code>-delimited groups (see <a href="https://github.com/rust-lang/rust/issues/67062">https://github.com/rust-lang/rust/issues/67062</a>). I'd like to start working towards deciding what the correct parsing behavior should be, as this is causing issues with macro invocations.</p>
+<p>Some background:<br>
+A <code>TokenStream</code> has the concept of a <code>None</code>-delimited group - this is <code>DelimToken::None</code> in <code>rustc_ast</code>, and <code>Delimiter::None</code> in the public <code>proc_macro</code> API. These are mainly created during <code>macro_rules!</code> expansion, to wrap interpolated tokens. For example:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="fm">macro_rules!</span><span class="w"> </span><span class="n">expand</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="cp">$e</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="cp">$e</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="n">expand</span><span class="o">!</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span><span class="w"></span>
+</code></pre></div>
+<p>will result in <code>&lt;2&gt; + 1</code>, where <code>&lt;&gt;</code> represents a <code>None</code>-delimited group. What makes this tricky is the fact that we do not actually create a <code>None</code>-delimited group immediately. Instead, we create a <code>token::Interpolated</code>, which is only converted to a <code>None</code>-delimited group if a proc-macro re-collects the <code>TokenStream</code> (e.g. <code>token_stream.into_iter().collect()</code>). This means that we <em>appear</em> to handle <code>None</code>-delimited groups correctly in many places, but that's only because we're still dealing with a <code>token::Interpolated</code></p>
+<p>However,  proc-macros are able to manually insert <code>None</code>-delimited groups themselves, using the proc-macro API. While I'm not personally aware of any crates that do this, it's possible for a crate today to emit something like:<br>
+<code>&lt;&lt;fn&gt; foo &lt;()&gt; (&lt;&lt;&lt;val&gt;: u8&gt;&gt;) { }&gt;</code>, where <code>&lt;&gt;</code> is a <code>None</code>-delimited group. This will be accepted by the parser, since all of the <code>None</code>-delimited groups will be ignored.</p>
+<p>Unfortunately, simply ignoring <code>None</code>-delimited groups is not a viable strategy. Consider the following macro:</p>
+<div class="codehilite" data-code-language="Rust"><pre><span></span><code><span class="fm">macro_rules!</span><span class="w"> </span><span class="n">call_it</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="cp">$e</span>:<span class="nc">expr</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="cp">#[my_proc_macro]</span><span class="w"></span>
+<span class="w">        </span><span class="k">fn</span> <span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="fm">println!</span><span class="p">(</span><span class="s">"Result: {:?}"</span><span class="p">,</span><span class="w"> </span><span class="cp">$e</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="n">call_it</span><span class="o">!</span><span class="p">(</span><span class="mi">1</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+</code></pre></div>
+<p>If <code>my_proc_macro</code> does <em>not</em> recollect its input (e.g. it returns the <code>TokenStream</code> unchanged), then the <code>token::Interpolated</code> will be left as-is. We will parse this as '(1 +1) * 2<code>, causing us to print </code>4.`</p>
+<p>If <code>my_proc_macro</code> <em>does</em><code> recollect its input, we will end up parsing </code>&lt;1 + 1&gt; * 2<code>. Since we ignore </code>None<code>-delimited groups, this will be parsed as </code>1 + (1 * 2)<code>, causing us to print </code>3.`</p>
+<p>This means that our decisions about parsing <code>None</code>-delimited groups can result in <em>runtime behavior changes</em>, not just compile errors.</p>
+<p>I see several different options for how to proceed:</p>
+<ul>
+<li>Do nothing, and always ignore <code>None</code>-delimited groups. I think this is a very bad option - it means that a proc-macro's decision to recollect the <code>TokenStream</code> can result in runtime behavior changes, and effectively makes <code>None</code>-delimited groups useless.</li>
+<li>Treat <code>None</code>-delimited groups in expression position like parenthesis, and otherwise ignore them. This means that a token stream like <code>&lt;fn&gt; &lt;&lt;foo&gt;(val: u8)&gt;</code> will have its behavior unchanged. This option would give consistent behavior for the <code>1 + 2 * 2</code> case. In nno-expressions positions, there aren't obvious 'parsing priorities' (what would it mean for <code>fn</code> to have a higher 'precedence' than <code>foo</code>).</li>
+<li>Ban <code>None</code>-delimited groups from certain positions (probably most non-expression positions), and adjust <code>macro_rules!</code> insertion to not insert <code>None</code>-delimited groups in some places. This would mean that we don't silently accept <code>None</code>-delimiters in 'weird' places, but it would require us to be much smarter about where we <em>do</em> insert <code>None</code>-delimited groups.</li>
+</ul>
+<p>Assuming we choose to change our parsing of <code>None</code>-delimited groups in some way, we'll need to think about backwards-compatibility. When dealing with <code>None</code>-delimited groups, we are by definition dealing with macros, which means that it can be tricky to figure out who to 'blame' for the presence of a <code>None</code>-delimited group.</p>
+<p>cc <span class="user-mention" data-user-id="123856">@Vadim Petrochenkov</span></p>
+
+
+
+<a name="237697199"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237697199" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237697199">(May 06 2021 at 17:25)</a>:</h4>
+<p>I'd expect explicitly expecting <code>None</code> delimiters in the same places in the parser where interpolated tokens are expected.</p>
+
+
+
+<a name="237697372"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237697372" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237697372">(May 06 2021 at 17:27)</a>:</h4>
+<p>(That means none of the options listed above - <code>None</code> delimiters are never ignored, never banned and always inserted by <code>macro_rules</code>.)</p>
+
+
+
+<a name="237697585"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237697585" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237697585">(May 06 2021 at 17:28)</a>:</h4>
+<p>That means in contexts supporting parentheses (expr, ty, pat) <code>None</code> delimiters would behave exactly like parentheses, that's the simplest case.</p>
+
+
+
+<a name="237697687"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237697687" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Daniel Henry-Mantilla <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237697687">(May 06 2021 at 17:29)</a>:</h4>
+<p>Also, for some context: <a href="https://github.com/danielhenrymantilla/rust-defile">https://github.com/danielhenrymantilla/rust-defile</a>, mainly the Caveats section at the bottom</p>
+
+
+
+<a name="237697699"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237697699" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237697699">(May 06 2021 at 17:29)</a>:</h4>
+<p>In other contexts we would modify the parser to parse <code>⟪ struct S; ⟫</code> as an item in contexts where we are expecting an item, in the same way as <code>struct S;</code>.</p>
+
+
+
+<a name="237697913"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237697913" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237697913">(May 06 2021 at 17:30)</a>:</h4>
+<p>And <code>NtIdent</code> is the tricky case, it's still likely that it shouldn't be wrapped into a <code>None</code>-delimited group at all, the question is how to do this better in the compiler without losing spans for diagnostics.</p>
+
+
+
+<a name="237698172"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237698172" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237698172">(May 06 2021 at 17:32)</a>:</h4>
+<blockquote>
+<p>as an item in contexts where we are expecting an item</p>
+</blockquote>
+<p>In other words, we are extending the item grammar with production</p>
+<div class="codehilite"><pre><span></span><code>ITEM = &quot;⟪&quot; ITEM &quot;⟫&quot;
+</code></pre></div>
+<p>and other nodes too</p>
+<div class="codehilite"><pre><span></span><code>BLOCK = &quot;⟪&quot; BLOCK &quot;⟫&quot;
+STMT = &quot;⟪&quot; STMT &quot;⟫&quot;
+ATTR_ITEM = &quot;⟪&quot; ATTR_ITEM &quot;⟫&quot;
+PATH = &quot;⟪&quot; PATH &quot;⟫&quot;
+VIS = &quot;⟪&quot; VIS &quot;⟫&quot;
+</code></pre></div>
+
+
+
+<a name="237699097"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237699097" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237699097">(May 06 2021 at 17:38)</a>:</h4>
+<p>There may be some issues with lookahead, but the solution is unlikely to be something worse than <a href="https://github.com/rust-lang/rust/pull/84130">https://github.com/rust-lang/rust/pull/84130</a>.</p>
+
+
+
+<a name="237958906"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237958906" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237958906">(May 08 2021 at 14:11)</a>:</h4>
+<p>What happens for None-delimited groups that can't be produced by macro_rules expansions?</p>
+
+
+
+<a name="237958972"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237958972" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237958972">(May 08 2021 at 14:12)</a>:</h4>
+<p>E g. A proc-macro creating <code>&lt;pub fn&gt; foo() {}</code></p>
+
+
+
+<a name="237959011"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237959011" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237959011">(May 08 2021 at 14:13)</a>:</h4>
+<p>There's no nonterminal for 'pub fn' (other than a sequence of token trees, which is expanded without None delimiters</p>
+
+
+
+<a name="237982341"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237982341" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237982341">(May 08 2021 at 20:25)</a>:</h4>
+<p>You get a visibility parsing error then because <code>pub fn</code> is not a visibility?</p>
+
+
+
+<a name="237982438"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237982438" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Vadim Petrochenkov <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237982438">(May 08 2021 at 20:27)</a>:</h4>
+<p>(With <code>macro_rules</code> this kind of arbitrary fragments can only be passed with <code>tt</code> matchers which don't get wrapped into <code>None</code> delimiters.)</p>
+
+
+
+<a name="237984053"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237984053" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237984053">(May 08 2021 at 20:56)</a>:</h4>
+<p>That's what I meant by 'ban None-delimited groups in certain positions' - sorry if that was unclear</p>
+
+
+
+<a name="237984062"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237984062" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237984062">(May 08 2021 at 20:56)</a>:</h4>
+<p>I guess the banning is implicit in the fact that we only allow them in certain positions</p>
+
+
+
+<a name="237984077"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237984077" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237984077">(May 08 2021 at 20:57)</a>:</h4>
+<p>I think your suggestion makes the most sense</p>
+
+
+
+<a name="237984081"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237984081" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237984081">(May 08 2021 at 20:57)</a>:</h4>
+<p>Hopefully, there aren't any proc-macros that would be broken by this</p>
+
+
+
+<a name="237984132"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237984132" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237984132">(May 08 2021 at 20:58)</a>:</h4>
+<p>from my previous token-handling PRs, it seemed like most proc-macros were oblivious to <code>None</code>-delimited groups</p>
+
+
+
+<a name="237984144"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/213817-t-lang/topic/Correct%20parsing%20of%20%60None%60-delimited%20groups/near/237984144" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Aaron Hill <a href="https://zulip-archive.rust-lang.org/stream/213817-t-lang/topic/Correct.20parsing.20of.20.60None.60-delimited.20groups.html#237984144">(May 08 2021 at 20:58)</a>:</h4>
+<p>so hopefully no one has decided to do something weird and pointless like inserting <code>None</code>-delimited groups in weird places</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

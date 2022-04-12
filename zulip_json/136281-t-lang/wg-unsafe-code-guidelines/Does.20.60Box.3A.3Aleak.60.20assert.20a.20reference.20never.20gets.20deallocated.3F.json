@@ -1,0 +1,512 @@
+[
+    {
+        "content": "<p><code>Box::leak</code> returns a reference with an arbitrary lifetime (including <code>'static</code>). The documentation for the method also says:</p>\n<blockquote>\n<p>Dropping the returned reference will cause a memory leak. If this is not acceptable, the reference should first be wrapped with the Box::from_raw function producing a Box. This Box can then be dropped which will properly destroy T and release the allocated memory.</p>\n</blockquote>\n<p>However to me it seems that the fact that <code>'static</code> reference existed at any time in the program is in some ways an assertion that disallows deallocating underlying memory. My working example is somewhat similar to the snippet below, which looks obviously wrong…</p>\n<div class=\"codehilite\"><pre><span></span><code>let key: &amp;&#39;static str = Box::leak(format!(&quot;hello world&quot;).into_boxed_str());\nmatch btreemap.entry(key) {\n    OccupiedEntry(_) =&gt; unsafe { drop(Box::from_raw(key)); } // key wasn&#39;t used, deallocate\n    VacantEntry(_) =&gt; { ...  }\n}\n</code></pre></div>",
+        "id": 249702746,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629198110
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>{\nlet key: &amp;&#39;static str = Box::leak(format!(&quot;hello world&quot;).into_boxed_str());\ndrop(Box::from_raw(key));\n}\n</code></pre></div>\n<p>is kind of less sketchy but also not super useful?</p>",
+        "id": 249703066,
+        "sender_full_name": "nagisa",
+        "timestamp": 1629198319
+    },
+    {
+        "content": "<p>IMO, it is undefined behaviour, but it has nothing to do with the 'static lifetime. Rather, my argument is a provenance based one. A raw pointer returned from the allocator has sufficient provenance to be deallocated, but a reference only has provenance for the referenced value. Side note, those code snipets most likely has undefined behaviour for yet another reason: the SharedReadOnly reference.</p>",
+        "id": 249703785,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1629198880
+    },
+    {
+        "content": "<p><code>leak</code> returns an <code>&amp;'static mut</code>, and at least Stacked Borrows is fine with deallocating through such a pointer (and I dont know of a useful optimization that we'd lose here, so I don't see a good reason to make this UB)</p>",
+        "id": 249704387,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1629199340
+    },
+    {
+        "content": "<p>but indeed a <code>&amp;'static</code> (shared ref) must not be used for deallocating (with the usual <code>UnsafeCell</code> exception)</p>",
+        "id": 249704420,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1629199379
+    },
+    {
+        "content": "<p>The question is whether the allocator can do stuff outside the bounds of the reference (which is the case of a simple allocator like dlmalloc). That's the main argument I've seen and use myself for why unleaking is UB - the allocator may require more provenance than the mutable reference provides.</p>",
+        "id": 249722747,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1629208863
+    },
+    {
+        "content": "<p>hm, I see... that's basically <a href=\"https://github.com/rust-lang/unsafe-code-guidelines/issues/256\">https://github.com/rust-lang/unsafe-code-guidelines/issues/256</a> though, right?</p>",
+        "id": 249724021,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1629209392
+    },
+    {
+        "content": "<p>Yeah.</p>",
+        "id": 249746819,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1629219205
+    },
+    {
+        "content": "<p>so if a future version of Stacked Borrows would solve the header-ptr situation, then arguably allocators could also use that and wouldnt have to rely on getting back the \"base pointer\"</p>",
+        "id": 249748627,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1629220022
+    },
+    {
+        "content": "<p>Probably.</p>",
+        "id": 249751198,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1629221315
+    },
+    {
+        "content": "<p>I don't think this needs to be UB even if <code>&amp;'static mut T</code> doesn't give access anywhere beyond the bounds of the <code>T</code>. Morally, the allocator owns all of memory and has loaned out bits of it to user code. So the presence of <code>&amp;mut T</code> pointers in user code indicate that the allocator is not allowed to touch the data covered by the pointer, but it never loans out the header block so it is allowed to do whatever it likes with that block, even concurrently with user code. When the user code calls the allocator to free a <code>&amp;mut T</code>, the allocator uses that pointer in order to find its own header block (which it already owns), as well as evidence that it is allowed to manipulate the memory block which was previously loaned out.</p>",
+        "id": 249779819,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1629234848
+    },
+    {
+        "content": "<p>my understanding was that the \"uses that pointer in order to find its own header block\" part which was UB (at least the manner typically implemented, e.g. direct pointer arithmetic)</p>",
+        "id": 249783109,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1629236756
+    },
+    {
+        "content": "<p>that said, this kind of thing pretty cleraly should be allowed in order for rust to be useful in several of the intended use cases, and also (at least for allocator-style usage, which still has seemingly straightforward ownership), doesn't seem to prevent any useful optimizations. so i've kind of just assumed it would eventually work (although i've done my best not to upset miri when taking advantage of it — although perhaps miri wouldn't notice anyway, i never can tell)</p>",
+        "id": 249783441,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1629236991
+    },
+    {
+        "content": "<p>Ah, you are right, you probably need some kind of <code>copy_provenance</code> primitive to be inserted there to make it work: the allocator receives the pointer from the user, changes the provenance to the allocator's own provenance, and then does direct pointer arithmetic to get to the header block</p>",
+        "id": 249787876,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1629239770
+    },
+    {
+        "content": "<p>That said, C/C++ usually solve this problem by making the allocator itself live kinda-sorta outside the memory model</p>",
+        "id": 249787954,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1629239837
+    },
+    {
+        "content": "<p>It's not hard to justify these operations at a slightly lower level memory model, but it limits your ability to write the allocator itself in rust and reason about it with rust rules</p>",
+        "id": 249788087,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1629239936
+    },
+    {
+        "content": "<blockquote>\n<p>making the allocator itself live kinda-sorta outside the memory model</p>\n</blockquote>\n<p>well, c++ allows this arithmetic in many cases (since it's part of the same allocated object), although probably not all. regardless, i'm hoping similar things aren't needed for rust. allocators aren't the only case where this sort of stuff creeps in, as evidenced by the use cases in ucg/256</p>",
+        "id": 249789223,
+        "sender_full_name": "Thom Chiovoloni",
+        "timestamp": 1629240812
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/249787954\">said</a>:</p>\n<blockquote>\n<p>That said, C/C++ usually solve this problem by making the allocator itself live kinda-sorta outside the memory model</p>\n</blockquote>\n<p>yeah but that seems like a last resort... people write custom allocators, they are already hard enough to specify without adding such extra issues ;)</p>",
+        "id": 249819513,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1629274288
+    },
+    {
+        "content": "<p>but indeed in my formal work I always treat the allocator as a language primitive. there are bigger things to resolve before that becomes the most interesting problem.^^</p>",
+        "id": 249819546,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1629274322
+    },
+    {
+        "content": "<p>I agree with <span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span>, here: since allocators could always carry a map of pointer to pointer-with-original-provenance or something like that, it must be assumed that if they receive a pointer that has provenance over the whole <code>T</code>, then they can work their way around the necessary extended provenance for <code>[ headers | T ]</code> or whatnot. Then, at that point, this theoretical map ought not be instanced in practice, since it would be silly to do. Thus, whatever the approach may be, allocators must be assumed to have the power, <em>ideally \"zero\"-cost</em>, to retrieve back the original provenance, since they will never lend access to the <code>headers</code> to anything else.</p>",
+        "id": 249973266,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1629373202
+    },
+    {
+        "content": "<p>Btw, what I've mentioned is inspired by a now buried-deep-within-Discord post from <span class=\"user-mention\" data-user-id=\"229913\">@HeroicKatora</span>, so maybe they'd like to chime in</p>",
+        "id": 249973458,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1629373247
+    },
+    {
+        "content": "<p>I do agree that this pattern should be supported, but I cant follow your argument <span class=\"user-mention\" data-user-id=\"232018\">@Daniel Henry-Mantilla</span> . are you basically saying that because there is a convoluted way to do this, the naive way should also work? I cant see how that's a valid argument.</p>",
+        "id": 252033428,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1630797625
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> that's a bit of a strawman, but I guess I did not polish my argument well enough. I stand by my \"it would be silly to require allocators to do this convoluted map lookup thing\", and I'd thus like to see either the formal model or the allocator API / contract be amended in a way that would allow for <code>Box::from_raw(Box::leak(…))</code> to work. Granted, my initial idea was born in a time predating custom allocators, and thus I allowed myself to consider that an allocation call could be seen as some kind of global / intrinsic-to-the-language call, to which the formal model could grant special semantics.</p>\n<p>I do realize now that with custom allocators thrown into the mix, the formal model cannot accomodate to that without sacrificing provenance <em>everywhere</em>, since we are now dealing with arbitrary \"user code\".</p>\n<p>In that regard, let me follow up on my initial idea. For starters, let's consider a new API, either through a new trait, an extra optional method on <code>Alloc</code>, or maybe an actual override of what the current <code>alloc()</code> function does. Be it as it may, I'll be calling this method <code>alloc_with_exact_provenance</code>. The name is pretty self-explanatory: the contract of this function would be to yield a pointer with, semantically, provenance over the <code>[ptr .. ptr + size]</code> byte range \"only\", so as to allow <code>{d,r}ealloc</code> to then take  a pointer with provenance potentially \"shrunk\" to that range (<em>e.g.</em>, because funnelled through <code>Box::leak()</code>).</p>\n<ul>\n<li>A kind of tangential approach would be for allocators to feature a boolean value (assoc constant, I'd say) that expresses whether their <code>alloc()</code> implementation has <code>with_exact_provenance</code> semantics. And, ideally, require that <code>GlobalAlloc</code> feature this behavior, so as to play well with <code>Box::leak</code>.</li>\n</ul>\n<p>Now, in order for this to be actually usable, we need a way for a header-using allocator implementation to be able to work off a pointer that with a(n exact) provenance that thus may not range over that header. While laundering through map lookups would be possible, it's definitely not a practical solution. What we need is some kind of simple launder functionality, but I can imagine how <code>ptr::launder()</code> would be a gigantic can of worms that I don't want to open. That being said, given that allocators are able to yield memory by chunking some gigantic buffer they \"own\" (which I've called <code>buf</code>), it's actually pretty easy for them to feature their own targeted laundering:</p>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">ptr</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">buf</span><span class=\"p\">.</span><span class=\"n\">offset</span><span class=\"p\">(</span><span class=\"n\">user_ptr_fed_to_dealloc</span><span class=\"p\">.</span><span class=\"n\">offset_from</span><span class=\"p\">(</span><span class=\"n\">buf</span><span class=\"p\">));</span><span class=\"w\"> </span><span class=\"c1\">// Laundered!!</span>\n<span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">at_header</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"n\">ptr</span><span class=\"p\">.</span><span class=\"n\">sub</span><span class=\"p\">(</span><span class=\"n\">offset_to_header</span><span class=\"err\">…</span><span class=\"p\">);</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Since the allocations, in the SB model, would be (re)borrowing from <code>buf[..]</code>, by performing this operation we ought to be SB-friendly. And, in practice, I'd expect the <code>offset / offset_from</code> pair to be a no-op at runtime, except for having disabled incompatible-with-box-leak-provenance-based optimizations <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 252289526,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1631014378
+    },
+    {
+        "content": "<blockquote>\n<p>What we need is some kind of simple launder functionality, but I can imagine how ptr::launder() would be a gigantic can of worms that I don't want to open. That being said, given that allocators are able to yield memory by chunking some gigantic buffer they \"own\" (which I've called buf), it's actually pretty easy for them to feature their own targeted laundering</p>\n</blockquote>\n<p>So I think this is basically an instance of the idea that in Rust we can actually implement <code>copy_provenance</code> which combines the address of one ptr with the provenance of another. as long as the allocator keeps a ptr with the \"root provenance\" for the memory range it is using (assuming for simplicity its one range), it can then take the ptr passed to <code>dealloc</code> and equip it with the \"root provenance\" and continue.</p>",
+        "id": 252928650,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631386897
+    },
+    {
+        "content": "<p>The downside of <code>copy_provenance</code> is that it is not zero-cost: you have to keep around a pointer to supply the root provenance (and pointers are not ZST even though provenance is, morally speaking). Using the wildcard provenance model for int-to-ptr conversions, one way to manufacture an appropriate provenance without any additional computationally relevant inputs is to convert the pointer to an int and back (assuming that ints don't have provenance; else substitute some other <code>clear_provenance</code> operation here). You get a wildcard provenance pointer out the end, which can be used as a root provenance because the allocator has ownership of the root provenance even if it doesn't supply any evidence of such.</p>",
+        "id": 252929290,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631387569
+    },
+    {
+        "content": "<p>Actually, I think this is a good argument for having provenance ZSTs (i.e. \"permissions\") which can be stored separately from the pointers they are derived from. With a ZST provenance, you wouldn't need to use wildcard pointers, although if the allocator owns many regions it might still be cumbersome to pull out the right provenance for the situation</p>",
+        "id": 252929569,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631387898
+    },
+    {
+        "content": "<p>given the many places where Rust semantics treat ZSTs as having no data (not even in the Abstract Machine), I dont think it would be a good idea to try to attach provenance to them.</p>",
+        "id": 253614373,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631811590
+    },
+    {
+        "content": "<p>That's a surprise to me. ZSTs are often used as \"proofs\" / evidence for an assertion and needed to make safety arguments in some cases, so it seems premature to excise them completely from the AM</p>",
+        "id": 253623141,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631815121
+    },
+    {
+        "content": "<p>To put it another way, I think that being able to attach provenance to ZSTs makes exactly as much sense as attaching provenance to usize values (aka pointers)</p>",
+        "id": 253623543,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631815256
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253623141\">said</a>:</p>\n<blockquote>\n<p>That's a surprise to me. ZSTs are often used as \"proofs\" / evidence for an assertion and needed to make safety arguments in some cases, so it seems premature to excise them completely from the AM</p>\n</blockquote>\n<p>yeah and they do not need to have any operational meaning for that</p>",
+        "id": 253636601,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631820253
+    },
+    {
+        "content": "<p>it is common in verification and proofs to have \"ghost code\" or \"ghost variables\" (they also come under many other names such as <br>\n\"phantom variables\") -- extra things we add to the program that have no operational meaning but help the proof</p>",
+        "id": 253636671,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631820294
+    },
+    {
+        "content": "<p>ZSTs are perfect for that. things dont have to have any operational meaning for them to be useful in soundness proofs. the relevant part for soundness proofs is that ZSTs are important <em>in the type system</em>, e.g. the compiler won't let you \"fake\" a value of a ZST. (we exploited that in GhostCell, just to name one example.)</p>",
+        "id": 253636737,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631820325
+    },
+    {
+        "content": "<p>provenance is <em>not</em> \"ghost code\". provenance is completely real and physical, as far as Rust code running on the Abstract Machine is concerned. that is a big difference.</p>",
+        "id": 253636932,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631820401
+    },
+    {
+        "content": "<p>in particular, ghost code cannot affect whether there is UB or not. provenance can.</p>",
+        "id": 253636967,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631820419
+    },
+    {
+        "content": "<p>I'm glad you brought up ghost code, because that's how I think of this as well. The complication is that there are multiple levels here, and provenance is not ghost in the AM but is ghost in the hardware. I do think that this is a valuable category, although I can see some issues about how to make ZST provenance loads work correctly in the AM</p>",
+        "id": 253639537,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631821478
+    },
+    {
+        "content": "<blockquote>\n<p>provenance is not ghost in the AM but is ghost in the hardware</p>\n</blockquote>\n<p>I guess that is a way to see it but IMO it is a confusing way to put things. provenance is indeed lost in the refinement from AM to hardware, but I would not conflate that with verification ghost code. They are in pretty different categories; I already gave an example for that. (another example: people can add their own arbitrary kinds of ghost code when verifying Rust programs, but provenance must be part of the Rust spec and guarded by the Rust lang team.)</p>",
+        "id": 253641101,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631822128
+    },
+    {
+        "content": "<p>I suppose one could imagine an AM where ZST accesses have meaning, but I think a lot of existing Rust code would be incompatible with that (like, unsafe code that assume ZSTs can be \"copied\"/\"moved\" without doing anything). So I dont think this is a reasonable choice for the Rust AM.</p>",
+        "id": 253641176,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631822160
+    },
+    {
+        "content": "<p>Provenance ZSTs can be copied or moved without doing anything, though</p>",
+        "id": 253643272,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823059
+    },
+    {
+        "content": "<p>well I suppose it depends on what you mean by doing anything</p>",
+        "id": 253643339,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823093
+    },
+    {
+        "content": "<p>you need an existing provenance ZST to copy it</p>",
+        "id": 253643391,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823119
+    },
+    {
+        "content": "<p>which I think follows from the usual meaning of \"copy\"</p>",
+        "id": 253643471,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823140
+    },
+    {
+        "content": "<blockquote>\n<p>I guess that is a way to see it but IMO it is a confusing way to put things. provenance is indeed lost in the refinement from AM to hardware, but I would not conflate that with verification ghost code. They are in pretty different categories; I already gave an example for that.</p>\n</blockquote>\n<p>I'm in agreement here. User ghost state is ghost in the AM and in the hardware. I'm saying that it is useful to have a category of things that are not ghost in the AM but are ghost in hardware; <code>black_box</code> comes to mind as another example of such</p>",
+        "id": 253643751,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823251
+    },
+    {
+        "content": "<p>and to be able to explicitly manipulate such objects using compiler intrinsics</p>",
+        "id": 253643830,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823291
+    },
+    {
+        "content": "<p><code>copy_provenance</code> is the sort of thing you would find in that category</p>",
+        "id": 253643885,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823317
+    },
+    {
+        "content": "<p>How would a Provenance ZST work when provenance is an actual runtime concept?</p>",
+        "id": 253644102,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1631823401
+    },
+    {
+        "content": "<p>(Miri, or a system with hardware provenance, such as CHERI)</p>",
+        "id": 253644139,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1631823420
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"271719\">@Mario Carneiro</span> as a concrete example, <code>Vec&lt;()&gt;</code> will AFAIK degenerate to basically a usize. there is code that outright skips doing anything other than updating the vector length for some operations. that would all be <em>wrong</em> if the abstract machine said ZSTs can have provenance.</p>",
+        "id": 253644265,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823475
+    },
+    {
+        "content": "<p>It would be a value you can store in a ZST field, which takes up space in the interpreter and is manipulated with intrinsics same as with SB provenance today</p>",
+        "id": 253644268,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823476
+    },
+    {
+        "content": "<p>that is the sense in which we currently have code that copies/moves ZSTs by not doing anything</p>",
+        "id": 253644347,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823498
+    },
+    {
+        "content": "<p>logically, we prove that the ZST returned from pop() satisfies the safety invariant of its type. but the \"actual data\" (there is none, its a ZST) is entirely unrelated to what was added to the vector previously.</p>",
+        "id": 253644440,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823550
+    },
+    {
+        "content": "<p>in other words, code like Vec exploits the theorem that \"all values of ZST type are equal\", that \"if one YST value satisifies the safety invariant then they all do\" (this is a separation logic thing, you still cant duplicate the safety invariant, but you can move it from one instance of a ZST to another at will)</p>",
+        "id": 253644610,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823613
+    },
+    {
+        "content": "<p>your proposal breaks all of that instantly. I dont think that is a reasonable choice for Rust.</p>",
+        "id": 253644647,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823631
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253644268\">said</a>:</p>\n<blockquote>\n<p>It would be a value you can store in a ZST field, which takes up space in the interpreter and is manipulated with intrinsics same as with SB provenance today</p>\n</blockquote>\n<p>That at most only answers for miri (although it's dubious whether it does: doesn't miri require at least a <code>Byte</code> to store a pointer value). This wouldn't answer for hardware provenance models.</p>",
+        "id": 253644675,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1631823645
+    },
+    {
+        "content": "<p>leaving aside the fact that I dont think you even gave a problem statement for why you want to break all that code -- what problem does that solve?^^</p>",
+        "id": 253644706,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823659
+    },
+    {
+        "content": "<p><span class=\"user-mention\" data-user-id=\"120791\">@RalfJ</span> How could you exploit that to get (UB seems to be the wrong word here, since the AM defines UB) counterintuitive behavior from <code>Vec::pop</code>?</p>",
+        "id": 253644766,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823684
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"257758\">Connor Horman</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253644675\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253644268\">said</a>:</p>\n<blockquote>\n<p>It would be a value you can store in a ZST field, which takes up space in the interpreter and is manipulated with intrinsics same as with SB provenance today</p>\n</blockquote>\n<p>That at most only answers for miri (although it's dubious whether it does: doesn't miri require at least a <code>Byte</code> to store a pointer value). This wouldn't answer for hardware provenance models.</p>\n</blockquote>\n<p>it doesnt answer anything for miri; provenance is attached with data and there is no data for a ZST</p>",
+        "id": 253644772,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823686
+    },
+    {
+        "content": "<p>let's say that <code>Vec::pop</code> on a provenance ZST always returns wildcard provenance. What goes wrong?</p>",
+        "id": 253644957,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823754
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253644766\">said</a>:</p>\n<blockquote>\n<p><span class=\"user-mention silent\" data-user-id=\"120791\">RalfJ</span> How could you exploit that to get (UB seems to be the wrong word here, since the AM defines UB) counterintuitive behavior from <code>Vec::pop</code>?</p>\n</blockquote>\n<p>there is no counterintuitive behavior in the rust AM. but it is entirely broken in your weird \"AM where ZST has provnenace\". well you havent actually defined that AM and I think it is very hard to do so (a lot of ambiguity since there can be arbitrarily many ZST stored at the same address and which one does an <code>&amp;mut ZST</code> even refer to) so I have to be creative on your behalf here...</p>",
+        "id": 253644977,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823764
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253644957\">said</a>:</p>\n<blockquote>\n<p>let's say that <code>Vec::pop</code> on a provenance ZST always returns wildcard provenance. What goes wrong?</p>\n</blockquote>\n<p>uh, now you broke the contract that push(x) followed by let x = pop() means we got the same data back</p>",
+        "id": 253645032,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823791
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253644957\">said</a>:</p>\n<blockquote>\n<p>let's say that <code>Vec::pop</code> on a provenance ZST always returns wildcard provenance. What goes wrong?</p>\n</blockquote>\n<p><code>Vec</code> is now an unbound laundering tool.</p>",
+        "id": 253645039,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1631823796
+    },
+    {
+        "content": "<p>thats clearly not acceptable in the slightest^^</p>",
+        "id": 253645054,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823801
+    },
+    {
+        "content": "<p>Provenance is now destoryed entirely.</p>",
+        "id": 253645073,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1631823807
+    },
+    {
+        "content": "<p>there are lots of other things that destroy provenance, like casting thru usize</p>",
+        "id": 253645099,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823822
+    },
+    {
+        "content": "<p>no, not a lot. just casting through usize.</p>",
+        "id": 253645188,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823844
+    },
+    {
+        "content": "<p>I can't tell whether this is actually a problem here</p>",
+        "id": 253645189,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823845
+    },
+    {
+        "content": "<p>uh, you broke vec to be useless for such data. yes there is a problem.^^</p>",
+        "id": 253645220,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823864
+    },
+    {
+        "content": "<p>also Im afraid I have to stop here, got some other stuff to catch up on... I think I stated my case, you dont get to break fundamental promises of data structures like Vec. Vec will currently never lose provenance for you. <em>no</em> data structure will lose provenance for you. if it does, it needs to document that clearly and it would probable be a bad bug.</p>",
+        "id": 253645329,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631823925
+    },
+    {
+        "content": "<p>You asked what the advantage of provenance ZSTs would be. One would be that you can split a pointer into a usize and a provenance and manipulate and store them separately</p>",
+        "id": 253645336,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823928
+    },
+    {
+        "content": "<p>You've also broken any implementation that actually maintains provenance as actual program state.</p>",
+        "id": 253645364,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1631823942
+    },
+    {
+        "content": "<p>the example with Vec shows that you at least can't just store a vec of provenance ZSTs</p>",
+        "id": 253645369,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631823945
+    },
+    {
+        "content": "<p>(Except maybe one that works in an interpreter off of an object-based model)</p>",
+        "id": 253645529,
+        "sender_full_name": "Connor Horman",
+        "timestamp": 1631824003
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253645336\">said</a>:</p>\n<blockquote>\n<p>You asked what the advantage of provenance ZSTs would be. One would be that you can split a pointer into a usize and a provenance and manipulate and store them separately</p>\n</blockquote>\n<p>you seem to think of provenance too much as ghost state. so your intuition says, ZSTs are ghost, provenancen is ghost, surely we can attach provenance to ZST. but your intuition is wrong, provenance is <em>not</em> ghost state (while ZST are). so this just doesnt go together.<br>\nIOW, this is not a problem statement, its an XY problem.</p>",
+        "id": 253645576,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631824025
+    },
+    {
+        "content": "<p>I find this interesting, though, because C always had this weird (to me) restriction on not having types of zero size, and Rust seemingly fixed that, but it turns out now there is a restriction, and if you want to store AM data then it has to be associated with actual hardware bytes</p>",
+        "id": 253645650,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631824056
+    },
+    {
+        "content": "<p>in separation logic style reasoning those two are entirely orthogonal</p>",
+        "id": 253645766,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631824093
+    },
+    {
+        "content": "<blockquote>\n<p>you seem to think of provenance too much as ghost state. so your intuition says, ZSTs are ghost, provenancen is ghost, surely we can attach provenance to ZST. but your intuition is wrong, provenance is not ghost state (while ZST are). so this just doesnt go together.</p>\n</blockquote>\n<p>The descriptor \"ZST\" just means there are no hardware bytes involved. It's not ghost state from the AM's perspective, like you say, but there aren't enough words to describe these things. I'm talking about AM state that has no hardware bytes tied to it</p>",
+        "id": 253646107,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631824232
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253645766\">said</a>:</p>\n<blockquote>\n<p>in separation logic style reasoning those two are entirely orthogonal</p>\n</blockquote>\n<p>in Iris they are because iris has very powerful purely logical ghost state. in most prior separation logics \"ghost variables\" had to be actually added to the program so this was not orthogonal at all.</p>",
+        "id": 253648058,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631825130
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253645650\">said</a>:</p>\n<blockquote>\n<p>I find this interesting, though, because C always had this weird (to me) restriction on not having types of zero size, and Rust seemingly fixed that, but it turns out now there is a restriction, and if you want to store AM data then it has to be associated with actual hardware bytes</p>\n</blockquote>\n<p>basically, size 0 means no data in the AM. I think everything else would be expected, size 0 indicates the absence of data so it would be rather incoherent if there could be any data there.</p>",
+        "id": 253648309,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631825177
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"271719\">Mario Carneiro</span> <a href=\"#narrow/stream/136281-t-lang.2Fwg-unsafe-code-guidelines/topic/Does.20.60Box.3A.3Aleak.60.20assert.20a.20reference.20never.20gets.20deallocated.3F/near/253646107\">said</a>:</p>\n<blockquote>\n<blockquote>\n<p>you seem to think of provenance too much as ghost state. so your intuition says, ZSTs are ghost, provenancen is ghost, surely we can attach provenance to ZST. but your intuition is wrong, provenance is not ghost state (while ZST are). so this just doesnt go together.</p>\n</blockquote>\n<p>The descriptor \"ZST\" just means there are no hardware bytes involved. It's not ghost state from the AM's perspective, like you say, but there aren't enough words to describe these things. I'm talking about AM state that has no hardware bytes tied to it</p>\n</blockquote>\n<p>\"AM state that has no hardware bytes attached to it\" is easy, we can just have <code>ghost static</code> variables that are guarnateed to be erased, or something like that. but you additionally want this AM state to live in the same memory space as actual bytes and presumably even have structs that mix both kinds of data -- that immediately raises at least 3 questions in my head for what several operations like ptr deref and ptr arithmetic even <em>mean</em> now. you are proposing a completely new kind of ghost state, the likes of which I have never seen before. In a high-level language with a strong object memory model (something tree-like), this would fly; in Rust where memory is observably byte-oriented (and the addresses of those bytes are physically manifest, we have very little AM wiggle room here), I dont think it does. maybe try defining it precisely in a toy language in coq and I think you will see the difficulty.</p>",
+        "id": 253648700,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631825333
+    },
+    {
+        "content": "<blockquote>\n<p>\"AM state that has no hardware bytes attached to it\" is easy, we can just have ghost static variables that are guarnateed to be erased, or something like that. </p>\n</blockquote>\n<p>That also sounds great. It is limiting though, since you can only have a fixed number of static variables, so you probably won't have enough for all the pointers you are dealing with.</p>\n<blockquote>\n<p>in Rust where memory is observably byte-oriented (and the addresses of those bytes are physically manifest, we have very little AM wiggle room here), I dont think it does.</p>\n</blockquote>\n<p>I think you are right; it is possible to make this work for local variables like in the \"permissions\" IR we talked about before (where loading a pointer gives you two vregs, one for the value and one for the provenance), but once you stick them in memory it becomes difficult to address them and keep them organized, unless you have some entirely separate \"memory\" to stash this data (like a tree). Sticking these things between the bytes is problematic since the byte address is no longer sufficient to distinguish these values.</p>",
+        "id": 253653419,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631827417
+    },
+    {
+        "content": "<blockquote>\n<p>basically, size 0 means no data in the AM. I think everything else would be strange, size 0 indicates the absence of data so it would be rather incoherent if there could be any data there.</p>\n</blockquote>\n<p>Well, I could just as well say \"size 1 means there are 256 possible values\" but we both know that's not true; AM bytes can seemingly hold an infinite quantity of information, so I don't think AM data that lives between / around / somehow stashed independently of the bytes in hardware memory is a crazy idea. But I acknowledge that retrofitting this concept onto \"Rust ZST\" requires some significant changes and is probably not feasible.</p>",
+        "id": 253653878,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631827641
+    },
+    {
+        "content": "<blockquote>\n<p>maybe try defining it precisely in a toy language in coq and I think you will see the difficulty.</p>\n</blockquote>\n<p>Well, this comes in part from my experiences doing exactly this in the language I'm developing. But there are lots of other differences too, so it's not quite as straightforward as just ZST provenance objects.</p>",
+        "id": 253654375,
+        "sender_full_name": "Mario Carneiro",
+        "timestamp": 1631827880
+    },
+    {
+        "content": "<blockquote>\n<p>Well, I could just as well say \"size 1 means there are 256 possible values\" but we both know that's not true;</p>\n</blockquote>\n<p>Indeed it is not so what does that have to do with my statement?</p>",
+        "id": 253671969,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631838950
+    },
+    {
+        "content": "<p>The fact that there is only a single list of length 0 is true <em>no matter the element type of the list</em>. That makes my statement very different from yours.</p>",
+        "id": 253672026,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631838972
+    },
+    {
+        "content": "<p>I am \"just\" stretching the concept of a byte by making it hold more data; you are stretching (breaking?) the entire concept of memory consisting of bytes, and allocations being described by lists of bytes. That is going way further, I would say. I strongly think we should maintain the property that \"(abstract) bytes\" are the 'atoms' of memory in Rust, and that if you copy around all the bytes from A to B you copied all there is to copy. A <em>lot</em> of code relies on that.</p>",
+        "id": 253672117,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631839073
+    },
+    {
+        "content": "<p>My idea for how to spec a MIR semantics leaves the memory model abstract, but it <em>does</em> incorporate the assumption that memory is byte-oriented. IOW, one can do all sorts of crazy provenance stuff with <a href=\"https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/memory-interface.md\">this memory API</a>, but even that API is \"too close to the hardware\" to allow 'stuff between the bytes'.</p>",
+        "id": 253672358,
+        "sender_full_name": "RalfJ",
+        "timestamp": 1631839230
+    }
+]

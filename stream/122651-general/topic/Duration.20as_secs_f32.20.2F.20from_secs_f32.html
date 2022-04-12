@@ -1,0 +1,309 @@
+<html>
+<head><meta charset="utf-8"><title>Duration as_secs_f32 / from_secs_f32 · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html">Duration as_secs_f32 / from_secs_f32</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="208484874"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208484874" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> marmeladema <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208484874">(Aug 30 2020 at 13:17)</a>:</h4>
+<p>Hello!<br>
+While trying to add some tests for <code>Duration</code> in order to constify the rest of the methods, i encountered this behavior: <a href="https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=87b3e97d49f1002d0fbb32510b8d33f9">https://play.rust-lang.org/?version=stable&amp;mode=debug&amp;edition=2018&amp;gist=87b3e97d49f1002d0fbb32510b8d33f9</a><br>
+TL;DR a value returned by <code>as_secs_f32</code> can panic when passed back to <code>from_secs_f32</code>.<br>
+I find this behavior rather odd, is this intended?</p>
+
+
+
+<a name="208484924"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208484924" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208484924">(Aug 30 2020 at 13:18)</a>:</h4>
+<p>This is probably floating point rounding.</p>
+
+
+
+<a name="208485124"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208485124" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> marmeladema <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208485124">(Aug 30 2020 at 13:24)</a>:</h4>
+<p>Hum ok that's unfortunate</p>
+
+
+
+<a name="208508833"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208508833" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208508833">(Aug 30 2020 at 23:17)</a>:</h4>
+<p>I think it's an actual bug.</p>
+<p><code>from_secs_f32</code> says that it panics (only) if the duration overflows. <code>new</code> also panics if the duration overflows. So you shouldn't be able to trigger a panic using <code>from_secs_f32</code> on a value created using <code>new</code>.</p>
+<p>Here's how it happens:</p>
+<ol>
+<li><code>new</code> checks for overflow in integer precision (96 bits): <a href="https://doc.rust-lang.org/src/core/time.rs.html#134-139">https://doc.rust-lang.org/src/core/time.rs.html#134-139</a></li>
+<li>But <code>from_secs_f32</code> checks for overflow in f32 precision (24 bits): <a href="https://doc.rust-lang.org/src/core/time.rs.html#636-653">https://doc.rust-lang.org/src/core/time.rs.html#636-653</a></li>
+</ol>
+<p>The bug happens for f32 because the calculated overflow limit uses a greater than or equal check, excluding some valid values. (Greater than doesn't work either - it would allow some invalid values.)</p>
+<p>To fix this bug, do the secs division in u128, check the range, panic if needed, then convert to u64.</p>
+<p>(<code>from_secs_f64</code> also has a similar bug, because its limit has a precision of 53 bits.)</p>
+
+
+
+<a name="208509211"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509211" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509211">(Aug 30 2020 at 23:28)</a>:</h4>
+<p><em>Related Issue</em></p>
+<p>Unfortunately, there is still another rounding issue in <code>from_secs_f32</code>, and I don't think it has a neat solution.</p>
+<p><code>secs * (NANOS_PER_SEC as f32)</code> rounds twice. Once for the conversion (32 bits to 24 bits precision), and once for the multiplication.</p>
+<p>The f64 equivalent <code>secs * (NANOS_PER_SEC as f64)</code> only rounds once. f64 has 53 bits of precision, so the conversion does not round.</p>
+<p>So people who run into issues with <code>from_secs_f32</code> could try using <code>from_secs_f64</code> as a workaround. Documenting that workaround is probably the best we can do here.</p>
+<p>(We could use f64 inside <code>from_secs_f32</code>, but that might be surprising. And it doesn't remove all the rounding. We can't multiply using u128, because then we'd lose precision for smaller f32 values.)</p>
+
+
+
+<a name="208509309"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509309" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509309">(Aug 30 2020 at 23:30)</a>:</h4>
+<p><span class="user-mention" data-user-id="325209">@teor</span> Why would it be surprising to use a larger precision internally for that conversion?</p>
+
+
+
+<a name="208509321"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509321" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509321">(Aug 30 2020 at 23:31)</a>:</h4>
+<p>Are there platforms where f64 calculations are significantly more expensive?</p>
+
+
+
+<a name="208509329"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509329" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509329">(Aug 30 2020 at 23:31)</a>:</h4>
+<p>To a first approximation "most of them", as far as I know.</p>
+
+
+
+<a name="208509333"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509333" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509333">(Aug 30 2020 at 23:31)</a>:</h4>
+<p>But this seems like a correctness issue.</p>
+
+
+
+<a name="208509336"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509336" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509336">(Aug 30 2020 at 23:31)</a>:</h4>
+<p>(The same goes for using u128 internally.)</p>
+
+
+
+<a name="208509460"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509460" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509460">(Aug 30 2020 at 23:34)</a>:</h4>
+<p>Is there some way we can avoid the double-rounding without using f64?</p>
+
+
+
+<a name="208509487"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509487" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509487">(Aug 30 2020 at 23:35)</a>:</h4>
+<p>No, it's inherent in the precision of f32. 24 bits of precision for a 30 bit constant means you always lose 6 bits.</p>
+
+
+
+<a name="208509685"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509685" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509685">(Aug 30 2020 at 23:40)</a>:</h4>
+<p>It seems unlikely to me that <code>Duration::from_secs_f32</code> would be on anyone's hot path.</p>
+
+
+
+<a name="208509696"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509696" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509696">(Aug 30 2020 at 23:40)</a>:</h4>
+<p>Yeah it shouldn't be</p>
+
+
+
+<a name="208509701"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509701" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509701">(Aug 30 2020 at 23:40)</a>:</h4>
+<p>Doing the multiplication in a sufficiently high-precision type seems like it'd be preferable, especially if that addresses round-tripping failures.</p>
+
+
+
+<a name="208509711"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509711" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509711">(Aug 30 2020 at 23:41)</a>:</h4>
+<p>I think using f64 internally is the way to go. f32 has 24 bits of precision, and NANOS_PER_SEC is a 30 bit constant. So <code>secs * (NANOS_PER_SEC as f64)</code> has 54 bits of precision, which almost fits in the 53 bits of a f64.</p>
+<p>So the conversion is exact, and the multiplication loses an extra 1 bit. Then the conversion to u128 loses no precision (but it might round).</p>
+
+
+
+<a name="208509797"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509797" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509797">(Aug 30 2020 at 23:43)</a>:</h4>
+<p>So you could still have a round-trip failure due to the lost extra bit, or the rounding during multiplication or conversion.</p>
+<p>But it would be extremely rare. (And might be impossible, if all the rounding happens in the right direction.)</p>
+
+
+
+<a name="208509857"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509857" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509857">(Aug 30 2020 at 23:45)</a>:</h4>
+<p><span class="user-mention" data-user-id="325209">@teor</span> Is it actually accurate to describe <code>1000000000</code> as a "30-bit" constant? I don't think it needs that much precision, in floating-point terms.</p>
+
+
+
+<a name="208509861"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509861" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509861">(Aug 30 2020 at 23:45)</a>:</h4>
+<p>In binary: 0b111011100110101100101000000000</p>
+
+
+
+<a name="208509909"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509909" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509909">(Aug 30 2020 at 23:46)</a>:</h4>
+<p>I <em>think</em> that's a 20-bit constant (because it's 21 bits wide and floating point gives you one 1 bit for free).</p>
+
+
+
+<a name="208509920"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509920" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509920">(Aug 30 2020 at 23:47)</a>:</h4>
+<p>I just checked, and 1000000000 converts exactly into an f32.</p>
+
+
+
+<a name="208509923"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509923" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509923">(Aug 30 2020 at 23:47)</a>:</h4>
+<div class="codehilite"><pre><span></span><code><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1000000000</span><span class="k">u64</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">f64</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">println</span><span class="o">!</span><span class="p">(</span><span class="s">&quot;{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">f32</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</code></pre></div>
+
+
+
+<a name="208509926"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509926" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509926">(Aug 30 2020 at 23:47)</a>:</h4>
+<p>Output:</p>
+<div class="codehilite"><pre><span></span><code>1000000000
+1000000000
+</code></pre></div>
+
+
+
+<a name="208509930"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509930" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509930">(Aug 30 2020 at 23:47)</a>:</h4>
+<p>If I do the same thing with 1000000001, the f32 gets truncated to 1000000000.</p>
+
+
+
+<a name="208509993"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208509993" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208509993">(Aug 30 2020 at 23:49)</a>:</h4>
+<p>You're definitely likely to lose precision in the multiplication, but you shouldn't lose any in the conversion.</p>
+
+
+
+<a name="208510076"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510076" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510076">(Aug 30 2020 at 23:51)</a>:</h4>
+<p>I think you might have confused nanosecond and microsecond. There are 10^9 nanoseconds in a second, which is slightly less than 2^30, because 10^3 is slightly less than 2^10.</p>
+
+
+
+<a name="208510125"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510125" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510125">(Aug 30 2020 at 23:52)</a>:</h4>
+<p>Oh right, I see what you're saying, you're taking the powers of two into account.</p>
+
+
+
+<a name="208510135"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510135" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510135">(Aug 30 2020 at 23:53)</a>:</h4>
+<p>Right; precision only depends on the "width" from the first 1 to the last 1.</p>
+
+
+
+<a name="208510137"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510137" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510137">(Aug 30 2020 at 23:53)</a>:</h4>
+<p>The point floats. :)</p>
+
+
+
+<a name="208510199"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510199" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510199">(Aug 30 2020 at 23:55)</a>:</h4>
+<p>I know that it takes 30 bits to represent <code>10**9</code> as an integer, but it doesn't take that many bits to represent it as a floating-point mantissa.</p>
+
+
+
+<a name="208510209"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510209" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510209">(Aug 30 2020 at 23:55)</a>:</h4>
+<p>The trailing zeroes don't count.</p>
+
+
+
+<a name="208510212"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510212" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510212">(Aug 30 2020 at 23:55)</a>:</h4>
+<p>Yeah since there's a factor of 2^9, you get those bits in the exponent.</p>
+
+
+
+<a name="208510264"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510264" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510264">(Aug 30 2020 at 23:56)</a>:</h4>
+<p>Exactly. So I don't <em>think</em> it's a problem. I could still imagine someone wanting more precision in the multiplication, but in <em>that</em> case, I think they <em>should</em> call <code>from_secs_f64</code>.</p>
+
+
+
+<a name="208510422"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510422" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510422">(Aug 31 2020 at 00:01)</a>:</h4>
+<p>Yeah so if you work purely in f32, then your multiplication result has 24 + 21 = 45 bits of precision. Which is rounded to the nearest 24 bits.</p>
+<p>So using f64 internally would get you an exact multiplication result, which would further reduce your round-trip errors. But you'd still see rounding on conversion to and from integers, so there would still be some edge cases.</p>
+<p>Not sure if it's worth it.</p>
+
+
+
+<a name="208510490"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510490" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510490">(Aug 31 2020 at 00:03)</a>:</h4>
+<p>I think using symmetrical conversions would be less likely to cause errors. And easier to maintain.</p>
+
+
+
+<a name="208510559"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510559" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510559">(Aug 31 2020 at 00:05)</a>:</h4>
+<p>Also, I <em>think</em> that multiplications of two floating-point values use enough precision internally that they give the right bits in the answer up to rounding.</p>
+
+
+
+<a name="208510622"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510622" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510622">(Aug 31 2020 at 00:07)</a>:</h4>
+<p>Yes, that's the IEEE 754 standard, <em>if</em> the CPU implements it correctly</p>
+
+
+
+<a name="208510632"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510632" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510632">(Aug 31 2020 at 00:07)</a>:</h4>
+<p>If it doesn't, that's definitely not Rust's issue to fix.</p>
+
+
+
+<a name="208510698"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208510698" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208510698">(Aug 31 2020 at 00:09)</a>:</h4>
+<p>Rounding can be wrong though - if the conversion from Duration to f32 rounds up, then the multiplication rounds up, you could get an overflow when checking if the result fits in the Duration. But that's still better than the current check, which is guaranteed to fail on large values.</p>
+
+
+
+<a name="208519839"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208519839" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> marmeladema <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208519839">(Aug 31 2020 at 04:34)</a>:</h4>
+<p>So is it a bug after all? I think if it's expected, we should probably mention in the doc that from_secs_f32 can panic even for value previously returned by as_secs_f32.</p>
+
+
+
+<a name="208519861"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208519861" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> marmeladema <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208519861">(Aug 31 2020 at 04:35)</a>:</h4>
+<p>And same for f64</p>
+
+
+
+<a name="208521933"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208521933" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208521933">(Aug 31 2020 at 05:38)</a>:</h4>
+<p>Yes, it's a bug.</p>
+<p>We should fix <code>from_secs_f32</code> and <code>from_secs_f64</code> to do their overflow checks on integers, rather than floating point values.</p>
+<p>And we should mention in the doc that in very rare cases, either function could still panic on round-trip, due to double-rounding.</p>
+
+
+
+<a name="208522395"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208522395" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> marmeladema <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208522395">(Aug 31 2020 at 05:52)</a>:</h4>
+<p>I see! Thanks! I'll try to provide a fix and probably ask here for advises if I am stuck</p>
+
+
+
+<a name="208531418"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Duration%20as_secs_f32%20/%20from_secs_f32/near/208531418" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> teor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Duration.20as_secs_f32.20.2F.20from_secs_f32.html#208531418">(Aug 31 2020 at 08:26)</a>:</h4>
+<p>That would be great, feel free to ping me here or on GitHub as @teor2345 if you'd like a code review.</p>
+<p>(I can help with the calculations, but others will need to check the Rust project side of things.)</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

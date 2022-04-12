@@ -1,0 +1,350 @@
+[
+    {
+        "content": "<p>Hi all, thanks again for the help yesterday.  I've made some progress on the algorithm I'm translating to std::simd, and I'm hitting some issues with coaxing rustc/llvm to consistently unroll a key loop.  I understand unrolling is orthogonal to std::simd, however, I imagine I won't be the only one who hits this issue when converting what are traditionally hand unrolled SIMD algorithms into generic std::simd code.</p>\n<p>In my case, I'm translating the SIMD-BP128 integer compression algorithm to use std::simd.  This algorithm works on blocks of integers of a certain max bit-width (ie <code>value.leading_zeros() &gt; 32 - bit_width</code> for all values in the block).  To compress a block of integers you remove all of the leading 0 bits from each value.</p>\n<p>The canonical version of this algorithm is <a href=\"https://github.com/lemire/simdcomp/blob/master/src/avx512bitpacking.c#L42-L123\">lemire/simdcomp</a>, which contains a hand unrolled function for packing/unpacking blocks of integers for all 32 bit-widths. As you can imagine, I'm not keen on translating each 64 pack/unpack methods to std::simd.  Thus, I set out to write one function which could pack blocks of integers, and which is generic on the bit-width and number of SIMD lanes to use.</p>\n<p>I've succeeded in writing the <a href=\"https://godbolt.org/z/fsdzs6qYs\">generic pack function</a>, but rustc/llvm is very inconsistent about when it unrolls the primary loop.  There is a factor of 5 difference in performance for the function when unrolled vs not.  You can play around with the parameters in the linked Godbolt example  to see the difference - at bitwidth 5 or 7 the loop is unrolled and results in a single basic block of ~60 instructions, whereas bitwidth 6 is not unrolled.  Unrolling is key because there are two branches and an extra load from memory per iteration that are optimized out when unrolling occurs.  The only existing published Rust implementation of this algorithm I'm aware of uses the <code>crunchy</code> macro to force unrolling, however this isn't an option in a generic context, since proc-macros can't get access to the generic BIT_WIDTH value at compile time.</p>\n<p>Apologies in advance for the vague question/concern since I know this isn't directly actionable by <code>std::simd</code>, but I'm pretty curious if this is on y'alls radar, and whether there are any ideas for how to avoid such issues.</p>",
+        "id": 272567672,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645334459
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"457711\">Dan Burkert</span> <a href=\"#narrow/stream/257879-project-portable-simd/topic/Loop.20Unrolling/near/272567672\">said</a>:</p>\n<blockquote>\n<p>I've succeeded in writing the <a href=\"https://godbolt.org/z/fsdzs6qYs\">generic pack function</a>, but rustc/llvm is very inconsistent about when it unrolls the primary loop.  There is a factor of 5 difference in performance for the function when unrolled vs not.  You can play around with the parameters in the linked Godbolt example  to see the difference - at bitwidth 5 or 7 the loop is unrolled and results in a single basic block of ~60 instructions, whereas bitwidth 6 is not unrolled.  Unrolling is key because there are two branches and an extra load from memory per iteration that are optimized out when unrolling occurs.  The only existing published Rust implementation of this algorithm I'm aware of uses the <code>crunchy</code> macro to force unrolling, however this isn't an option in a generic context, since proc-macros can't get access to the generic BIT_WIDTH value at compile time.</p>\n<p>Apologies in advance for the vague question/concern since I know this isn't directly actionable by <code>std::simd</code>, but I'm pretty curious if this is on y'alls radar, and whether there are any ideas for how to avoid such issues.</p>\n</blockquote>\n<p>This may sound... weird.<br>\nbut if you are working with truly large amounts of data?<br>\nconsider actually just using a <strong>huge</strong> vector, more than the machine can handle.<br>\nNo, really, LLVM will codegen it.</p>",
+        "id": 272568231,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645335169
+    },
+    {
+        "content": "<p>This function always address blocks of 32 * NUM_LANES values, so maximum of 512 <code>u32</code>s.  I think you may be saying that since it's generic, <code>NUM_LANES</code> could be like 1M, in which case you really wouldn't want unrolling?  I agree, but that won't be the case in practice.</p>",
+        "id": 272568322,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645335296
+    },
+    {
+        "content": "<p>I said that before taking a closer look at the code, but no, it's actually because using a larger vector than the machine can handle creates an unrolled loop of the appropriate instructions as a general rule.</p>",
+        "id": 272568399,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645335384
+    },
+    {
+        "content": "<blockquote>\n<p>using a larger vector than the machine can handle</p>\n</blockquote>\n<p>A larger vector, meaning more SIMD lanes than are available, like 512 bit vector on haswell?  That's not the case here, I'm using avx512, but targeting and running on ice lake hardware.  Regardless, the unrolling behavior is the same for LANES=8 and LANES=16</p>",
+        "id": 272568485,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645335513
+    },
+    {
+        "content": "<p>I mean like using a 1024 bit vector.</p>",
+        "id": 272568493,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645335532
+    },
+    {
+        "content": "<p>I don't think std::simd even allows that?</p>",
+        "id": 272568497,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645335549
+    },
+    {
+        "content": "<p>I believe f64x64 is valid code, actually.</p>",
+        "id": 272568505,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645335573
+    },
+    {
+        "content": "<p>The linked godbolt is using <code>Simd&lt;u32, 16&gt;</code>, but the results are the same if it's changed to <code>Simd&lt;u32, 8&gt;</code>.  In either case it unrolls some bitwidths (1-5, 7-9, 16, 32), but not the others</p>",
+        "id": 272568584,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645335671
+    },
+    {
+        "content": "<p>The loop is on a constant range</p>",
+        "id": 272568599,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645335710
+    },
+    {
+        "content": "<p><code>for data_idx in 0..BIT_WIDTH { .. }</code></p>",
+        "id": 272568650,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645335746
+    },
+    {
+        "content": "<p>yeah <code>Simd&lt;f64, 64&gt;</code> does compile, wild.  I had noticed that my algorithm using <code>Simd&lt;u32, 16&gt;</code> cross compiled to ARM successfuly, so I guess it's using the same trick under the covers.  That's very useful.</p>",
+        "id": 272568932,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645336133
+    },
+    {
+        "content": "<p>Mhm.<br>\nIt tries to faithfully use the \"right\" vector if you give it the right numbers, obviously, but using the \"wrong\" vector (right for the logic, wrong for the machine registers) can be useful for various reasons.</p>",
+        "id": 272569026,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645336232
+    },
+    {
+        "content": "<p>It looks like in the non-unrolled version there's latent panic machinery.</p>",
+        "id": 272569131,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645336394
+    },
+    {
+        "content": "<p>Yes, I think when the loop gets unrolled all of the index operations have constant/known indexes, so the checks are removed.  So my understanding is the causality arrow goes the other way: because it's unrolled, the panicking gets removed.  I don't really know how to test that assumption though.</p>",
+        "id": 272569227,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645336507
+    },
+    {
+        "content": "<p>Maybe.<br>\nLLVM murmurs \"unrolled loop by factor of 4 with run-time trip count\".</p>",
+        "id": 272569326,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645336619
+    },
+    {
+        "content": "<p>At least partly this has the problem that the implementation of Range in Rust seems to be blocking optimizations. If you could phrase this in a way that didn't rely on range and indexing, it might be easier to optimize.</p>",
+        "id": 272569575,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645336834
+    },
+    {
+        "content": "<p>I dunno, because it optimizes for some of the ranges but not others.</p>\n<p>Here's a less generic version that does unroll for bit-width=6 (no range/loop): <a href=\"https://godbolt.org/z/shKoa7dE1\">https://godbolt.org/z/shKoa7dE1</a></p>",
+        "id": 272569727,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645336994
+    },
+    {
+        "content": "<p>that's the only way I know how to remove the loop, but obviously that'd require 32 separate function definitions</p>",
+        "id": 272569739,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645337021
+    },
+    {
+        "content": "<p>I guess it's not really unrolling, there just isn't a loop</p>",
+        "id": 272569786,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645337049
+    },
+    {
+        "content": "<p>yeah.</p>",
+        "id": 272569819,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645337108
+    },
+    {
+        "content": "<p>Hmm I could probably macro-ize that and solve my problem.  I mostly started the thread because I have a hunch that this is going to be a common problem as people try and genericize what are traditionally very hand-rolled algorithms, and there's a strong intersection between <code>std::simd</code> and performance (and thus caring about loop unrolling), and traditional simd implementations being hand unrolled</p>",
+        "id": 272569839,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645337154
+    },
+    {
+        "content": "<p>Yep.</p>",
+        "id": 272569879,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645337169
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"457711\">Dan Burkert</span> <a href=\"#narrow/stream/257879-project-portable-simd/topic/Loop.20Unrolling/near/272569727\">said</a>:</p>\n<blockquote>\n<p>I dunno, because it optimizes for some of the ranges but not others.</p>\n<p>Here's a less generic version that does unroll for bit-width=6 (no range/loop): <a href=\"https://godbolt.org/z/shKoa7dE1\">https://godbolt.org/z/shKoa7dE1</a></p>\n</blockquote>\n<p>And yes, it does optimize for some ranges! I have no idea why LLVM whiffs on that. :D</p>",
+        "id": 272569893,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645337199
+    },
+    {
+        "content": "<p>Like, I am not seeing anything <strong>obvious</strong> that suggests why 5 flies but 6 doesn't.</p>",
+        "id": 272569910,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645337231
+    },
+    {
+        "content": "<p>yeah exactly</p>",
+        "id": 272569979,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645337296
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">pack</span><span class=\"o\">&lt;</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">N</span>: <span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span>: <span class=\"kp\">&amp;</span><span class=\"p\">[</span><span class=\"n\">Simd</span><span class=\"o\">&lt;</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">16</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">32</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">data</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">Simd</span><span class=\"o\">&lt;</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">16</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">])</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">4</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">packed</span><span class=\"p\">(</span><span class=\"n\">values</span>: <span class=\"kp\">&amp;</span><span class=\"p\">[</span><span class=\"n\">Simd</span><span class=\"o\">&lt;</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">16</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">32</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">data</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">Simd</span><span class=\"o\">&lt;</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">16</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">6</span><span class=\"p\">])</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pack</span>::<span class=\"o\">&lt;</span><span class=\"mi\">6</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>uh apparently this one works</p>",
+        "id": 272570080,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645337419
+    },
+    {
+        "content": "<p>yes, but <code>fn pack</code> is incorrect for anything but <code>N=6</code></p>",
+        "id": 272570108,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645337480
+    },
+    {
+        "content": "<p>oh god I have a tedious answer for that.</p>",
+        "id": 272570121,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645337500
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"457711\">Dan Burkert</span> <a href=\"#narrow/stream/257879-project-portable-simd/topic/Loop.20Unrolling/near/272570108\">said</a>:</p>\n<blockquote>\n<p>yes, but <code>fn pack</code> is incorrect for anything but <code>N=6</code></p>\n</blockquote>\n<p>guess what you can do for free if you do it based on a const value so it's resolved during compilation</p>",
+        "id": 272570261,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645337659
+    },
+    {
+        "content": "<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">pack</span><span class=\"o\">&lt;</span><span class=\"k\">const</span><span class=\"w\"> </span><span class=\"n\">N</span>: <span class=\"kt\">usize</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span>: <span class=\"kp\">&amp;</span><span class=\"p\">[</span><span class=\"n\">Simd</span><span class=\"o\">&lt;</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">16</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">32</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">data</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">Simd</span><span class=\"o\">&lt;</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">16</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">])</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"w\"> </span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"w\"> </span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"w\"> </span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">2</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">};</span><span class=\"w\"></span>\n\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"w\"> </span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">3</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">}</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"w\"> </span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"mi\">4</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">4</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"k\">if</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"w\"> </span><span class=\"o\">&gt;</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">        </span><span class=\"n\">pack_inner</span>::<span class=\"o\">&lt;</span><span class=\"mi\">16</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">N</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">5</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">);</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"p\">};</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n\n<span class=\"k\">pub</span><span class=\"w\"> </span><span class=\"k\">fn</span> <span class=\"nf\">packed</span><span class=\"p\">(</span><span class=\"n\">values</span>: <span class=\"kp\">&amp;</span><span class=\"p\">[</span><span class=\"n\">Simd</span><span class=\"o\">&lt;</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">16</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">32</span><span class=\"p\">],</span><span class=\"w\"> </span><span class=\"n\">data</span>: <span class=\"kp\">&amp;</span><span class=\"nc\">mut</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"n\">Simd</span><span class=\"o\">&lt;</span><span class=\"kt\">u32</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">16</span><span class=\"o\">&gt;</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">6</span><span class=\"p\">])</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"n\">pack</span>::<span class=\"o\">&lt;</span><span class=\"mi\">6</span><span class=\"o\">&gt;</span><span class=\"p\">(</span><span class=\"n\">values</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">data</span><span class=\"p\">)</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</code></pre></div>\n<p>I disavow all knowledge of this code <span aria-label=\"see no evil\" class=\"emoji emoji-1f648\" role=\"img\" title=\"see no evil\">:see_no_evil:</span></p>",
+        "id": 272570293,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645337722
+    },
+    {
+        "content": "<p>I... don't hate that</p>",
+        "id": 272570733,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645338296
+    },
+    {
+        "content": "<p>I mean the alternative is macros</p>",
+        "id": 272570739,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645338304
+    },
+    {
+        "content": "<p>I suspect there is a yet-other alternative which works, but yes.</p>",
+        "id": 272570755,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645338339
+    },
+    {
+        "content": "<p>it's kind of perfect for this situation where the max N is absolutely definitely 32</p>",
+        "id": 272570807,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645338374
+    },
+    {
+        "content": "<p>mhm.</p>",
+        "id": 272570829,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645338440
+    },
+    {
+        "content": "<p>I have not tested it for all lengths but seems to go up to 14.</p>",
+        "id": 272571036,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645338715
+    },
+    {
+        "content": "<p>I'm really digging this, thanks for the solution <span class=\"user-mention\" data-user-id=\"281757\">@Jubilee</span> .</p>\n<p>I discovered another LLVM headscratcher (luckily easily worked around): when the loop innards are abstraced into a fn everything works as expected, but when they are extracted into a closure, LLVM re-orders the instructions to have somewhat randomized memory accesses and performance tanks</p>",
+        "id": 272572004,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340037
+    },
+    {
+        "content": "<p><a href=\"https://godbolt.org/z/hfsh491rh\">https://godbolt.org/z/hfsh491rh</a></p>",
+        "id": 272572045,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340050
+    },
+    {
+        "content": "<p>you can tell because the shift amounts in <code>packed_fn</code> go up linearly, and in <code>packed_closure</code> they jump around <span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span></p>",
+        "id": 272572091,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340152
+    },
+    {
+        "content": "<p>Hmm, maybe the catch here is that the inner loop, as a closure, is the \"same\" struct containing the inner state, but for the const generic version, it actually codegens the generic function each time.</p>",
+        "id": 272572136,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645340179
+    },
+    {
+        "content": "<p>It's like a factor 2x performance difference, definitely measurable</p>",
+        "id": 272572248,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340357
+    },
+    {
+        "content": "<p>ah yeah, the LLVM-IR is more nice and orderly too.</p>",
+        "id": 272572256,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645340377
+    },
+    {
+        "content": "<p>I love that LLVM rewrites the ORs into the ternary instructions and all that stuff but it's kinda crazy how brittle things like that are</p>",
+        "id": 272572314,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340408
+    },
+    {
+        "content": "<p>well I say that, I haven't actually validated the ternaries are better, but I think it's a safe assumption</p>",
+        "id": 272572352,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340427
+    },
+    {
+        "content": "<div class=\"codehilite\"><pre><span></span><code>pack/lwdc/lanes=16/bit-width=2\n                        time:   [9.4308 ns 9.4309 ns 9.4311 ns]\n                        thrpt:  [54.289 Gelem/s 54.289 Gelem/s 54.290 Gelem/s]\n                 change:\n                        time:   [-48.824% -48.746% -48.679%] (p = 0.00 &lt; 0.05)\n                        thrpt:  [+94.850% +95.107% +95.405%]\n                        Performance has improved.\n</code></pre></div>",
+        "id": 272572401,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340492
+    },
+    {
+        "content": "<p>just closure vs fn ^</p>",
+        "id": 272572409,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340502
+    },
+    {
+        "content": "<p>The ternaries are apparently nice, based on wot people say. Would not know, my main machine is AMD.</p>",
+        "id": 272572484,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645340588
+    },
+    {
+        "content": "<p>Yeah on the MIR level these are much different.</p>",
+        "id": 272572555,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645340673
+    },
+    {
+        "content": "<p>ah, so not LLVM then</p>",
+        "id": 272572576,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340717
+    },
+    {
+        "content": "<p>The closure has to call into the same thing each time, \"logically\", whereas the generic function call is actually a request to create a new function, ex nihilo, and then call it.</p>",
+        "id": 272572577,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645340719
+    },
+    {
+        "content": "<p>I see, that's very interesting</p>",
+        "id": 272572587,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340745
+    },
+    {
+        "content": "<p>where do closures get inlined, is that in rust or LLVM?</p>",
+        "id": 272572644,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340775
+    },
+    {
+        "content": "<p>I guess that'd be LLVM if I understood what you just said correctly</p>",
+        "id": 272572676,
+        "sender_full_name": "Dan Burkert",
+        "timestamp": 1645340828
+    },
+    {
+        "content": "<p>unsure, LLVM does most of the actual inlining work but monomorphization is something we do, I believe?</p>",
+        "id": 272572743,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645340907
+    },
+    {
+        "content": "<p>I wonder if generating a closure that generates closures would make them work the same.</p>",
+        "id": 272572775,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645340983
+    },
+    {
+        "content": "<p>but yeah, the big catch with closures is that if they don't capture <strong>anything</strong>, they're morally equivalent to a function... most of the time...?<br>\nbut if they do capture anything, they aren't identical to a function, they are a struct with state + a pointer.</p>",
+        "id": 272572955,
+        "sender_full_name": "Jubilee",
+        "timestamp": 1645341200
+    },
+    {
+        "content": "<p><span class=\"user-mention silent\" data-user-id=\"457711\">Dan Burkert</span> <a href=\"#narrow/stream/257879-project-portable-simd/topic/Loop.20Unrolling/near/272572644\">said</a>:</p>\n<blockquote>\n<p>where do closures get inlined, is that in rust or LLVM?</p>\n</blockquote>\n<p>There's a MIR inliner checked in, but it's currently off-by-default everywhere, and thus only LLVM is doing inlining for you right now (unless you're passing <code>-Z mir-opt-level=3</code> or something)</p>",
+        "id": 272606553,
+        "sender_full_name": "scottmcm",
+        "timestamp": 1645379593
+    }
+]

@@ -1,0 +1,231 @@
+<html>
+<head><meta charset="utf-8"><title>Cargo build scripts vs. autotools · general · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/index.html">general</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html">Cargo build scripts vs. autotools</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="254792779"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254792779" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254792779">(Sep 25 2021 at 00:37)</a>:</h4>
+<p>I mentioned this in  <a class="stream" data-stream-id="233931" href="/#narrow/stream/233931-t-compiler.2Fmajor-changes">#t-compiler/major changes</a> (<a href="#narrow/stream/233931-t-compiler.2Fmajor-changes/topic/Accept.20.60pc.60.20in.20place.20of.20.60unknown.60.20and.20.60un.E2.80.A6.20compiler-team.23441">compilter-team #441</a>, but I find that cargo build scripts are lacking, in terms of usefulness in doing some of the similar things that other build scripts (autotools/cmake) typically do.</p>
+<blockquote>
+<p>(Although imo cargo build scripts are unsuited for some of the typical tasks a standard autotools or cmake build script will do, but that's a completely orthogonal discussion)</p>
+</blockquote>
+<p>There are a couple of reasons I think this, mostly either based on something being difficult, or just something not being exposed. <br>
+One thing is that cargo build scripts aren't the easiest to perform feature detection from - even just figuring out what "$RUSTC" is and determining basic properties takes almost <a href="https://github.com/LightningCreations/cargo-autobuild/blob/main/src/tests.rs">1000 lines of rust</a> (note: Some of this was finding the <code>rustc</code> program, which is not necessary in the case of cargo build scripts. This also does some stuff for figuring out the <code>$TARGET</code> which is likewise unecessary).</p>
+
+
+
+<a name="254792800"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254792800" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254792800">(Sep 25 2021 at 00:37)</a>:</h4>
+<p>One of the main issues is that rust isn't the cleanest language to perform trial compilations with - this is necessary for feature detection, and the alternative is assuming features from the version string. Imo, this a poor idea, it doesn't consider new cases that support particular features. <br>
+This is clear for C compilers, if you use a gcc option like <code>-std=c18</code>, and you ask for the gcc version string to determine whether  you can pass it, succesfully, this won't work if <code>$CC</code> is <code>clang</code> even if it  would accept and correctly handle it. It's better to attempt to compile a program with checks for known-correct behaviour passing the flag in and inspect the result. </p>
+<p>Rust crates already do this in practice (<a href="https://github.com/rust-lang/libc/blob/master/build.rs#L9">https://github.com/rust-lang/libc/blob/master/build.rs#L9</a>, <a href="https://github.com/Lokathor/bytemuck/commit/f3e16c7051b561b027c797823b3ca16e7133028d">https://github.com/Lokathor/bytemuck/commit/f3e16c7051b561b027c797823b3ca16e7133028d</a> (removed in following commit)), presumably partially related to the increased difficulty of performing actual feature tests (checking whether features are available, and enabling them in the code if not). When writing autotools or cmake build scripts, the latter is fairly easy (taking merely one cmake command or one autoconf macro, which is also <a href="https://github.com/chorman0773/rust-autotools/blob/027ada3cf0a73372345f0a6bd89983cf0b71acfa/m4/lcrust_prog_rustc.m4#L423..L435">fairly easy to implement</a>).</p>
+
+
+
+<a name="254792811"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254792811" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254792811">(Sep 25 2021 at 00:37)</a>:</h4>
+<p>cargo also does somewhat play a part in this - for example, it doesn't expose the set of flags to pass to <code>$RUSTC</code> invocations in <code>$RUSTFLAGS</code>. When working on the build script for lccc's libcore, I thought about setting a cfg based on the compilation abi version (and whether layout randomization is enabled). <br>
+From autotools, this was as easy as:</p>
+<div class="codehilite"><pre><span></span><code>echo &#39;#![no_std]&#39; &gt; comptest.rs
+$RUSTC $RUSTFLAGS -Z extra-emit-flags --crate-name comptest --crate-type rlib --emit manifest=comptest.rmanifest comptest.rs &gt; /dev/null 2&gt;config.log
+if $? \= 0
+then
+    &lt;do some magic to parse the binary file and extract qword starting at the 8th byte&gt;
+fi
+</code></pre></div>
+<p>When trying to figure out how to do it in a cargo build script (for, among other things, <code>-Z build-std</code>), I couldn't come up with an easy answer as cargo doesn't give all of the <code>RUSTFLAGS</code> to the build script (albeit it gives enough unless someone is just directly running <code>cargo rustc</code> in the library source directory. parsing the variable from rust, though, is a nightmare).</p>
+
+
+
+<a name="254793087"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254793087" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254793087">(Sep 25 2021 at 00:40)</a>:</h4>
+<p>(CC <span class="user-mention" data-user-id="239881">@Josh Triplett</span>)</p>
+
+
+
+<a name="254793407"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254793407" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254793407">(Sep 25 2021 at 00:45)</a>:</h4>
+<p>(Configuration is also a fun topic, but that's a whole other rant)</p>
+
+
+
+<a name="254970256"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970256" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970256">(Sep 26 2021 at 23:13)</a>:</h4>
+<p>So, FWIW, I think in the vast majority of cases "trial compilation" is not an especially useful construct anymore.</p>
+
+
+
+<a name="254970334"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970334" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970334">(Sep 26 2021 at 23:14)</a>:</h4>
+<p>If your code is written in C11, use the C11 option, and error if it isn't supported. If your code <em>isn't</em> written in C11, it's not worth having "optional" support for it; just use whatever you'd have used as the fallback until you're ready to require C11.</p>
+
+
+
+<a name="254970377"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970377" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970377">(Sep 26 2021 at 23:14)</a>:</h4>
+<p>There are some rare cases where that's not true; for instance, at one point it seemed useful to conditionally use <code>u128</code> support, when that hadn't been out long. But in general, I'd favor putting in appropriate feature dependencies for that.</p>
+
+
+
+<a name="254970390"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970390" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970390">(Sep 26 2021 at 23:15)</a>:</h4>
+<p>Beyond that, we have <code>min-rust-version</code> in Cargo.</p>
+
+
+
+<a name="254970411"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970411" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970411">(Sep 26 2021 at 23:15)</a>:</h4>
+<p>I'm not a <em>fan</em> of version detection, and I prefer providing sufficient mechanisms for feature detection, but I'd still prefer version detection over the "trial compilation" approach.</p>
+
+
+
+<a name="254970514"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970514" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970514">(Sep 26 2021 at 23:17)</a>:</h4>
+<p>And even for something like <code>u128</code>, I think it was useful to just expose that as a Cargo feature, so that the project depending on yours could specify whether to enable it.</p>
+
+
+
+<a name="254970618"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970618" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970618">(Sep 26 2021 at 23:19)</a>:</h4>
+<p>I've seen what projects look like when they have extensive use of <code>#ifdef COMPILER_SUPPORTS_FOO</code>, and on balance I don't think it's worthwhile. If you have support for not using foo, just use that. Otherwise, just require foo.</p>
+
+
+
+<a name="254970641"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970641" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970641">(Sep 26 2021 at 23:19)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="239881">Josh Triplett</span> <a href="#narrow/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools/near/254970334">said</a>:</p>
+<blockquote>
+<p>If your code is written in C11, use the C11 option, and error if it isn't supported. If your code <em>isn't</em> written in C11, it's not worth having "optional" support for it; just use whatever you'd have used as the fallback until you're ready to require C11.</p>
+</blockquote>
+<p>Well, the question for something like C is which option to use. Obviously this is less useful in rust, where the CLI is also stable when you're in cargo world.</p>
+<p>Also, for feature detection, it can be useful internally. If you need to decide how to implement a feature, that's where trial compliation comes in. Sure, you <em>can</em> use cfg's in rust, but that rules out new platforms that have apis that otherwise just work on one of the existing sets, but it doesn't think so because it doesn't know it can base on a set of hardcoded rules.</p>
+
+
+
+<a name="254970754"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970754" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970754">(Sep 26 2021 at 23:21)</a>:</h4>
+<p>There can also be internals reasons for this. If there is a more optimal implementation, or maybe just a sound one that was previously impossible but necessary, I'd prefer to detect that I can use it, rather than check a version string.</p>
+
+
+
+<a name="254970868"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/254970868" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#254970868">(Sep 26 2021 at 23:23)</a>:</h4>
+<blockquote>
+<p>Also, for feature detection, it can be useful internally. If you need to decide how to implement a feature, that's where trial compliation comes in. Sure, you can use cfg's in rust, but that rules out new platforms that have apis that otherwise just work on one of the existing sets, but it doesn't think so because it doesn't know it can base on a set of hardcoded rules.</p>
+</blockquote>
+<p>As an example, I do this in lccc's stdlib to figure out what thread (et. al) implementation to use. I don't hardcode unix=pthread, windows=winapi, linux=specialized. I have a list of implementations, and I check which one works. The first one in order that does, I use. That way, if some new platform comes along, and emulates one of those apis, but may not present the same cfg interface, it will just work: nothing new needs to be added.</p>
+
+
+
+<a name="255126863"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255126863" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255126863">(Sep 27 2021 at 21:58)</a>:</h4>
+<p>Another use case for trial-compliation feature detection would be for <a href="https://internals.rust-lang.org/t/pre-rfc-usize-is-not-size-t/15369">https://internals.rust-lang.org/t/pre-rfc-usize-is-not-size-t/15369</a> in MSRV'd crates. <br>
+If I need a pointer-sized integer (or the index size integer type depending on what direction that ends up going), but can't use <code>uptr</code>, I'd prefer asking the C compiler the size of <code>uintptr_t</code> to hardcoding cfgs for specific platforms.</p>
+
+
+
+<a name="255628112"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255628112" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255628112">(Sep 30 2021 at 18:54)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="257758">Connor Horman</span> <a href="#narrow/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools/near/254970641">said</a>:</p>
+<blockquote>
+<p>Also, for feature detection, it can be useful internally. If you need to decide how to implement a feature, that's where trial compliation comes in. Sure, you <em>can</em> use cfg's in rust, but that rules out new platforms that have apis that otherwise just work on one of the existing sets, but it doesn't think so because it doesn't know it can base on a set of hardcoded rules.</p>
+</blockquote>
+<p>I think that was more useful when there were a hundred different variants of UNIX that worked mostly similarly, and there was enough commonality that "this header exists and this function seems to be callable with this signature" was a useful guess.</p>
+
+
+
+<a name="255628236"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255628236" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255628236">(Sep 30 2021 at 18:55)</a>:</h4>
+<p>These days, we have fewer systems, and less new ones cropping up, and it's more a matter of porting to the handful of systems out there, which are often different enough that they <em>do</em> need different code paths.</p>
+
+
+
+<a name="255628367"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255628367" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255628367">(Sep 30 2021 at 18:56)</a>:</h4>
+<p>Also, compile-based detection tends more towards the "try compiling it and if it compiles it might work, your mileage may vary, don't count on it working" style of support.</p>
+
+
+
+<a name="255628521"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255628521" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255628521">(Sep 30 2021 at 18:56)</a>:</h4>
+<p>If people are going to count on something working, then supporting a new platform needs to be a more <em>deliberate</em> decision.</p>
+
+
+
+<a name="255628561"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255628561" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255628561">(Sep 30 2021 at 18:57)</a>:</h4>
+<p>Even if it's just "yeah, this is a UNIX variant, let's send it down the UNIX code paths".</p>
+
+
+
+<a name="255628801"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255628801" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Josh Triplett <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255628801">(Sep 30 2021 at 18:58)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="257758">Connor Horman</span> <a href="#narrow/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools/near/255126863">said</a>:</p>
+<blockquote>
+<p>If I need a pointer-sized integer (or the index size integer type depending on what direction that ends up going), but can't use <code>uptr</code>, I'd prefer asking the C compiler the size of <code>uintptr_t</code> to hardcoding cfgs for specific platforms.</p>
+</blockquote>
+<p>For that specific case, I'd prefer asking the Rust compiler how big <code>*mut ()</code> is.</p>
+
+
+
+<a name="255630619"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255630619" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255630619">(Sep 30 2021 at 19:09)</a>:</h4>
+<p>For that, yeah. Though I'd need to ask the C compiler for <code>size_t</code> anyways, so I don't have to deal with whatever that thread decides is the best path, and are fine either way.</p>
+
+
+
+<a name="255632723"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255632723" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255632723">(Sep 30 2021 at 19:24)</a>:</h4>
+<p><span class="user-mention silent" data-user-id="239881">Josh Triplett</span> <a href="#narrow/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools/near/255628521">said</a>:</p>
+<blockquote>
+<p>If people are going to count on something working, then supporting a new platform needs to be a more <em>deliberate</em> decision.</p>
+</blockquote>
+<p>Not necessarily. Platforms may have shared apis because one may attempt compatibility with another platform, but they may deliberately not report the same names. In that case, imo, supporting the target should be as simple as setting <code>--host new-fancy-target</code> or <code>--target new-fancy-target</code> if everything necessary matches, rather than forcing someone to dig through mountains of config or source files just to add a target that's a no-op. Obviously, "it works properly" and "it is officially supported" are two different things (but should be fairly close), but the former should be sufficient to build and run properly, imo.</p>
+
+
+
+<a name="255633040"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255633040" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255633040">(Sep 30 2021 at 19:26)</a>:</h4>
+<p>(And of course, you can always write more comprehensive checks. For example, both gcc and clang's respective build scripts do a lot of behaviour checks on various functions)</p>
+
+
+
+<a name="255694857"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255694857" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Laurențiu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255694857">(Oct 01 2021 at 06:07)</a>:</h4>
+<p>As a user, I'd very much not want autotools-style "let's compile these 5000 programs and see if they work" checks.</p>
+
+
+
+<a name="255703719"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255703719" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Lokathor <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255703719">(Oct 01 2021 at 07:44)</a>:</h4>
+<p>Yeah that's just a good way to explode the compile time.</p>
+<p>Particularly if separate crates don't share the info and each compile their own set of 5000 programs.</p>
+
+
+
+<a name="255704082"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255704082" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Laurențiu <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255704082">(Oct 01 2021 at 07:48)</a>:</h4>
+<p>And in good Autotools tradition, they don't test for what they need, they take some kitchen-sink list of tests and use it.</p>
+
+
+
+<a name="255725597"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255725597" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Connor Horman <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255725597">(Oct 01 2021 at 11:00)</a>:</h4>
+<p>That is certainly a fair argument, however, at the program level (especally for this particular program) I find having broad support is incredibly useful, and I shouldn't be required to know every single possible system a user might compile as a target or host system, especialy if 99% of them will just work out of the box, but wouldn't if an inferior set is hardcoded.</p>
+
+
+
+<a name="255726031"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/122651-general/topic/Cargo%20build%20scripts%20vs.%20autotools/near/255726031" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> bjorn3 <a href="https://zulip-archive.rust-lang.org/stream/122651-general/topic/Cargo.20build.20scripts.20vs.2E.20autotools.html#255726031">(Oct 01 2021 at 11:04)</a>:</h4>
+<p>The disadvantage of not hard coding a list of targets is that maintainers will not know on which targets work and will thus probably break it in minor or even patch releases as they start using new functions available on all systems they are actively testing.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

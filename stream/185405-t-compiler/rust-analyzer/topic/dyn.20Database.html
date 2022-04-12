@@ -1,0 +1,67 @@
+<html>
+<head><meta charset="utf-8"><title>dyn Database · t-compiler/rust-analyzer · Zulip Chat Archive</title></head>
+<h2>Stream: <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/index.html">t-compiler/rust-analyzer</a></h2>
+<h3>Topic: <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/dyn.20Database.html">dyn Database</a></h3>
+
+<hr>
+
+<base href="https://rust-lang.zulipchat.com">
+
+<head><link href="https://zulip-archive.rust-lang.org/style.css" rel="stylesheet"></head>
+
+<a name="180488503"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/dyn%20Database/near/180488503" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/dyn.20Database.html#180488503">(Nov 12 2019 at 07:18)</a>:</h4>
+<p>I've tried to re-rail name resolution onto a <code>dyn Databse</code>: <a href="https://github.com/matklad/rust-analyzer/commit/e4dabdb013c21ef13aa6e0555f5eb1c654315a0f" target="_blank" title="https://github.com/matklad/rust-analyzer/commit/e4dabdb013c21ef13aa6e0555f5eb1c654315a0f">https://github.com/matklad/rust-analyzer/commit/e4dabdb013c21ef13aa6e0555f5eb1c654315a0f</a></p>
+<p>It works, macro-benchmark results are the same, I haven't measured compile time impact. </p>
+<p>However, large-scale usage seems problemantic, because of the dyn upcasting problem. I had to copy a bit of code from another crate due to the lack of upcasts. This seems like it won't scale to a huge codebase, so I am sticking with <code>impl DB</code> for the time being. </p>
+<p>cc <span class="user-mention" data-user-id="116009">@nikomatsakis</span>, seems like we need to do <em>something</em> in salsa to make such cases easier.</p>
+
+
+
+<a name="180488579"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/dyn%20Database/near/180488579" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/dyn.20Database.html#180488579">(Nov 12 2019 at 07:20)</a>:</h4>
+<p>Specifically, the problem is if you have crate a with <code>A</code> salsa databse, which is used as <code>dyn A</code>, and you have crate b, which has <code>B: A</code>, it's inconvenient to use <code>dyn B</code> in <code>b</code>: you are able to call <code>A</code> methods directly, but you can't pass that to helper functions that expect <code>dyn A</code></p>
+
+
+
+<a name="180489161"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/dyn%20Database/near/180489161" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/dyn.20Database.html#180489161">(Nov 12 2019 at 07:31)</a>:</h4>
+<p>One practical way to work around this is to have a per-subsystem mediating trait:</p>
+<div class="codehilite"><pre><span></span><span class="k">trait</span><span class="w"> </span><span class="n">NameresCtx</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">crate_graph</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Arc</span><span class="o">&lt;</span><span class="n">CrateGraph</span><span class="o">&gt;</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">impl</span><span class="o">&lt;</span><span class="n">T</span>: <span class="nc">DefDatabase</span><span class="o">&gt;</span><span class="w"> </span><span class="n">NameresCtx</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">T</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">crate_graph</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Arc</span><span class="o">&lt;</span><span class="n">CrateGraph</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&lt;</span><span class="n">T</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">DefDatabase</span><span class="w"> </span><span class="cm">/* or AstDatabase, which gives upcasting*/</span><span class="o">&gt;</span>::<span class="n">crate_graph</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span> <span class="nf">do_name_res</span><span class="p">(</span><span class="n">ctx</span>: <span class="kp">&amp;</span><span class="nc">dyn</span><span class="w"> </span><span class="n">NameresCtx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="p">...</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</pre></div>
+
+
+<p>That is, one can write a bunch of boilerplate to explicitly dynamize every helper function. I don't want to go into this direction, as it adds boilerplate and indirection (which makes it harder to read the code). Although the benefit of this approach is that you do get a <em>pure</em> trait</p>
+
+
+
+<a name="180494331"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/dyn%20Database/near/180494331" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> pachi <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/dyn.20Database.html#180494331">(Nov 12 2019 at 08:52)</a>:</h4>
+<p><span class="user-mention" data-user-id="133169">@matklad</span> , I think <span class="user-mention" data-user-id="124069">@Alexander Regueiro</span> and <span class="user-mention" data-user-id="116009">@nikomatsakis</span> got upcasts working now, though I don't know how far away from being available they are.</p>
+
+
+
+<a name="180494423"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/dyn%20Database/near/180494423" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> matklad <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/dyn.20Database.html#180494423">(Nov 12 2019 at 08:54)</a>:</h4>
+<p>By design, rust-anlayzer requires stable, so I would prefer to find a solution which is available in 1.39 :)</p>
+
+
+
+<a name="180528779"></a>
+<h4><a href="https://rust-lang.zulipchat.com#narrow/stream/185405-t-compiler/rust-analyzer/topic/dyn%20Database/near/180528779" class="zl"><img src="https://zulip-archive.rust-lang.org/assets/img/zulip.svg" alt="view this post on Zulip" style="width:20px;height:20px;"></a> Alexander Regueiro <a href="https://zulip-archive.rust-lang.org/stream/185405-t-compiler/rust-analyzer/topic/dyn.20Database.html#180528779">(Nov 12 2019 at 15:38)</a>:</h4>
+<p><span class="user-mention" data-user-id="125416">@pachi</span> Yep. The idea is to merge that PR this week.</p>
+
+
+
+<hr><p>Last updated: Apr 12 2022 at 20:01 UTC</p>
+</html>

@@ -1,0 +1,32 @@
+[
+    {
+        "content": "<p>Hello!</p>\n<p>I wanted to get a second opinion on something i have been thinking about. I have a wrapper for the CUDA driver API as part of a larger project. As with many C libraries, it has functions for dropping its structures, the issue is, im not sure if i should be panicking if it fails to drop the structure (almost all cuda functions return a result).</p>\n<p>This is an issue for a couple reasons:</p>\n<ul>\n<li>If a kernel launch yields an InvalidAddress error, CUDA will basically nuke the driver, any allocated memory is now gone and CUDA cannot resume unless you actually restart the process. This causes... issues, because if a user tries to</li>\n</ul>\n<div class=\"codehilite\" data-code-language=\"Rust\"><pre><span></span><code><span class=\"kd\">let</span><span class=\"w\"> </span><span class=\"n\">mem</span><span class=\"w\"> </span><span class=\"o\">=</span><span class=\"w\"> </span><span class=\"p\">[</span><span class=\"mi\">0</span><span class=\"p\">;</span><span class=\"w\"> </span><span class=\"mi\">20</span><span class=\"p\">].</span><span class=\"n\">as_dbox</span><span class=\"p\">()</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n\n<span class=\"n\">launch</span><span class=\"o\">!</span><span class=\"p\">(</span><span class=\"n\">module</span><span class=\"p\">.</span><span class=\"n\">foo</span><span class=\"o\">&lt;&lt;&lt;</span><span class=\"mi\">1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">1</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"mi\">0</span><span class=\"p\">,</span><span class=\"w\"> </span><span class=\"n\">stream</span><span class=\"o\">&gt;&gt;&gt;</span><span class=\"p\">(</span><span class=\"n\">mem</span><span class=\"p\">.</span><span class=\"n\">as_device_ptr</span><span class=\"p\">()))</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n<span class=\"n\">stream</span><span class=\"p\">.</span><span class=\"n\">synchronize</span><span class=\"p\">()</span><span class=\"o\">?</span><span class=\"p\">;</span><span class=\"w\"></span>\n</code></pre></div>\n<p>Then the InvalidAddress error will cause synchronization to return (because it returned an error), which causes the function to return, which then tries to drop <code>mem</code>. However, because CUDA just nuked everything, trying to drop mem will make its Drop impl panic because cuda doesnt think its a valid address. This can yield 3+ panic messages (with their own backtraces), which is confusing and verbose.</p>\n<ul>\n<li>panicking inside drop has soundness concerns, and AFAIK is even proposed to be disallowed.</li>\n</ul>\n<p>So i was thinking, should i just call CUDA's drop stuff and just ignore if it fails?</p>",
+        "id": 256782858,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1633717189
+    },
+    {
+        "content": "<p>Or maybe i should just abort the process if CUDA yielded an InvalidAddress? InvalidAddress essentially makes CUDA unusable, although i think being able to catch that case gracefully (even though it should never be happening) is helpful</p>",
+        "id": 256783273,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1633717356
+    },
+    {
+        "content": "<p>I think whether you ignore a failure or panic is an arbitrary choice today though goings definitely do point towards ignoring. I strive to provide a <code>fn close(self) -&gt; Result&lt;...&gt; {}</code> to give users an option of handling the fallible case and then ignore the error in <code>drop</code>.</p>",
+        "id": 256785218,
+        "sender_full_name": "nagisa",
+        "timestamp": 1633718096
+    },
+    {
+        "content": "<p>A lot of the structures already have a <code>drop</code> function which returns a result because cuda could yield errors from asynchronous launches (e.g. launching a kernel which yielded an error then not synchronizing and dropping the stream). So i think i might just do the same for all structures and ignore it in drop</p>",
+        "id": 256785432,
+        "sender_full_name": "Riccardo D'Ambrosio",
+        "timestamp": 1633718174
+    },
+    {
+        "content": "<p>While it may be unpractical to achieve, what I'd do, if these things depend on a CUDA state, which is either a global state, or an instance-related state (which can related back to a global state through a singleton pattern), is to have the \"CUDA nuke\" event, when identified, set a flag on that state, and have all the dependents entities skip their own drop when that happens. And then make the original CUDA nuke trigger a panic, that at some point may be caught through <code>catch_unwind</code>: indeed, it seems like bad enough event / state, and hopefully, unlikely enough, to warrant unwinding rather than a <code>Result</code>.</p>\n<p>Otherwise I'd go with <span class=\"user-mention\" data-user-id=\"123586\">@nagisa</span>'s approach: ignore failures on drop, by offering an opt-in explicit <code>Result</code>-yielding <code>close</code> operation.</p>",
+        "id": 256857084,
+        "sender_full_name": "Daniel Henry-Mantilla",
+        "timestamp": 1633773241
+    }
+]

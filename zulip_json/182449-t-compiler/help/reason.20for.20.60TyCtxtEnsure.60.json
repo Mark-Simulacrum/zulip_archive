@@ -1,0 +1,122 @@
+[
+    {
+        "content": "<p>We use <code>tcx.ensure().query_name(...)</code> in a few places in the compiler.<br>\nLooking at <a href=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.ensure\" title=\"https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.ensure\">https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyCtxt.html#method.ensure</a></p>\n<blockquote>\n<p>Returns a transparent wrapper for TyCtxt, which ensures queries are executed instead of just returning their results.</p>\n</blockquote>\n<p>I do not quite understand where this is desired (afaict it might reemit some warnings between incremental builds, which might be useful <span aria-label=\"shrug\" class=\"emoji emoji-1f937\" role=\"img\" title=\"shrug\">:shrug:</span> ).</p>\n<p>E.g. in <code>optimized_mir</code> we ensure <code>mir_borrowck</code> <a href=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/mod.rs#L338\" title=\"https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/mod.rs#L338\">https://github.com/rust-lang/rust/blob/master/src/librustc_mir/transform/mod.rs#L338</a></p>\n<p>With the comment </p>\n<div class=\"codehilite\"><pre><span></span><span class=\"c1\">// (Mir-)Borrowck uses `mir_validated`, so we have to force it to</span>\n<span class=\"c1\">// execute before we can steal.</span>\n<span class=\"n\">tcx</span><span class=\"p\">.</span><span class=\"n\">ensure</span><span class=\"p\">().</span><span class=\"n\">mir_borrowck</span><span class=\"p\">(</span><span class=\"n\">def_id</span><span class=\"p\">);</span><span class=\"w\"></span>\n</pre></div>\n\n\n<p>I don't see why <code>ensure</code> is actually needed here. <code>ensure</code> only changes the behavior in case <code>mir_borrowck</code> is already cached. In this case it recomputes it and stores the same result in the cache, changing no observable behavior afaict. Why would we want to rerun <code>mir_borrowck</code> if we already did so before?</p>\n<p>What am I missing here <span aria-label=\"sweat smile\" class=\"emoji emoji-1f605\" role=\"img\" title=\"sweat smile\">:sweat_smile:</span></p>",
+        "id": 195277356,
+        "sender_full_name": "lcnr",
+        "timestamp": 1587808033
+    },
+    {
+        "content": "<p>If <code>optimized_mir</code> for a function were to run before <code>mir_borrowck</code>, the steal of the mir at <a href=\"https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L341\" title=\"https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L341\">https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L341</a> would mean that <code>mir_borrowck</code> can no longer access the <code>mir_validated</code> output.</p>",
+        "id": 195282227,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1587816671
+    },
+    {
+        "content": "<p><code>mir_validated</code> returns <code>Steal&lt;mir::Body&gt;</code>, not <code>mir::Body</code>. This makes it possible to steal the inner <code>mir::Body</code>, after which any attempt to access it will panic. This is an optimization to prevent a clone of <code>mir::Body</code>, which is very costly.</p>",
+        "id": 195282330,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1587816752
+    },
+    {
+        "content": "<p>jup, what I don't understand is why we need <code>ensure</code> there.</p>",
+        "id": 195282409,
+        "sender_full_name": "lcnr",
+        "timestamp": 1587816920
+    },
+    {
+        "content": "<p>before stealing, you want to <em>ensure</em> that <code>mir_borrowck</code> has already been run</p>",
+        "id": 195282415,
+        "sender_full_name": "oli",
+        "timestamp": 1587816956
+    },
+    {
+        "content": "<p>because then the query is cached</p>",
+        "id": 195282416,
+        "sender_full_name": "oli",
+        "timestamp": 1587816961
+    },
+    {
+        "content": "<p>and future invocations of it will just yield the cached result instead of running the body which would try to access <code>mir_validated</code></p>",
+        "id": 195282456,
+        "sender_full_name": "oli",
+        "timestamp": 1587816979
+    },
+    {
+        "content": "<p>But isn't this also a given if we call <code>mir_borrowck</code> without ensure</p>",
+        "id": 195282459,
+        "sender_full_name": "lcnr",
+        "timestamp": 1587817001
+    },
+    {
+        "content": "<p>yes</p>",
+        "id": 195282463,
+        "sender_full_name": "oli",
+        "timestamp": 1587817011
+    },
+    {
+        "content": "<p>Afaik <code>ensure</code> actually reruns <code>mir_borrowck</code> there even if it was already called</p>",
+        "id": 195282471,
+        "sender_full_name": "lcnr",
+        "timestamp": 1587817026
+    },
+    {
+        "content": "<p>which seems like it's unnecessary</p>",
+        "id": 195282478,
+        "sender_full_name": "lcnr",
+        "timestamp": 1587817049
+    },
+    {
+        "content": "<p><code>ensure</code> is just a scheme for calling a query without using its result afaik, but that's just from superficial knowledge</p>",
+        "id": 195282480,
+        "sender_full_name": "oli",
+        "timestamp": 1587817051
+    },
+    {
+        "content": "<blockquote>\n<p>Afaik ensure actually reruns mir_borrowck there even if it was already called</p>\n</blockquote>\n<p>Aaah, so this was where I was wrong. TyCtxtEnsure is pretty much</p>\n<div class=\"codehilite\"><pre><span></span><span class=\"k\">fn</span> <span class=\"nf\">query_name</span><span class=\"p\">(..)</span><span class=\"w\"> </span><span class=\"p\">{</span><span class=\"w\"></span>\n<span class=\"w\">    </span><span class=\"bp\">self</span><span class=\"p\">.</span><span class=\"n\">tcx</span><span class=\"p\">.</span><span class=\"n\">query_name</span><span class=\"p\">(...);</span><span class=\"w\"></span>\n<span class=\"p\">}</span><span class=\"w\"></span>\n</pre></div>",
+        "id": 195282548,
+        "sender_full_name": "lcnr",
+        "timestamp": 1587817153
+    },
+    {
+        "content": "<p>Thank you</p>",
+        "id": 195282729,
+        "sender_full_name": "lcnr",
+        "timestamp": 1587817376
+    },
+    {
+        "content": "<p>The documentation on <code>fn ensure</code> is somewhat misleading there</p>",
+        "id": 195282785,
+        "sender_full_name": "Jonas Schievink  [he/him]",
+        "timestamp": 1587817462
+    },
+    {
+        "content": "<p>Looking somewhat more into this, we sometimes use <code>let _ = tcx.query_name(...); </code> instead of ensure. <a href=\"https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L240\" title=\"https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L240\">https://github.com/rust-lang/rust/blob/a58b1ed44f5e06976de2bdc4d7dc81c36a96934f/src/librustc_mir/transform/mod.rs#L240</a></p>\n<p>As I can fully get what this does without having to read and understand the docs of <code>ensure</code> I am kind of in favor of just removing <code>ensure</code> entirely <span aria-label=\"laughing\" class=\"emoji emoji-1f606\" role=\"img\" title=\"laughing\">:laughing:</span> I still don't know too much about the query system yet, so there might be some advantage to using <code>ensure</code> I don't know of</p>",
+        "id": 195284627,
+        "sender_full_name": "lcnr",
+        "timestamp": 1587820736
+    },
+    {
+        "content": "<p>When the query is already cached,  <code>tcx.ensure()</code> doesn't create a clone of the query result, which saves time for big values.</p>",
+        "id": 195284696,
+        "sender_full_name": "bjorn3",
+        "timestamp": 1587820920
+    },
+    {
+        "content": "<p>true <span aria-label=\"sparkles\" class=\"emoji emoji-2728\" role=\"img\" title=\"sparkles\">:sparkles:</span> do we have any queries which return a big struct directly instead of a reference?</p>",
+        "id": 195284815,
+        "sender_full_name": "lcnr",
+        "timestamp": 1587821065
+    },
+    {
+        "content": "<p>maybe we should require that the result is <code>Copy</code> :P</p>",
+        "id": 195377836,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587969646
+    },
+    {
+        "content": "<p>and aggressively intern everything</p>",
+        "id": 195377844,
+        "sender_full_name": "eddyb",
+        "timestamp": 1587969658
+    }
+]

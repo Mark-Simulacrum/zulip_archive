@@ -1,0 +1,80 @@
+[
+    {
+        "content": "<p>I was profiling the compiler's use of <code>FxHasher</code> for hash tables yesterday. I found that ~3.5% of all <code>FxHasher</code> invocations are on an empty sequence, i.e. hashing <code>()</code> or some other unit type. This surprised me.</p>\n<p>I did some follow-up and got stack traces like these ones:</p>\n<div class=\"codehilite\"><pre><span></span><code>#1: 0x7f3348e850cd: dhat::ad_hoc_event (lib.rs:1227:18)\n#2: 0x7f33489b6a6c: &lt;rustc_hash::FxHasher as core::hash::Hasher&gt;::finish (lib.rs:147:13)\n#3: 0x7f33489b6a6c: rustc_query_system::query::plumbing::hash_for_shard::&lt;()&gt; (plumbing.rs:54:5)\n#4: 0x7f33489b6a6c: &lt;rustc_query_system::query::plumbing::QueryCacheStore&lt;rustc_query_system::query::caches::ArenaCache&lt;(), rustc_hir::lang_items::LanguageItems&gt;&gt;&gt;::get_lookup (plumbing.rs:62:24)\n#5: 0x7f33489b6a6c: &lt;rustc_query_system::query::caches::ArenaCache&lt;(), rustc_hir::lang_items::LanguageItems&gt; as rustc_query_system::query::caches::QueryCache&gt;::lookup::&lt;&amp;rustc_hir::lang_items::LanguageItems, rustc_query_system::query::plumbing::try_get_cached&lt;rustc_middle::ty::context::TyCtxt, rustc_query_system::query::caches::ArenaCache&lt;(), rustc_hir::lang_items::LanguageItems&gt;, &amp;rustc_hir::lang_items::LanguageItems, &lt;&amp;rustc_hir::lang_items::LanguageItems as core::clone::Clone&gt;::clone&gt;::{closure#0}&gt; (caches.rs:186:30)\n#6: 0x7f33489b6a6c: rustc_query_system::query::plumbing::try_get_cached::&lt;rustc_middle::ty::context::TyCtxt, rustc_query_system::query::caches::ArenaCache&lt;(), rustc_hir::lang_items::LanguageItems&gt;, &amp;rustc_hir::lang_items::LanguageItems, &lt;&amp;rustc_hir::lang_items::LanguageItems as core::clone::Clone&gt;::clone&gt; (plumbing.rs:368:5)\n#7: 0x7f33489b6a6c: &lt;rustc_middle::ty::query::TyCtxtAt&gt;::get_lang_items (query.rs:232:30)\n#8: 0x7f33489b6a6c: &lt;rustc_middle::ty::context::TyCtxt&gt;::get_lang_items (query.rs:222:17)\n#9: 0x7f33489b6a6c: &lt;rustc_middle::ty::context::TyCtxt&gt;::lang_items (context.rs:1221:9)\n</code></pre></div>",
+        "id": 263932549,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638828879
+    },
+    {
+        "content": "<p>Which took me to this query:</p>\n<div class=\"codehilite\"><pre><span></span><code>    query get_lang_items(_: ()) -&gt; LanguageItems {\n</code></pre></div>",
+        "id": 263932830,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638828942
+    },
+    {
+        "content": "<p>AFAICT, it's effectively a query where there is only one possible key. I.e. \"get all the lang items for the crate\"</p>",
+        "id": 263932942,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638828983
+    },
+    {
+        "content": "<p>There are a few other queries like that: <code>limits</code>, <code>entry_fn</code>, <code>features_query</code></p>",
+        "id": 263933069,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638829078
+    },
+    {
+        "content": "<p>I think every query gets its own sharded hash table, is that right?</p>",
+        "id": 263933160,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638829124
+    },
+    {
+        "content": "<p>A rough count suggests that 36 of our 264(?) queries have <code>()</code> keys</p>",
+        "id": 263933237,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638829181
+    },
+    {
+        "content": "<p>It's a bit silly to have an entire hash table for a single entry, effectively.</p>",
+        "id": 263933301,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638829206
+    },
+    {
+        "content": "<p>I guess it's like this because queries are so macro-ified?</p>",
+        "id": 263933321,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638829219
+    },
+    {
+        "content": "<p>There is now a macro to specify how the results should be stored :) It's the <code>storage()</code> directive in rustc_middle/query/mod.rs.</p>",
+        "id": 263935139,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1638830391
+    },
+    {
+        "content": "<p>I guess nobody really noticed the perf impact.</p>",
+        "id": 263935206,
+        "sender_full_name": "cjgillot",
+        "timestamp": 1638830427
+    },
+    {
+        "content": "<p>I tried addressing this in <a href=\"https://github.com/rust-lang/rust/pull/86119\">https://github.com/rust-lang/rust/pull/86119</a> but the perf results were disappointing</p>",
+        "id": 263936806,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1638831457
+    },
+    {
+        "content": "<p>I'll rebase and re-run it to see if anything has changed</p>",
+        "id": 263936842,
+        "sender_full_name": "Aaron Hill",
+        "timestamp": 1638831483
+    },
+    {
+        "content": "<p>Still seemed like a net win, albeit a small one. I wouldn't necessarily expect a big win based on my measurements, but I was certainly curious about how/why null-hashing was happening <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+        "id": 263940012,
+        "sender_full_name": "nnethercote",
+        "timestamp": 1638833628
+    }
+]

@@ -1,0 +1,128 @@
+[
+    {
+        "content": "<p>So the PR <a href=\"https://github.com/rust-lang/rust/pull/55517\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/pull/55517\">https://github.com/rust-lang/rust/pull/55517</a> makes <em>some</em> attempt to give better diagnostics around <code>for&lt;'a&gt;</code> bounds, but there's still lots of room to go.</p>\n<p>This feels like an area where I'd love to brainstorm how best to present things.</p>",
+        "id": 147980489,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542648023
+    },
+    {
+        "content": "<p>One thing I found is that we need to do a much better job tracking \"how we got to this constraint\"</p>",
+        "id": 147980502,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542648042
+    },
+    {
+        "content": "<p>Example of <a href=\"https://github.com/rust-lang/rust/blob/aae6a305691671ec0b846b0409f9136ffeb7b991/src/test/ui/hrtb/hrtb-exists-forall-trait-invariant.stderr\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/aae6a305691671ec0b846b0409f9136ffeb7b991/src/test/ui/hrtb/hrtb-exists-forall-trait-invariant.stderr\">an error for which I would give a \"B\" grade</a>, roughly:</p>\n<div class=\"codehilite\"><pre><span></span>error: implementation of `Trait` is not general enough\n  --&gt; $DIR/hrtb-exists-forall-trait-invariant.rs:28:5\n   |\nLL |     foo::&lt;()&gt;(); //~ ERROR not general enough\n   |     ^^^^^^^^^\n   |\n   = note: Due to a where-clause on `foo`,\n   = note: `()` must implement `Trait&lt;for&lt;&#39;b&gt; fn(std::cell::Cell&lt;&amp;&#39;b u32&gt;)&gt;`\n   = note: but `()` only implements `Trait&lt;fn(std::cell::Cell&lt;&amp;&#39;0 u32&gt;)&gt;` for some lifetime `&#39;0`\n\nerror: aborting due to previous error\n</pre></div>",
+        "id": 147980531,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542648090
+    },
+    {
+        "content": "<p>Example where I felt at a loss as to <a href=\"https://github.com/rust-lang/rust/blob/aae6a305691671ec0b846b0409f9136ffeb7b991/src/test/ui/hrtb/hrtb-exists-forall-fn.stderr\" target=\"_blank\" title=\"https://github.com/rust-lang/rust/blob/aae6a305691671ec0b846b0409f9136ffeb7b991/src/test/ui/hrtb/hrtb-exists-forall-fn.stderr\">how to do better without having better causal information</a>:</p>\n<div class=\"codehilite\"><pre><span></span>error[E0308]: mismatched types\n  --&gt; $DIR/hrtb-exists-forall-fn.rs:17:34\n   |\nLL |     let _: for&lt;&#39;b&gt; fn(&amp;&#39;b u32) = foo(); //~ ERROR mismatched types\n   |                                  ^^^^^ one type is more general than the other\n   |\n   = note: expected type `for&lt;&#39;b&gt; fn(&amp;&#39;b u32)`\n              found type `fn(&amp;u32)`\n\nerror: aborting due to previous error\n\nFor more information about this error, try `rustc --explain E0308`.\n</pre></div>",
+        "id": 147980593,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542648142
+    },
+    {
+        "content": "<p>For the first case, something like this reads a little clearer to me, though it's a tough one:</p>\n<div class=\"codehilite\"><pre><span></span>error: implementation of `Trait` is not general enough\n  --&gt; $DIR/hrtb-exists-forall-trait-invariant.rs:28:5\n   |\nLL |     foo::&lt;()&gt;(); //~ ERROR not general enough\n   |     ^^^^^^^^^\n   |\n   = note: `foo` expects generic type `T` to impl `fn(std::cell::Cell&lt;&amp;&#39;b u32&gt;)` for any lifetime `&#39;b`...\n   = note: ...however, `()` implements `Trait` where `T` is `fn(std::cell::Cell&lt;&amp;&#39;b u32&gt;)` for some fixed...\n   = note: ...lifetime `&#39;a` - `&#39;a` cannot simultaneously be fixed and equal to any given lifetime `&#39;b`.\n\nerror: aborting due to previous error\n</pre></div>",
+        "id": 147981659,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1542649369
+    },
+    {
+        "content": "<p>Taking a similar idea for the second case:</p>\n<div class=\"codehilite\"><pre><span></span>error[E0308]: mismatched types\n  --&gt; $DIR/hrtb-exists-forall-fn.rs:17:34\n   |\nLL |     let _: for&lt;&#39;b&gt; fn(&amp;&#39;b u32) = foo(); //~ ERROR mismatched types\n   |                                  ^^^^^ one type is more general than the other\n   |\n   = note: expected type `fn(&amp;&#39;b u32)` for any given lifetime `&#39;b` but `foo` is generic over...\n   = note: ...a concrete lifetime `&#39;a`. for some invocation of `foo`, `&#39;a` takes on a fixed lifetime...\n   = note: ...and so returns `fn(&amp;&#39;a u32)` for that fixed lifetime but is being stored into a variable...\n   = note: ...where `&#39;a` would need to equal to any given lifetime `&#39;b`.\n\nerror: aborting due to previous error\n</pre></div>",
+        "id": 147982255,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1542650095
+    },
+    {
+        "content": "<p>Neither is perfect, but maybe it'll inspire a better idea.</p>",
+        "id": 147982264,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1542650106
+    },
+    {
+        "content": "<blockquote>\n<p><code>foo</code> expects generic type <code>T</code> to impl <code>fn(std::cell::Cell&lt;&amp;'b u32&gt;)</code> for any lifetime <code>'b</code>...</p>\n</blockquote>\n<p>That doesn't quite sound right to me. That is, <code>()</code> is required to implement the trait <code>Trait&lt;X&gt;</code> for some type <code>X</code>, where the type <code>X</code> is <code>for&lt;'b&gt; fn(Cell&lt;&amp;'b u32)</code>.</p>\n<p>In other words, I'm not sure what the <code>T</code> is in your message, but whatever it is it cannot \"implement\" <code>fn</code>, as that is a type, not a trait.</p>\n<p>Still, I think there is room for improvement, and the terms \"any lifetime\" and \"some fixed\" are perhaps good choices.</p>",
+        "id": 147990578,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542657556
+    },
+    {
+        "content": "<p>Yeah, my wording is a little off. I tried to hide the <code>for&lt;'a&gt;</code> part and write what that meant in words, and call the rest <code>T</code> (which obviously wouldn't work in an actual error). I think the key thing I felt was beneficial was trying to explain better why the one type is less general - I did that through the \"it is/becomes some fixed thing\" type of wording.</p>",
+        "id": 147991026,
+        "sender_full_name": "davidtwco",
+        "timestamp": 1542657921
+    },
+    {
+        "content": "<p>part of the problem here is that we have to \"soup up\" the data we have at hand to really be able to tell what happened</p>",
+        "id": 147992968,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542659641
+    },
+    {
+        "content": "<p>but it's good to brainstorm what we want the message to be first</p>",
+        "id": 147993020,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542659649
+    },
+    {
+        "content": "<p>and then figure out how to get the data we need</p>",
+        "id": 147993025,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542659652
+    },
+    {
+        "content": "<p>explaining bindings like this is interesting: it feels particularly hard, although I don't think it's particularly hard for people to understand when explained well</p>",
+        "id": 147993048,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1542659678
+    },
+    {
+        "content": "<p>Has anyone considered factoring out diagnostics into its own crate in the library? Parts of it are quite a mess right now.</p>",
+        "id": 152047499,
+        "sender_full_name": "Alexander Regueiro",
+        "timestamp": 1545069803
+    },
+    {
+        "content": "<p>how would such a new crate improve the mess?</p>",
+        "id": 152060081,
+        "sender_full_name": "Jake Goulding",
+        "timestamp": 1545080342
+    },
+    {
+        "content": "<p>Which part of diagnostics would you want as a separate crate?</p>",
+        "id": 152067619,
+        "sender_full_name": "Esteban Küber",
+        "timestamp": 1545085858
+    },
+    {
+        "content": "<p>I've definitely thought about it :)</p>",
+        "id": 152136880,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1545165903
+    },
+    {
+        "content": "<p>there exists e.g. <a href=\"https://crates.io/crates/codemap-diagnostic\" target=\"_blank\" title=\"https://crates.io/crates/codemap-diagnostic\">https://crates.io/crates/codemap-diagnostic</a></p>",
+        "id": 152136926,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1545165948
+    },
+    {
+        "content": "<p>but I would want us to try to rethink some details of our impl more deeply</p>",
+        "id": 152136987,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1545165971
+    },
+    {
+        "content": "<p>still, I think that having separate crates with unit tests etc can be great for maintenance</p>",
+        "id": 152137001,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1545165987
+    },
+    {
+        "content": "<p>(but it also induces some burden, our processes aren't always the best here)</p>",
+        "id": 152137016,
+        "sender_full_name": "nikomatsakis",
+        "timestamp": 1545165999
+    }
+]
